@@ -183,7 +183,7 @@
 "name": "[W6 + FIXES]+1 Shrink per Step",
 "place_id": 91695551099066,
 "thumb": "https://tr.rbxcdn.com/180DAY-306b3f57ae78d752746a811b337a3cc1/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:55:58.8262492Z"
+"updated": "2026-10-02T21:12:07.4006393Z"
 },
 "10013279162": {
 "created": "2026-04-10T01:21:50.935Z",
@@ -570,7 +570,7 @@
 "name": "Samurai DUELS",
 "place_id": 72248722616845,
 "thumb": "https://tr.rbxcdn.com/180DAY-fcabeeb3c7a1e975c1fe5235a8ab8c66/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:52:21.0164643Z"
+"updated": "2026-10-02T21:12:25.8030812Z"
 },
 "10059591740": {
 "created": "2026-04-20T02:17:30.874Z",
@@ -1109,7 +1109,7 @@
 "name": "🐮 My Moo Farm",
 "place_id": 134807373415131,
 "thumb": "https://tr.rbxcdn.com/180DAY-1a40246f4af37b903c4c110e57766d9d/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T19:12:30.6592897Z"
+"updated": "2026-10-02T21:01:12.0466055Z"
 },
 "10110316965": {
 "created": "2026-05-02T01:44:04.277Z",
@@ -1681,7 +1681,7 @@
 "name": "👑 Kingdom Architect Tycoon",
 "place_id": 105373497661352,
 "thumb": "https://tr.rbxcdn.com/180DAY-924e4e6c782dd872d782a41edeb7814b/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:52:42.353587Z"
+"updated": "2026-10-02T21:12:58.2562087Z"
 },
 "10165276442": {
 "created": "2026-05-14T01:03:37.149Z",
@@ -1885,7 +1885,7 @@
 "genre": "All",
 "genre_l1": "Obby & Platformer",
 "genre_l2": "",
-"icon": "https://tr.rbxcdn.com/180DAY-628d9d28c818e405050b2945270ee5c0/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-c5caf20c8f26d9797e7ebf0a3568cacf/256/256/Image/Webp/noFilter",
 "max_players": 16,
 "name": "step carefully",
 "place_id": 104808235862933,
@@ -2657,7 +2657,7 @@
 "name": "World at War ",
 "place_id": 92422478989816,
 "thumb": "https://tr.rbxcdn.com/180DAY-53ca9d51f791ac2c464d514c77a98605/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T19:12:03.7932875Z"
+"updated": "2026-10-02T21:04:07.1030707Z"
 },
 "10247712813": {
 "created": "2026-05-30T20:52:48.333Z",
@@ -2866,7 +2866,7 @@
 "genre": "All",
 "genre_l1": "Action",
 "genre_l2": "Battlegrounds & Fighting",
-"icon": "https://tr.rbxcdn.com/180DAY-5e3cceab6caf8a9efe7360efa4febda4/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-3d750f99df05632feb46292cba52abbd/256/256/Image/Webp/noFilter",
 "max_players": 12,
 "name": "[X2 XP] Command An Army",
 "place_id": 101770480176177,
@@ -3204,7 +3204,7 @@
 "genre": "All",
 "genre_l1": "Party & Casual",
 "genre_l2": "Minigame",
-"icon": "https://tr.rbxcdn.com/180DAY-fe774b59ceab6d05784719740ef23330/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-6699e021b9a0d8d5c035e4c0ab565563/256/256/Image/Webp/noFilter",
 "max_players": 16,
 "name": "[TAG] Meow Madness",
 "place_id": 85659091508300,
@@ -3384,7 +3384,7 @@
 "name": "HELLHOLE [🧟‍♂️]",
 "place_id": 84568117169118,
 "thumb": "https://tr.rbxcdn.com/180DAY-355f05281b2444cda95b528f7b264274/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:59:09.8037214Z"
+"updated": "2026-10-02T21:15:16.1723523Z"
 },
 "10310095331": {
 "created": "2026-06-12T02:47:13.271Z",
@@ -3469,7 +3469,7 @@
 "genre": "All",
 "genre_l1": "Simulation",
 "genre_l2": "Tycoon",
-"icon": "https://tr.rbxcdn.com/180DAY-391705bc77846b2fb84a5f59e491b4da/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-ed7dd1852a869f5543113a155760a8ef/256/256/Image/Webp/noFilter",
 "max_players": 4,
 "name": "🌷 My Flower Shop",
 "place_id": 93028168925975,
@@ -3503,12 +3503,12 @@
 "genre": "All",
 "genre_l1": "Party & Casual",
 "genre_l2": "Childhood Game",
-"icon": "https://tr.rbxcdn.com/180DAY-00db0b73c0bf892fa58209bdce747f70/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-3dac708ac354e3ae7a3fd72f22745da5/256/256/Image/Webp/noFilter",
 "max_players": 20,
 "name": "[🖌️] Paint to Hide and Seek!",
 "place_id": 138205182571367,
 "thumb": "https://tr.rbxcdn.com/180DAY-921fc407ba4a3ed63787991e730b98f1/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:58:00.277444Z"
+"updated": "2026-10-02T21:14:09.5145485Z"
 },
 "10329995185": {
 "created": "2026-06-14T23:09:13.07Z",
@@ -3638,7 +3638,7 @@
 "genre": "All",
 "genre_l1": "Roleplay & Avatar Sim",
 "genre_l2": "",
-"icon": "https://tr.rbxcdn.com/180DAY-44d122b726b51d3cd0bc95a2cc50a4b7/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-8f523d5a9e3b41931d87cc61d21b2e0b/256/256/Image/Webp/noFilter",
 "max_players": 20,
 "name": "[🧀🍝🍯] Stream a Mukbang!",
 "place_id": 131234167969699,
@@ -3893,7 +3893,7 @@
 "genre": "All",
 "genre_l1": "Sports & Racing",
 "genre_l2": "Sports",
-"icon": "https://tr.rbxcdn.com/180DAY-e9a21667e2394bdf67dfdc9e43dcf834/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-b1c7c8a3a634ca1ad6b2fd031a6bd1c3/256/256/Image/Webp/noFilter",
 "max_players": 8,
 "name": "[UPDATE] Beatball",
 "place_id": 105452889569708,
@@ -4384,7 +4384,7 @@
 "name": "[🐝] Build a Garden Tower",
 "place_id": 115035699922620,
 "thumb": "https://tr.rbxcdn.com/180DAY-5d1ce7b724e47021c52ba5bcb2bbab2e/768/432/Image/Webp/noFilter",
-"updated": "2026-09-29T16:04:04.49Z"
+"updated": "2026-10-02T21:05:49.280025Z"
 },
 "10406853972": {
 "created": "2026-06-28T00:04:27.012Z",
@@ -4443,6 +4443,23 @@
 "place_id": 90086669327265,
 "thumb": "https://tr.rbxcdn.com/180DAY-3758fac8d45edffd05e67a16181e34af/768/432/Image/Webp/noFilter",
 "updated": "2026-10-02T17:07:58.2825665Z"
+},
+"10411121857": {
+"created": "2026-06-28T14:30:32.524Z",
+"creator": "dreamysdead",
+"creator_type": "User",
+"creator_verified": true,
+"description": "Welcome to DELTARUNE BATTLES!\n\nControls:\nZ/K - Confirm\nX/L - Cancel\nC/M - Menu\n\nEnter the Dojo in Castle Town to fight the enemies!\nYou can play against your party by opening the Party menu with more than one person in your party!\n\nDELTARUNE Battles is a fangame of DELTARUNE developed by Toby Fox.",
+"first_seen": "2026-10-02T21:13Z",
+"genre": "All",
+"genre_l1": "Action",
+"genre_l2": "Battlegrounds & Fighting",
+"icon": "https://tr.rbxcdn.com/180DAY-ed1e72530ac3846cd2f4540d232d6daa/256/256/Image/Webp/noFilter",
+"max_players": 25,
+"name": "DELTARUNE Battles [PINK + KING]",
+"place_id": 138225905240404,
+"thumb": "https://tr.rbxcdn.com/180DAY-5cbf32746249f88e3406a06b0a46b37d/768/432/Image/Webp/noFilter",
+"updated": "2026-09-23T01:59:02.096Z"
 },
 "10415694629": {
 "created": "2026-06-29T09:42:54.776Z",
@@ -4765,7 +4782,7 @@
 "genre": "All",
 "genre_l1": "Survival",
 "genre_l2": "",
-"icon": "https://tr.rbxcdn.com/180DAY-bd6a5c7e12cb21998de5818239bf198f/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-911dff46b0e55d3d7076cc22aa9ab7ea/256/256/Image/Webp/noFilter",
 "max_players": 24,
 "name": "[⌛] Anomaly Cafe ",
 "place_id": 121781732399469,
@@ -4787,7 +4804,7 @@
 "genre": "All",
 "genre_l1": "Simulation",
 "genre_l2": "Tycoon",
-"icon": "https://tr.rbxcdn.com/180DAY-5cf06bf3a4b241bbeba1e701fca5d106/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-500ba57eac53dc7de27a6c2ba05179d1/256/256/Image/Webp/noFilter",
 "max_players": 4,
 "name": "[✨] Greedy Growers 🌱",
 "place_id": 74102906764176,
@@ -4865,7 +4882,7 @@
 "name": "Paint ANYTHING",
 "place_id": 136055963655040,
 "thumb": "https://tr.rbxcdn.com/180DAY-3b17f74ec0e99f40e63b94c22cc2aa36/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:52:23.211774Z"
+"updated": "2026-10-02T21:12:30.0348436Z"
 },
 "10452740285": {
 "created": "2026-07-05T15:25:48.632Z",
@@ -4950,7 +4967,7 @@
 "name": "[⏰SOON]🚪Survive Verity in Area 51🔦",
 "place_id": 74716719697996,
 "thumb": "https://tr.rbxcdn.com/180DAY-2f3aacd0df1a47fb532c47ef576c4401/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:54:09.6459624Z"
+"updated": "2026-10-02T21:06:17.2391263Z"
 },
 "10455741150": {
 "created": "2026-07-06T03:52:15.069Z",
@@ -5108,7 +5125,7 @@
 "name": "💀 House Tower Defense 2 ",
 "place_id": 131367064230486,
 "thumb": "https://tr.rbxcdn.com/180DAY-25832774b10904edaa9881d73a25db49/768/432/Image/Webp/noFilter",
-"updated": "2026-10-01T09:05:37.9100078Z"
+"updated": "2026-10-01T09:05:37.91Z"
 },
 "10466601694": {
 "created": "2026-07-08T05:17:27.772Z",
@@ -5310,7 +5327,7 @@
 "genre": "All",
 "genre_l1": "Simulation",
 "genre_l2": "",
-"icon": "https://tr.rbxcdn.com/180DAY-dc593b572a696bc5a26b31f45eb44e2e/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-e3d40e2b7b4b7c8476437c5a1e34c015/256/256/Image/Webp/noFilter",
 "max_players": 35,
 "name": "Roblox Stock Exchange 2",
 "place_id": 110527353762049,
@@ -5711,7 +5728,7 @@
 "name": "Deep Fishing🎣",
 "place_id": 132239307080610,
 "thumb": "https://tr.rbxcdn.com/180DAY-f6894a40d24541570fbc03fa9b034d53/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T16:53:46.7600336Z"
+"updated": "2026-10-02T21:13:18.8365072Z"
 },
 "10528250136": {
 "created": "2026-07-19T04:03:52.885Z",
@@ -5825,7 +5842,7 @@
 "genre": "All",
 "genre_l1": "Simulation",
 "genre_l2": "Incremental Simulator",
-"icon": "https://tr.rbxcdn.com/180DAY-c8393d96911c471f01e7fe2cb4d91f5d/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-015ada37b662f7e416723bc91831e6c5/256/256/Image/Webp/noFilter",
 "max_players": 8,
 "name": "[🗻] Mine Antarctica",
 "place_id": 138686218420016,
@@ -6102,7 +6119,7 @@
 "name": "[BOSS] Steal A Verity!",
 "place_id": 107164765081465,
 "thumb": "https://tr.rbxcdn.com/180DAY-ddc2e70ad6c192c8e3036855b609ea97/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T07:43:07.6829166Z"
+"updated": "2026-10-02T21:03:41.4272739Z"
 },
 "10551595617": {
 "first_seen": "2026-08-15T09:29Z",
@@ -6272,7 +6289,7 @@
 "name": "[UPD] Mog or Die",
 "place_id": 130641102725850,
 "thumb": "https://tr.rbxcdn.com/180DAY-d692aef0e7a4b4b7134901476fd37d5a/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:54:44.7521262Z"
+"updated": "2026-10-02T21:10:51.6750187Z"
 },
 "10575619152": {
 "created": "2026-07-26T23:03:11.729Z",
@@ -6517,7 +6534,7 @@
 "name": "That Freekick Challenge (TFC)",
 "place_id": 118298168947099,
 "thumb": "https://tr.rbxcdn.com/180DAY-ec15e90b1831534ca1accef117ad5428/768/432/Image/Webp/noFilter",
-"updated": "2026-09-29T17:11:30.153Z"
+"updated": "2026-10-02T20:59:34.9443663Z"
 },
 "10601447895": {
 "created": "2026-07-31T02:59:34.139Z",
@@ -6546,7 +6563,7 @@
 "genre": "All",
 "genre_l1": "Obby & Platformer",
 "genre_l2": "Classic Obby",
-"icon": "https://tr.rbxcdn.com/180DAY-129fe3cde7a9444248bb39ea4fa1ce95/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-795186924eaa1618028d5d4009928e72/256/256/Image/Webp/noFilter",
 "max_players": 24,
 "name": "Clash's Glitch Obby 2",
 "place_id": 85387381843881,
@@ -7030,7 +7047,7 @@
 "name": "Build a Dino Defense 🦖",
 "place_id": 138949299666923,
 "thumb": "https://tr.rbxcdn.com/180DAY-a2d329b4ac6be4c42ef6ea0ed229389c/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:58:54.7915Z"
+"updated": "2026-10-02T21:15:10.5359675Z"
 },
 "10675117523": {
 "created": "2026-08-10T19:33:25.43Z",
@@ -7064,7 +7081,7 @@
 "name": "DELTARUNE Fight [UPDATE]",
 "place_id": 102053304052438,
 "thumb": "https://tr.rbxcdn.com/180DAY-fd1a0771c1a0ec9668731f7f12a127c5/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:22:57.1631068Z"
+"updated": "2026-10-02T21:07:00.8391574Z"
 },
 "10680768992": {
 "first_seen": "2026-10-02T19:54Z",
@@ -7381,7 +7398,7 @@
 "name": "100 Days on Chunk ",
 "place_id": 121780816998126,
 "thumb": "https://tr.rbxcdn.com/180DAY-fdcf78c8bc3a064eef1ebb42c3e611d8/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:57:02.4514556Z"
+"updated": "2026-10-02T21:13:09.4291674Z"
 },
 "107172930": {
 "created": "2015-06-27T15:30:12.92Z",
@@ -7534,7 +7551,7 @@
 "name": "[💎 CRYSTAL] Jump To Steal An Egg",
 "place_id": 106383201135975,
 "thumb": "https://tr.rbxcdn.com/180DAY-f9521ca6509b5073657fdc8c23f554d5/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T19:28:04.1040691Z"
+"updated": "2026-10-02T21:12:22.2137148Z"
 },
 "10737256446": {
 "created": "2026-08-18T16:35:48.206Z",
@@ -7834,7 +7851,7 @@
 "name": "Build and Conquer",
 "place_id": 103767961452227,
 "thumb": "https://tr.rbxcdn.com/180DAY-356fa4243e17693bed8309d4b55eaae1/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:56:29.9881385Z"
+"updated": "2026-10-02T21:12:41.260129Z"
 },
 "10757498504": {
 "created": "2026-08-23T20:29:03.499Z",
@@ -8213,7 +8230,7 @@
 "name": "Pixel Conquest",
 "place_id": 138110382920220,
 "thumb": "https://tr.rbxcdn.com/180DAY-0d58034981103ec93ca1b5f2b840e628/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:59:33.1864524Z"
+"updated": "2026-10-02T21:11:40.5610501Z"
 },
 "10764300350": {
 "created": "2026-08-29T06:16:47.441Z",
@@ -8298,7 +8315,7 @@
 "name": "SKI (ALPHA)",
 "place_id": 92722005168254,
 "thumb": "https://tr.rbxcdn.com/180DAY-008b58e54a6a19b850807865aead28a6/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:58:12.7039163Z"
+"updated": "2026-10-02T21:14:36.5389062Z"
 },
 "10764839604": {
 "created": "2026-09-02T12:21:37.777Z",
@@ -8371,7 +8388,7 @@
 "name": "Build the Pyramid!",
 "place_id": 123720558354386,
 "thumb": "https://tr.rbxcdn.com/180DAY-fe97c95391ddf886dd7c56d35081c5e3/768/432/Image/Webp/noFilter",
-"updated": "2026-10-01T08:58:36.5297163Z"
+"updated": "2026-10-01T08:58:36.529Z"
 },
 "10765013362": {
 "created": "2026-09-03T20:36:04.291233Z",
@@ -8735,7 +8752,7 @@
 "name": "[🛠️] CLONE BUILDERS!",
 "place_id": 98456203230140,
 "thumb": "https://tr.rbxcdn.com/180DAY-4711689f9116e5fdf38e71da41d63ae3/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:52:08.4508402Z"
+"updated": "2026-10-02T21:12:24.3241833Z"
 },
 "10766725034": {
 "created": "2026-09-16T20:53:43.849Z",
@@ -8752,7 +8769,7 @@
 "name": "Kidnap And Jail",
 "place_id": 72105128013629,
 "thumb": "https://tr.rbxcdn.com/180DAY-20982f822da2b353ec7dba0d98bed861/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:05:15.647895Z"
+"updated": "2026-10-02T21:05:23.1443131Z"
 },
 "1087859240": {
 "created": "2019-03-29T21:15:32.453Z",
@@ -9437,7 +9454,7 @@
 "name": "🍂 Saber Simulator",
 "place_id": 3823781113,
 "thumb": "https://tr.rbxcdn.com/180DAY-95f73463824ffcfc90cd0476ab42bea4/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T17:07:18.5044634Z"
+"updated": "2026-10-02T20:59:25.5249392Z"
 },
 "1315450727": {
 "created": "2019-09-08T11:56:44.107Z",
@@ -9857,7 +9874,7 @@
 "genre": "Fighting",
 "genre_l1": "Action",
 "genre_l2": "Open World Action",
-"icon": "https://tr.rbxcdn.com/180DAY-4a5f7e1c78794d54142faa33a7364e98/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-513e7206bc325f0444ce6f0c059a0ec7/256/256/Image/Webp/noFilter",
 "max_players": 30,
 "name": "[x2⚙️] Criminality",
 "place_id": 4588604953,
@@ -10119,7 +10136,7 @@
 "genre": "All",
 "genre_l1": "Action",
 "genre_l2": "Battlegrounds & Fighting",
-"icon": "https://tr.rbxcdn.com/180DAY-d0ae36b804d578b86ac1e6f4fd4b37e5/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-5ea46e5c8bf61ad4e04f52e227b0afd4/256/256/Image/Webp/noFilter",
 "max_players": 8,
 "name": "Full Metal Kaiju Hunters",
 "place_id": 4863916053,
@@ -10204,7 +10221,7 @@
 "genre": "Town and City",
 "genre_l1": "Roleplay & Avatar Sim",
 "genre_l2": "Life",
-"icon": "https://tr.rbxcdn.com/180DAY-eb78f2abb7cb21ca195816fc6ece1fc6/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-5c2b750e21e3a16d7bc1355d9ba3cb9d/256/256/Image/Webp/noFilter",
 "max_players": 30,
 "name": "Brookhaven 🏡RP",
 "place_id": 4924922222,
@@ -10583,7 +10600,7 @@
 "name": "[Su-25] Aircraft Carrier [BETA] ",
 "place_id": 5140123832,
 "thumb": "https://tr.rbxcdn.com/180DAY-c5a0c2af127d1c2bddd30ff3c9941cc6/768/432/Image/Webp/noFilter",
-"updated": "2026-09-30T20:47:30.926Z"
+"updated": "2026-10-02T21:11:47.4490441Z"
 },
 "1794056685": {
 "created": "2020-06-08T16:04:42.053Z",
@@ -10719,7 +10736,7 @@
 "genre": "Sports",
 "genre_l1": "Sports & Racing",
 "genre_l2": "Sports",
-"icon": "https://tr.rbxcdn.com/180DAY-87e1970658ae68cef303deee22e83582/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-6347fec25aefd822a36cc1634beb6f71/256/256/Image/Webp/noFilter",
 "max_players": 12,
 "name": "[🏈S1] NFL Universe Football",
 "place_id": 2338325648,
@@ -11501,7 +11518,7 @@
 "name": "Granny",
 "place_id": 6000468131,
 "thumb": "https://tr.rbxcdn.com/180DAY-569b089e33b21ee6103404f20aa457ba/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:50:34.8157641Z"
+"updated": "2026-10-02T20:58:37.8068996Z"
 },
 "2171758161": {
 "created": "2020-11-28T02:57:36.117Z",
@@ -12004,7 +12021,7 @@
 "genre": "Adventure",
 "genre_l1": "Simulation",
 "genre_l2": "Vehicle Sim",
-"icon": "https://tr.rbxcdn.com/180DAY-cc39e109df58d6eadd5c75a5773ad24e/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-10fbcde33922f110230ff50a305fb31c/256/256/Image/Webp/noFilter",
 "max_players": 15,
 "name": "Off-Roading Epic",
 "place_id": 6366329104,
@@ -12356,7 +12373,7 @@
 "name": "[MOBILE!📱]Prior Extinction - Dinosaur Survival!",
 "place_id": 6698800091,
 "thumb": "https://tr.rbxcdn.com/180DAY-90184c4966d92bca536d383fc5c351c0/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T16:56:39.8390071Z"
+"updated": "2026-10-02T21:04:55.5898014Z"
 },
 "2528641125": {
 "created": "2021-04-19T00:35:32.59Z",
@@ -12475,7 +12492,7 @@
 "name": "Strongman Simulator",
 "place_id": 6766156863,
 "thumb": "https://tr.rbxcdn.com/180DAY-64f5952ea6b5069da6d93a0a35167884/768/432/Image/Webp/noFilter",
-"updated": "2026-10-01T09:03:05.5085968Z"
+"updated": "2026-10-01T09:03:05.508Z"
 },
 "2577700536": {
 "created": "2021-05-09T17:23:15.327Z",
@@ -12939,7 +12956,7 @@
 "genre": "Fighting",
 "genre_l1": "Simulation",
 "genre_l2": "Tycoon",
-"icon": "https://tr.rbxcdn.com/180DAY-a1275a03a8a38cd947182868ff921445/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-3256ad139137ca50c15ee2db1bf9650a/256/256/Image/Webp/noFilter",
 "max_players": 12,
 "name": "Military Tycoon ®",
 "place_id": 7180042682,
@@ -13233,7 +13250,7 @@
 "name": "(Testing) Squid Game X",
 "place_id": 7577961216,
 "thumb": "https://tr.rbxcdn.com/180DAY-c1f7f620281d6a776b1c08dc822a29f2/768/432/Image/Webp/noFilter",
-"updated": "2026-10-01T09:01:13.4656368Z"
+"updated": "2026-10-01T09:01:13.465Z"
 },
 "2949408954": {
 "created": "2021-09-28T15:26:07.707Z",
@@ -13697,7 +13714,7 @@
 "name": "Croydon: London Bus Simulator",
 "place_id": 8265622251,
 "thumb": "https://tr.rbxcdn.com/180DAY-d5527d5cf459eb527f56a64730b91c58/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:16:57.8615695Z"
+"updated": "2026-10-02T21:07:10.6904538Z"
 },
 "3171190217": {
 "created": "2021-12-16T21:40:50.243Z",
@@ -14092,7 +14109,7 @@
 "name": "[HUGE UPDATE] Stand Upright: Rebooted",
 "place_id": 8540168650,
 "thumb": "https://tr.rbxcdn.com/180DAY-c540f57fceb0f69443328feb5533bfb2/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:57:47.9669182Z"
+"updated": "2026-10-02T21:05:57.2084339Z"
 },
 "3258873704": {
 "created": "2022-01-15T04:53:11.99Z",
@@ -14245,7 +14262,7 @@
 "name": "[SCPGUARD] Marvellous Smackdown",
 "place_id": 8657766101,
 "thumb": "https://tr.rbxcdn.com/180DAY-37ea9ffe965c2bfd1c671ce7ab027374/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:56:34.752912Z"
+"updated": "2026-10-02T21:09:00.6511916Z"
 },
 "3308103880": {
 "created": "2022-02-01T20:46:41.673Z",
@@ -14630,7 +14647,7 @@
 "name": "Peroxide [Update!]",
 "place_id": 9096881148,
 "thumb": "https://tr.rbxcdn.com/180DAY-e7f44a8b2564e076c8cfd0ba8341473c/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T11:36:23.3063249Z"
+"updated": "2026-10-02T21:12:24.9834782Z"
 },
 "3420059569": {
 "created": "2022-03-14T10:00:57.1Z",
@@ -14930,17 +14947,17 @@
 "creator": "Tower Defense X",
 "creator_type": "Group",
 "creator_verified": true,
-"description": "Tower Battles II Collab is here. Raze the void in their world.\n\nAll out Tower Warfare! Deploy your towers from the air, land, and sea. Rival against powerful enemies and bosses before they destroy your towers.\n\nJoin the group for bonus starting cash in your games!",
+"description": "Tower Battles II Collab is here. Raze the void in their world. Limited time you can get 50% boost on battle pass tokens!\n\nAll out Tower Warfare! Deploy your towers from the air, land, and sea. Rival against powerful enemies and bosses before they destroy your towers.\n\nJoin the group for bonus starting cash in your games!",
 "first_seen": "2026-10-02T19:54Z",
 "genre": "Fighting",
 "genre_l1": "Strategy",
 "genre_l2": "Tower Defense",
 "icon": "https://tr.rbxcdn.com/180DAY-cc22ac8ddc016e5f6e5b809c8b65c1b4/256/256/Image/Webp/noFilter",
 "max_players": 50,
-"name": "TB II COLLAB | Tower Defense X: BETA",
+"name": "[🟣50%] TB II | Tower Defense X: BETA",
 "place_id": 9503261072,
 "thumb": "https://tr.rbxcdn.com/180DAY-a74a95be7b6541cd0c0995333645020e/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T06:30:15.3353839Z"
+"updated": "2026-10-02T20:59:56.6031508Z"
 },
 "3551414857": {
 "created": "2022-05-03T12:32:29.36Z",
@@ -17527,7 +17544,7 @@
 "name": "[💥] Heroes Battlegrounds",
 "place_id": 13076380114,
 "thumb": "https://tr.rbxcdn.com/180DAY-c2134d77865609146932437200b1418b/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T10:56:10.8953397Z"
+"updated": "2026-10-02T21:06:40.7687975Z"
 },
 "4571439504": {
 "created": "2023-04-11T18:35:34.09Z",
@@ -18469,7 +18486,7 @@
 "name": "Terminal [Escape Room]",
 "place_id": 14026026722,
 "thumb": "https://tr.rbxcdn.com/180DAY-4e8df9de836e91eabc46ab93bf410263/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:54:40.1437851Z"
+"updated": "2026-10-02T21:04:25.521051Z"
 },
 "485929611": {
 "created": "2017-11-18T13:29:07.703Z",
@@ -18980,7 +18997,7 @@
 "name": "[MOBILE FIX] Bewitched",
 "place_id": 14449145868,
 "thumb": "https://tr.rbxcdn.com/180DAY-33a573c4b51be1cda628d78c4b88b62d/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:55:24.4829025Z"
+"updated": "2026-10-02T21:10:36.8284525Z"
 },
 "4991821731": {
 "created": "2023-08-16T01:41:16.65Z",
@@ -20680,7 +20697,7 @@
 "name": "Anime Vanguards: Wrathful Assault",
 "place_id": 16146832113,
 "thumb": "https://tr.rbxcdn.com/180DAY-64a091a75b4a67bfd15439b058a0b2da/768/432/Image/Webp/noFilter",
-"updated": "2026-09-26T13:57:41.183Z"
+"updated": "2026-10-02T21:13:32.347921Z"
 },
 "5580972377": {
 "created": "2024-01-28T18:36:04.97Z",
@@ -21389,7 +21406,7 @@
 "genre": "All",
 "genre_l1": "Simulation",
 "genre_l2": "Vehicle Sim",
-"icon": "https://tr.rbxcdn.com/180DAY-d3d23d1e388c913afece89e02392fe26/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-48fd45bca583db8cdb315035da8d8068/256/256/Image/Webp/noFilter",
 "max_players": 25,
 "name": "[UPD 3] West Coast, Florida",
 "place_id": 16927467487,
@@ -21817,7 +21834,7 @@
 "name": "[🏋️‍♂️] Gym League ",
 "place_id": 17450551531,
 "thumb": "https://tr.rbxcdn.com/180DAY-2b6463d731fa19bfd0503af7cb059b26/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T19:42:14.430345Z"
+"updated": "2026-10-02T21:02:37.9668881Z"
 },
 "597286316": {
 "first_seen": "2026-08-22T09:30Z",
@@ -21980,7 +21997,7 @@
 "name": "Nitro Car",
 "place_id": 17581668152,
 "thumb": "https://tr.rbxcdn.com/180DAY-87c643bfc8da5559b3b042f7a882682f/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:49:04.5631127Z"
+"updated": "2026-10-02T21:13:16.592219Z"
 },
 "6026405541": {
 "created": "2024-05-24T20:31:30.283Z",
@@ -22461,7 +22478,7 @@
 "genre": "Horror",
 "genre_l1": "Survival",
 "genre_l2": "",
-"icon": "https://tr.rbxcdn.com/180DAY-013bb3f67a982280055905d7b524a014/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-b007a1b79e693ec2d331b0de7c34ef3a/256/256/Image/Webp/noFilter",
 "max_players": 15,
 "name": "Hungry Pig",
 "place_id": 18183902003,
@@ -22824,7 +22841,7 @@
 "name": "Climb [1.8.9]",
 "place_id": 18500105193,
 "thumb": "https://tr.rbxcdn.com/180DAY-4c5f5b333aebc78873c88136cf1cf65e/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:50:34.3128879Z"
+"updated": "2026-10-02T21:09:58.5263506Z"
 },
 "6275120808": {
 "created": "2024-07-16T16:59:55.537Z",
@@ -22947,7 +22964,7 @@
 "name": "Death Order: Simon Says",
 "place_id": 18666738837,
 "thumb": "https://tr.rbxcdn.com/180DAY-d0b678899913e37b92a1b7ad68260bf1/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:54:57.3824376Z"
+"updated": "2026-10-02T21:07:07.6641684Z"
 },
 "6325068386": {
 "created": "2024-07-26T19:16:18.383Z",
@@ -24054,7 +24071,7 @@
 "genre": "All",
 "genre_l1": "Simulation",
 "genre_l2": "Incremental Simulator",
-"icon": "https://tr.rbxcdn.com/180DAY-ffab08b9f170d8c4a6cbe47294dfefec/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-88032d505de7e67ce97f439b0da6f3ab/256/256/Image/Webp/noFilter",
 "max_players": 24,
 "name": "[ 🪄🎩] Anime Card Clash",
 "place_id": 110829983956014,
@@ -24350,7 +24367,7 @@
 "genre": "All",
 "genre_l1": "Roleplay & Avatar Sim",
 "genre_l2": "",
-"icon": "https://tr.rbxcdn.com/180DAY-55e16438ce912c49ead1fe55ace45843/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-5f36f2f391fa0903bc7f1ad1368d8aac/256/256/Image/Webp/noFilter",
 "max_players": 40,
 "name": "Asylum Life 🔊",
 "place_id": 132352755769957,
@@ -24713,7 +24730,7 @@
 "name": "[🎃] Kingdom Life II",
 "place_id": 130713262844151,
 "thumb": "https://tr.rbxcdn.com/180DAY-146de344f9f5caa517e860c537667992/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:07:31.6556411Z"
+"updated": "2026-10-02T21:07:51.0019904Z"
 },
 "6920090082": {
 "created": "2024-12-14T19:55:32.827Z",
@@ -25102,7 +25119,7 @@
 "name": "[1 DAY] Crazy Skeleton RNG",
 "place_id": 114283239905753,
 "thumb": "https://tr.rbxcdn.com/180DAY-63c30bf8ff59ad622e65c28f24f63d7c/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:31:46.968115Z"
+"updated": "2026-10-02T21:12:15.3754046Z"
 },
 "7037902226": {
 "created": "2025-01-05T03:07:06.643Z",
@@ -25391,7 +25408,7 @@
 "name": "Naramo Nuclear Plant ",
 "place_id": 98626216952426,
 "thumb": "https://tr.rbxcdn.com/180DAY-95d61d5cb5af6bbe1504358fec51ac90/768/432/Image/Webp/noFilter",
-"updated": "2026-09-26T09:25:45.776Z"
+"updated": "2026-10-02T21:11:51.062417Z"
 },
 "7108384194": {
 "created": "2025-01-19T00:06:02.747Z",
@@ -27094,7 +27111,7 @@
 "genre": "All",
 "genre_l1": "Action",
 "genre_l2": "Open World Action",
-"icon": "https://tr.rbxcdn.com/180DAY-8388ede62e06da267bfa492b37d9324f/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-7d79f8f792ed7fb511eb85c177933cb7/256/256/Image/Webp/noFilter",
 "max_players": 50,
 "name": "RUNAWAYS [beta]",
 "place_id": 118418618261207,
@@ -27575,12 +27592,12 @@
 "genre": "All",
 "genre_l1": "Strategy",
 "genre_l2": "Tower Defense",
-"icon": "https://tr.rbxcdn.com/180DAY-99f6561bb03b702d0d5d61a0a8acc6a2/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-004d75208e103871f338f2045a292f17/256/256/Image/Webp/noFilter",
 "max_players": 20,
 "name": "[🎯] Garden Tower Defense 🌻",
 "place_id": 108533757090220,
 "thumb": "https://tr.rbxcdn.com/180DAY-5cdf91e7a673dac3be39b1f4b759ba8c/768/432/Image/Webp/noFilter",
-"updated": "2026-09-26T16:22:48.454Z"
+"updated": "2026-10-02T21:01:54.0567608Z"
 },
 "770538576": {
 "created": "2018-08-13T00:32:52.973Z",
@@ -29134,7 +29151,7 @@
 "name": "[BACKROOMS] Infinite Nights With Freddy (DOOM)",
 "place_id": 92415748858497,
 "thumb": "https://tr.rbxcdn.com/180DAY-bdc6a076b39aeff5bc4b53ce99219614/768/432/Image/Webp/noFilter",
-"updated": "2026-09-30T19:18:48.044Z"
+"updated": "2026-10-02T21:01:39.9606594Z"
 },
 "8209640691": {
 "first_seen": "2026-10-02T19:42Z",
@@ -29767,7 +29784,7 @@
 "name": "💥 War of 1812 Tower Defense",
 "place_id": 71629130314861,
 "thumb": "https://tr.rbxcdn.com/180DAY-43f0ecfeb98bd65a1521006de59b7c18/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T19:28:55.2998104Z"
+"updated": "2026-10-02T21:11:10.3739158Z"
 },
 "8446266018": {
 "created": "2025-08-15T16:09:44.083Z",
@@ -29994,6 +30011,23 @@
 "place_id": 140481779622210,
 "thumb": "https://tr.rbxcdn.com/180DAY-8afb81fec75906eb16b73fe875d58007/768/432/Image/Webp/noFilter",
 "updated": "2026-03-14T20:21:00.07Z"
+},
+"8507699752": {
+"created": "2025-08-22T03:41:43.383Z",
+"creator": "Poisoned Things",
+"creator_type": "Group",
+"creator_verified": false,
+"description": "You and your opponent poison a candy! 🧁🧪\n⚠️ Be careful not to pick the poisoned one...\n💀 The first to taste the poisoned candy LOSES!\n\n👍 Support us by Liking ⭐ and Favoriting ❤️ the game!\n\n🙏 Credit to Chris for letting us use the Nyan Cat!",
+"first_seen": "2026-10-02T21:13Z",
+"genre": "All",
+"genre_l1": "Party & Casual",
+"genre_l2": "",
+"icon": "https://tr.rbxcdn.com/180DAY-9aa13b673830db4e4daa8bf192a363da/256/256/Image/Webp/noFilter",
+"max_players": 30,
+"name": "Poison Treats 🧁🧪",
+"place_id": 73257710123935,
+"thumb": "https://tr.rbxcdn.com/180DAY-ad20db1a7d8dfd49f3b4447676d35e8f/768/432/Image/Webp/noFilter",
+"updated": "2026-09-27T22:58:27.554Z"
 },
 "8520148363": {
 "created": "2025-08-23T10:55:18.7Z",
@@ -31069,7 +31103,7 @@
 "name": "100 Players Lava Escape 🔥",
 "place_id": 135535794227264,
 "thumb": "https://tr.rbxcdn.com/180DAY-da621df4899432fd1f1ad71ae6c87401/768/432/Image/Webp/noFilter",
-"updated": "2026-10-01T18:15:52.8259175Z"
+"updated": "2026-10-02T21:07:06.1368053Z"
 },
 "8993151589": {
 "created": "2025-10-20T21:16:12.25Z",
@@ -32054,7 +32088,7 @@
 "creator": "beans_alad",
 "creator_type": "User",
 "creator_verified": false,
-"description": "[2 PEOPLE MINIMUM NEEDED TO START THE GAME]\n\nInspired by the classic Garry's Mod FNaF Gamemode Extended\n1 vs all game (1 person is the night guard and the rest are animatronics)\nyou can buy skins for animatronics in the shop\nthis game was made for fun\n\n[THIS GAME IS STILL A WORK IN PROGRESS SO EXPECT BUGS]\n\nPC Controls:\n\nE - Interact\nF - flashlight\nLeft Click - attack\nLShift - Sprint\n\nController Controls:\n\nX - Interact\nY - Open Cameras\nB - Toggle Flashlight\nLT - Sprint\nRT - Attack\n\nCredits: \nposh - Main Developer\nKeithy - Textures, Models < huge credits to this guy\nScott Cawthon - FNAF\nI6NIS -",
+"description": "[2 PEOPLE MINIMUM NEEDED TO START THE GAME]\n\nInspired by the classic Garry's Mod FNaF Gamemode Extended\n1 vs all game (1 person is the night guard and the rest are animatronics)\nyou can buy skins for animatronics in the shop\nthis game was made for fun\n\n[THIS GAME IS STILL A WORK IN PROGRESS SO EXPECT BUGS]\n\nPC Controls:\n\nE - Interact\nF - flashlight\nLeft Click - attack\nLShift - Sprint\n\nController Controls:\n\nX - Interact\nY - Open Cameras\nB - Toggle Flashlight\nLT - Sprint\nRT - Attack\n\nCredits: \nposh - Main Developer\nSmoke the Bear - Withered Animatronics\nKeithy - Textures, Models < huge credits t",
 "first_seen": "2026-10-02T19:54Z",
 "genre": "All",
 "genre_l1": "Survival",
@@ -32064,7 +32098,7 @@
 "name": "Garrys Mod FNAF Gamemode",
 "place_id": 104098030850482,
 "thumb": "https://tr.rbxcdn.com/180DAY-facdbd2d2ed43f08fdc777c92c6722f2/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:44:53.4407861Z"
+"updated": "2026-10-02T21:09:03.3680208Z"
 },
 "9237322219": {
 "created": "2025-11-24T13:54:32.253Z",
@@ -32731,6 +32765,23 @@
 "thumb": "https://tr.rbxcdn.com/180DAY-2c28ba874b8705d353a273997bbe8931/768/432/Image/Webp/noFilter",
 "updated": "2026-09-27T20:07:16.046Z"
 },
+"9372077571": {
+"created": "2025-12-17T13:20:50.333Z",
+"creator": "Unsigned Games",
+"creator_type": "Group",
+"creator_verified": true,
+"description": "🎧 Start as a small beat maker and build your music empire!\n\n📦 Claim your own booth\n💿 Make beats using samples\n🏷️ Sell your music or show it off to other players\n👀 Get discovered\n🔓 Unlock more samples, booths, and upgrades\n🏆 Build your music empire\n\n👍 Like the game and join the group to unlock a free booth!\n🔔 Follow for updates!",
+"first_seen": "2026-10-02T21:13Z",
+"genre": "All",
+"genre_l1": "Entertainment",
+"genre_l2": "Music & Audio",
+"icon": "https://tr.rbxcdn.com/180DAY-14bd4eba6aac4ee2df718202da8929e5/256/256/Image/Webp/noFilter",
+"max_players": 24,
+"name": "Street Beats 💿",
+"place_id": 125756097576326,
+"thumb": "https://tr.rbxcdn.com/180DAY-ec8b12ef07c72d827b74b6054cb4daf5/768/432/Image/Webp/noFilter",
+"updated": "2026-07-07T04:44:19.772Z"
+},
 "93740418": {
 "created": "2015-01-18T14:37:18.027Z",
 "creator": "Tim7775",
@@ -32933,12 +32984,12 @@
 "genre": "All",
 "genre_l1": "Survival",
 "genre_l2": "Escape",
-"icon": "https://tr.rbxcdn.com/180DAY-581331dfc31393f5a292c5fe90942b54/256/256/Image/Webp/noFilter",
+"icon": "https://tr.rbxcdn.com/180DAY-4b06d52d027a213d2f4fcefaf75c6f09/256/256/Image/Webp/noFilter",
 "max_players": 32,
 "name": "WARDEN 🐲 Sonaria Horror Escape",
 "place_id": 130929507719087,
 "thumb": "https://tr.rbxcdn.com/180DAY-285699f467117be0b438a9ac29578caf/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T17:58:41.0161312Z"
+"updated": "2026-10-02T21:11:48.1436445Z"
 },
 "9449993534": {
 "created": "2025-12-28T01:59:01.07Z",
@@ -34145,7 +34196,7 @@
 "name": "[I MISS THE QUIET] Luuynix's Animations",
 "place_id": 77301670644441,
 "thumb": "https://tr.rbxcdn.com/180DAY-1510f7e8e6a4bcc0f49be3de62a50221/768/432/Image/Webp/noFilter",
-"updated": "2026-09-30T21:53:06.168Z"
+"updated": "2026-10-02T21:13:02.4044638Z"
 },
 "9671940985": {
 "created": "2026-02-03T22:17:51.83Z",
@@ -36216,7 +36267,7 @@
 "name": "Steal a Peru",
 "place_id": 134091628988403,
 "thumb": "https://tr.rbxcdn.com/180DAY-cac2d7b61845f4faba640aafe62f247d/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:57:12.6159148Z"
+"updated": "2026-10-02T21:13:21.8908046Z"
 },
 "9942734820": {
 "created": "2026-03-26T12:00:02.941Z",
@@ -36328,7 +36379,7 @@
 "name": "[🧪] Clone Incremental",
 "place_id": 93696617476691,
 "thumb": "https://tr.rbxcdn.com/180DAY-df4699e54dab408ea2013d2e8a337ded/768/432/Image/Webp/noFilter",
-"updated": "2026-10-02T20:58:03.0120499Z"
+"updated": "2026-10-02T21:10:08.6278531Z"
 },
 "9953328866": {
 "created": "2026-03-28T15:12:13.067Z",
