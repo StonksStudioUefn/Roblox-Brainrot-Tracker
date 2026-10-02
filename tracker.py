@@ -1,294 +1,214 @@
 """
-tracker.py — Recolecta datos de juegos "brainrot-style" de Roblox.
+tracker.py — Toma una muestra de todos los juegos de Roblox con jugadores.
 
-Estrategia:
-  1. Pide a Rolimons la lista completa de juegos rastreados (sin auth, devuelve
-     miles de juegos con su player count actual).
-  2. Filtra por palabras clave + mínimo de jugadores.
-  3. Enriquece con detalles oficiales desde games.roblox.com.
-  4. Guarda un snapshot timestamped en SQLite.
+Cada ejecución:
+  1. Descarga la lista de Rolimons (todos los juegos con su player count).
+  2. Se queda con los que tienen ≥ TRACK_MIN_PLAYERS.
+  3. Traduce place_id → universe_id (con caché en data/games.json).
+  4. Enriquece con la API oficial: nombre, descripción, creador, género,
+     fechas, visitas, favoritos, likes, icono y miniatura.
+  5. Añade una muestra a data/raw/HOY.csv y recalcula data/daily/MES.csv.
+
+La clasificación por categoría (general / horror) se hace después, en
+export_dashboard.py, así que no hace falta una ejecución por categoría.
+Está pensado para correr varias veces al día: con varias muestras diarias
+un evento puntual no ensucia la media.
 
 Uso:
   python tracker.py
 """
 
-import json
-import sqlite3
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from pathlib import Path
 
 import requests
 
-# ─── Configuración ─────────────────────────────────────────────────────────────
-ROOT = Path(__file__).parent
+import legacy
+import store
+from config import TRACK_MIN_PLAYERS
 
-# ─── Categorías ────────────────────────────────────────────────────────────────
-# Cada categoría tiene su propia lista de keywords, su propia base de datos
-# y su propio umbral mínimo de jugadores.
-# Para añadir una nueva categoría, basta con agregar una entrada aquí.
-CATEGORIES = {
-    "brainrot": {
-        "label": "Brainrot",
-        "db": ROOT / "data" / "tracker_brainrot.db",
-        "min_players": 2670,
-        "keywords": [
-            "brainrot", "lucky block", "tsunami", "obby", "steal",
-            "escape", "tycoon", "rng", "skibidi", "merge", "grow a",
-            "race", "survive", "fisch", "anime",
-        ],
-    },
-    "horror": {
-        "label": "Horror",
-        "db": ROOT / "data" / "tracker_horror.db",
-        "min_players": 670,
-        "keywords": [
-            "horror", "scary", "nightmare", "haunted", "doors",
-            "the mimic", "evade", "specimen", "backrooms", "slender",
-            "granny", "survive the killer", "murder", "asylum",
-            "escape the", "creepy", "monster", "fear", "dead",
-            "apparition", "entity", "midnight", "cursed", "fog",
-        ],
-    },
-}
-
-# Umbral por defecto si una categoría no define el suyo
-DEFAULT_MIN_PLAYERS = 5_000
-MAX_GAMES_TO_TRACK = 200     # tope para no saturar la API
-
-# Endpoints
 ROLIMONS_GAMELIST = "https://api.rolimons.com/games/v1/gamelist"
-ROBLOX_GAMES_API = "https://games.roblox.com/v1/games"
+GAMES_API = "https://games.roblox.com/v1/games"
+VOTES_API = "https://games.roblox.com/v1/games/votes"
+PLACE_UNIVERSE_API = "https://apis.roblox.com/universes/v1/places/{}/universe"
+ICONS_API = "https://thumbnails.roblox.com/v1/games/icons"
+THUMBS_API = "https://thumbnails.roblox.com/v1/games/multiget/thumbnails"
 
-# Mapeo del formato Rolimons (índices del array por juego)
-# Formato real: [name, players, thumbnail_url, ...]
-ROL_NAME, ROL_PLAYERS, ROL_THUMB = 0, 1, 2
+DESCRIPTION_CHARS = 600   # se guarda un extracto, suficiente para clasificar
 
-HEADERS = {"User-Agent": "roblox-tracker/1.1"}
+SESSION = requests.Session()
+SESSION.headers["User-Agent"] = "roblox-tracker/2.0"
 
 
-def get_with_retry(url: str, max_retries: int = 4, timeout: int = 15):
-    """GET con reintentos y backoff exponencial ante rate limit / fallos.
-
-    Devuelve el objeto Response si tiene éxito, o None si agota reintentos.
-    """
-    for attempt in range(max_retries):
+def get_json(url: str, params=None, retries: int = 6, timeout: int = 20):
+    """GET con reintentos y backoff. Devuelve el JSON o None."""
+    for attempt in range(retries):
         try:
-            r = requests.get(url, timeout=timeout, headers=HEADERS)
-            # Rate limited → espera y reintenta
+            r = SESSION.get(url, params=params, timeout=timeout)
             if r.status_code == 429:
-                wait = 2 ** attempt + 1  # 2, 3, 5, 9 segundos
-                print(f"    rate limit (429), esperando {wait}s…", file=sys.stderr)
-                time.sleep(wait)
+                time.sleep(2 ** attempt + 1)
                 continue
             if r.ok:
-                return r
-            # Otros errores HTTP: reintenta una vez con espera corta
-            time.sleep(1.5)
-        except requests.RequestException as e:
-            time.sleep(2 ** attempt)  # backoff ante timeout/conexión
-            if attempt == max_retries - 1:
-                print(f"    fallo definitivo para {url[:60]}…: {e}", file=sys.stderr)
+                return r.json()
+            if 400 <= r.status_code < 500:
+                return None
+        except (requests.RequestException, ValueError):
+            pass
+        time.sleep(2 ** attempt)
     return None
 
 
-# ─── Base de datos ─────────────────────────────────────────────────────────────
-def init_db(db_path: Path) -> sqlite3.Connection:
-    db_path.parent.mkdir(exist_ok=True)
-    con = sqlite3.connect(db_path)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS snapshots (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            place_id      INTEGER NOT NULL,
-            universe_id   INTEGER,
-            name          TEXT NOT NULL,
-            player_count  INTEGER NOT NULL,
-            visits        INTEGER,
-            favorites     INTEGER,
-            up_votes      INTEGER,
-            down_votes    INTEGER,
-            ts            TEXT NOT NULL
-        )
-    """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_place_ts ON snapshots(place_id, ts)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_ts ON snapshots(ts)")
-    con.commit()
-    return con
+def batched(items: list, size: int):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
 
 
-# ─── Recolección ──────────────────────────────────────────────────────────────
-def fetch_rolimons_games() -> dict:
-    """Devuelve dict {place_id: [name, players, thumb, ...]}."""
-    r = requests.get(ROLIMONS_GAMELIST, timeout=30, headers=HEADERS)
-    r.raise_for_status()
-    data = r.json()
-    return data.get("games", {})
-
-
-def matches_keywords(name: str, keywords: list[str]) -> bool:
-    n = name.lower()
-    return any(kw in n for kw in keywords)
-
-
-def fetch_roblox_details(universe_ids: list[int]) -> list[dict]:
-    """games.roblox.com acepta hasta ~50 IDs por llamada. Con reintentos."""
-    results = []
-    for i in range(0, len(universe_ids), 50):
-        batch = universe_ids[i:i + 50]
-        params = "&".join(f"universeIds={uid}" for uid in batch)
-        url = f"{ROBLOX_GAMES_API}?{params}"
-        r = get_with_retry(url, max_retries=4, timeout=20)
-        if r is not None:
-            results.extend(r.json().get("data", []))
-        else:
-            print(f"  ⚠ Batch {i}-{i+len(batch)} sin detalles "
-                  f"(fallback a Rolimons)", file=sys.stderr)
-        time.sleep(1)  # respetuosos con la API
-    return results
-
-
-def place_to_universe(place_ids: list[int]) -> dict[int, int]:
-    """Convierte place_id → universe_id usando apis.roblox.com.
-
-    Usa reintentos. Reporta cuántos fallaron para no perderlos en silencio.
-    """
-    mapping = {}
-    failed = []
-    for i, pid in enumerate(place_ids):
-        url = f"https://apis.roblox.com/universes/v1/places/{pid}/universe"
-        r = get_with_retry(url, max_retries=4, timeout=10)
-        if r is not None:
-            uid = r.json().get("universeId")
-            if uid:
-                mapping[pid] = uid
-            else:
-                failed.append(pid)
-        else:
-            failed.append(pid)
-        # Pausa adaptativa: más lenta para no provocar rate limiting
-        time.sleep(0.25)
-        if (i + 1) % 25 == 0:
-            print(f"    universe IDs: {i + 1}/{len(place_ids)}…")
-
-    if failed:
-        print(f"  ⚠ {len(failed)} place_ids sin universe_id "
-              f"(se usará el player count de Rolimons como fallback)",
-              file=sys.stderr)
-    return mapping
-
-
-# ─── Pipeline principal ────────────────────────────────────────────────────────
-def run(category: str):
-    if category not in CATEGORIES:
-        print(f"✗ Categoría desconocida: '{category}'. "
-              f"Opciones: {', '.join(CATEGORIES)}", file=sys.stderr)
-        sys.exit(1)
-
-    cfg = CATEGORIES[category]
-    keywords = cfg["keywords"]
-    db_path = cfg["db"]
-    min_players = cfg.get("min_players", DEFAULT_MIN_PLAYERS)
-
-    now = datetime.now(timezone.utc).isoformat()
-    print(f"▶ Tracker [{cfg['label']}] iniciado — {now}")
-    print(f"  Umbral mínimo: {min_players:,} jugadores")
-
-    print("  Descargando lista de juegos desde Rolimons…")
-    rolimons = fetch_rolimons_games()
-    print(f"  Total juegos en Rolimons: {len(rolimons):,}")
-
-    # Filtra por keyword + min_players
-    candidates = []
-    for place_id_str, info in rolimons.items():
+# ─── Fuentes ───────────────────────────────────────────────────────────────────
+def fetch_rolimons() -> dict[int, tuple[str, int]]:
+    data = get_json(ROLIMONS_GAMELIST, timeout=30)
+    if not data or not data.get("games"):
+        raise RuntimeError("Rolimons no devolvió la lista de juegos")
+    out = {}
+    for pid, info in data["games"].items():
         try:
-            name = info[ROL_NAME]
-            players = info[ROL_PLAYERS]
-        except (IndexError, TypeError):
+            out[int(pid)] = (info[0], int(info[1]))
+        except (IndexError, TypeError, ValueError):
             continue
-        if players < min_players:
-            continue
-        if not matches_keywords(name, keywords):
-            continue
-        candidates.append((int(place_id_str), name, players))
+    return out
 
-    candidates.sort(key=lambda x: -x[2])  # ordenados por player count desc
-    candidates = candidates[:MAX_GAMES_TO_TRACK]
-    print(f"  Candidatos tras filtro: {len(candidates)}")
 
-    if not candidates:
-        print("  No hay candidatos. Revisa min_players o las keywords.")
-        return
+def resolve_universes(place_ids: list[int]) -> dict[int, int]:
+    """place_id → universe_id. Solo se llama para places que no están en caché."""
+    def one(pid):
+        data = get_json(PLACE_UNIVERSE_API.format(pid), timeout=10)
+        return pid, (data or {}).get("universeId")
 
-    # Mapea place_id → universe_id para enriquecer
-    place_ids = [c[0] for c in candidates]
-    print("  Obteniendo universe IDs…")
-    mapping = place_to_universe(place_ids)
-    universe_ids = [u for u in mapping.values() if u]
-    print(f"  Universe IDs obtenidos: {len(universe_ids)}")
+    out = {}
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for i, (pid, uid) in enumerate(ex.map(one, place_ids), 1):
+            if uid:
+                out[pid] = uid
+            if i % 200 == 0:
+                print(f"    universe IDs: {i}/{len(place_ids)}…")
+    return out
 
-    print("  Obteniendo detalles oficiales de Roblox…")
-    details = fetch_roblox_details(universe_ids)
-    detail_map = {d["id"]: d for d in details}
 
-    # Guardar snapshot
-    con = init_db(db_path)
-    rows = []
-    enriched = 0       # cuántos tienen datos oficiales de Roblox
-    fallback = 0       # cuántos usan solo el dato de Rolimons
-    skipped = 0        # cuántos se descartan por no tener ningún dato fiable
-
-    for place_id, name, rolimons_players in candidates:
-        uid = mapping.get(place_id)
-        d = detail_map.get(uid, {}) if uid else {}
-
-        # El player count de Roblox (playing) es el preferido, pero si no
-        # está disponible usamos el de Rolimons, que también es fiable.
-        roblox_playing = d.get("playing")
-        if roblox_playing is not None and roblox_playing > 0:
-            player_count = roblox_playing
-            enriched += 1
-        elif rolimons_players and rolimons_players > 0:
-            player_count = rolimons_players
-            fallback += 1
+def fetch_batched(url: str, ids: list[int], size: int, extra_params=None,
+                  id_param: str = "universeIds") -> list[dict]:
+    out = []
+    for batch in batched(ids, size):
+        params = {id_param: ",".join(map(str, batch)), **(extra_params or {})}
+        data = get_json(url, params=params)
+        if data:
+            out.extend(data.get("data", []))
         else:
-            # Sin ningún dato válido → no guardamos un 0 falso, lo saltamos
-            skipped += 1
+            print(f"  ⚠ Sin respuesta de {url} para {len(batch)} juegos", file=sys.stderr)
+        time.sleep(0.5)
+    return out
+
+
+# ─── Pipeline ──────────────────────────────────────────────────────────────────
+def run():
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    ts = now.strftime("%Y-%m-%dT%H:%MZ")
+    print(f"▶ Tracker iniciado — {ts}")
+
+    legacy.import_legacy(resolve_universes)   # solo hace algo la primera vez
+    games = store.load_games()
+    place_to_uid = {g["place_id"]: uid for uid, g in games.items() if g.get("place_id")}
+
+    rolimons = fetch_rolimons()
+    candidates = {pid: v for pid, v in rolimons.items() if v[1] >= TRACK_MIN_PLAYERS}
+    print(f"  Rolimons: {len(rolimons):,} juegos · {len(candidates):,} con ≥{TRACK_MIN_PLAYERS} jugadores")
+
+    unknown = [pid for pid in candidates if pid not in place_to_uid]
+    if unknown:
+        print(f"  Resolviendo {len(unknown)} universe IDs nuevos…")
+        resolved = resolve_universes(unknown)
+        place_to_uid.update(resolved)
+        if len(resolved) < len(unknown):
+            print(f"  ⚠ {len(unknown) - len(resolved)} sin universe ID (se reintentará)", file=sys.stderr)
+
+    uid_to_place = {}
+    for pid in candidates:
+        uid = place_to_uid.get(pid)
+        if uid:
+            uid_to_place[uid] = pid
+    uids = sorted(uid_to_place)
+
+    print(f"  Descargando detalles de {len(uids)} juegos…")
+    details = {d["id"]: d for d in fetch_batched(GAMES_API, uids, 50)}
+    votes = {v["id"]: v for v in fetch_batched(VOTES_API, uids, 50)}
+    icons = {i["targetId"]: i.get("imageUrl")
+             for i in fetch_batched(ICONS_API, uids, 100,
+                                    {"size": "256x256", "format": "Webp", "returnPolicy": "PlaceHolder"})
+             if i.get("state") == "Completed"}
+    thumbs = {}
+    for t in fetch_batched(THUMBS_API, uids, 50,
+                           {"countPerUniverse": 1, "size": "768x432", "format": "Webp", "defaults": "true"}):
+        shots = [s for s in t.get("thumbnails") or [] if s.get("state") == "Completed"]
+        if shots:
+            thumbs[t["universeId"]] = shots[0]["imageUrl"]
+
+    raw_rows, extra = [], {}
+    for uid in uids:
+        pid = uid_to_place[uid]
+        d = details.get(uid, {})
+        rol_name, rol_players = candidates[pid]
+        playing = d.get("playing") or rol_players
+        if not playing:
             continue
 
-        rows.append((
-            place_id,
-            uid,
-            d.get("name", name),
-            player_count,
-            d.get("visits"),
-            d.get("favoritedCount"),
-            None,  # up_votes — requiere otra llamada, opcional
-            None,  # down_votes
-            now,
-        ))
+        g = games.setdefault(uid, {})
+        g.setdefault("first_seen", ts)
+        g["place_id"] = pid   # el de Rolimons: así la caché place→universe acierta
+        g["name"] = d.get("name") or g.get("name") or rol_name
+        if d:
+            creator = d.get("creator") or {}
+            g.update({
+                "description": (d.get("description") or "")[:DESCRIPTION_CHARS],
+                "creator": creator.get("name"),
+                "creator_type": creator.get("type"),
+                "creator_verified": bool(creator.get("hasVerifiedBadge")),
+                "created": d.get("created"),
+                "updated": d.get("updated"),
+                "genre": d.get("genre"),          # género antiguo, lo elige el creador
+                "genre_l1": d.get("genre_l1"),
+                "genre_l2": d.get("genre_l2"),
+                "max_players": d.get("maxPlayers"),
+            })
+        if uid in icons:
+            g["icon"] = icons[uid]
+        if uid in thumbs:
+            g["thumb"] = thumbs[uid]
 
-    con.executemany(
-        """INSERT INTO snapshots
-           (place_id, universe_id, name, player_count, visits, favorites, up_votes, down_votes, ts)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
-        rows,
-    )
-    con.commit()
-    con.close()
+        raw_rows.append({"ts": ts, "universe_id": uid, "playing": playing,
+                         "visits": d.get("visits") or ""})
+        v = votes.get(uid, {})
+        extra[uid] = {"favorites": d.get("favoritedCount"),
+                      "up": v.get("upVotes"), "down": v.get("downVotes")}
 
-    print(f"✓ Guardados {len(rows)} snapshots en {db_path}")
-    print(f"  ├─ {enriched} con datos oficiales de Roblox (visits/favorites incl.)")
-    print(f"  ├─ {fallback} con player count de Rolimons (sin enriquecer)")
-    if skipped:
-        print(f"  └─ {skipped} descartados (sin ningún dato fiable, NO se guardó 0)")
+    # Los places resueltos sin datos este turno se guardan igualmente para no
+    # volver a pedirlos
+    for pid, uid in place_to_uid.items():
+        if uid not in games:
+            games[uid] = {"place_id": pid, "name": rolimons.get(pid, ("?",))[0], "first_seen": ts}
+
+    store.append_raw(raw_rows, now.date())
+    store.update_daily(now.date(), extra)
+    store.save_games(games)
+    removed = store.prune_raw()
+
+    print(f"✓ {len(raw_rows)} muestras guardadas ({len(details)} con datos oficiales)")
+    if removed:
+        print(f"  {removed} ficheros intradía antiguos eliminados")
 
 
 if __name__ == "__main__":
-    # Categoría por argumento: python tracker.py brainrot | horror
-    category = sys.argv[1] if len(sys.argv) > 1 else "brainrot"
     try:
-        run(category)
-    except requests.RequestException as e:
-        print(f"✗ Error de red: {e}", file=sys.stderr)
+        run()
+    except (requests.RequestException, RuntimeError) as e:
+        print(f"✗ Error: {e}", file=sys.stderr)
         sys.exit(1)

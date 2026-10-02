@@ -1,107 +1,93 @@
 # Roblox Tracker
 
-Sistema de tracking de juegos de Roblox por **categorías** (Brainrot y Horror) con análisis de crecimiento, notificaciones por Telegram y dashboard web con pestañas.
+Tracker de juegos de Roblox con dos vistas: **General** (todo Roblox) y **Horror**. Detecta qué está creciendo, qué juegos poco conocidos empiezan a despegar y separa los picos de evento del crecimiento real. Tiene un dashboard web con miniaturas, fichas de juego y avisos por Telegram.
+
+**Dashboard:** https://stonksstudiouefn.github.io/Roblox-Brainrot-Tracker/dashboard.html
 
 ## Cómo funciona
 
-1. **`tracker.py CATEGORÍA`** se conecta a la API de Rolimons y filtra los juegos por las palabras clave de esa categoría + mínimo de jugadores (5K). Enriquece con datos oficiales de `games.roblox.com` y guarda un snapshot en una SQLite **separada por categoría** (`data/tracker_brainrot.db`, `data/tracker_horror.db`).
-2. **`notifier.py CATEGORÍA`** calcula el crecimiento y envía el top 10 movers de esa categoría a Telegram.
-3. **`export_dashboard.py`** vuelca todas las categorías a un único `data/dashboard.json`.
-4. **`dashboard.html`** lee ese JSON y muestra el dashboard con **pestañas para cambiar entre Brainrot y Horror**.
-5. **GitHub Actions** ejecuta Brainrot a las **09:00 UTC** (mañana) y Horror a las **17:00 UTC** (tarde), automáticamente.
+Cada **3 horas** GitHub Actions ejecuta:
 
-Categorías disponibles: `brainrot`, `horror`. Para añadir una nueva, edita el diccionario `CATEGORIES` al principio de `tracker.py` (y replica la entrada en `export_dashboard.py` y `notifier.py`).
+1. **`tracker.py`**: descarga de Rolimons la lista de todos los juegos de Roblox y se queda con los que tienen **≥300 jugadores** (unos 2.000). Completa los datos con la API oficial de Roblox: nombre, descripción, creador, géneros, fechas de creación y actualización, visitas, favoritos, likes, icono y miniatura. Guarda una muestra en `data/raw/HOY.csv` y recalcula el día en `data/daily/MES.csv`.
+2. **`export_dashboard.py`**: clasifica los juegos (general / horror) y calcula las métricas, los eventos y los emergentes. Genera `data/dashboard.json` (resumen) y `data/history.json` (series para los gráficos, que se cargan al abrir una ficha).
+3. **`notifier.py`**: envía por Telegram las alertas de emergentes en cuanto aparecen, un resumen diario a partir de las 18:00 UTC y otro semanal los lunes.
 
-## Implementación paso a paso
+Toda la configuración está en **`config.py`**: umbrales, categorías, reglas de horror y criterios de emergentes.
 
-### Paso 1 — Setup local (5 min)
+## Métricas (y por qué no las ensucian los eventos)
+
+| Métrica | Cómo se calcula |
+|---|---|
+| **Jugadores** | Mediana de las muestras de las últimas 24 h. "Ahora" es la última muestra. |
+| **Valor del día** | Mediana de las ~8 muestras del día. Un pico de una hora no mueve el día. |
+| **Días de evento** | Días muy por encima de su entorno (filtro de Hampel) **que luego vuelven a bajar**, descontando el efecto fin de semana (se comparan con el mismo día de la semana anterior). No cuentan para las medias. Si el salto se mantiene es crecimiento real y no se marca. |
+| **24h** | Mediana de las últimas 24 h frente a la de las 24 h anteriores. |
+| **7d** | Media de los 3 últimos días frente a la de hace una semana, sin días de evento. |
+| **Tendencia/día** | Pendiente de Theil–Sen sobre los últimos 8 días limpios. Es robusta: un valor raro no la arrastra. |
+| **🎉 Pico ahora** | La última muestra supera 1,8× lo normal: probablemente hay un evento o un update. |
+| **Visitas/día** | Visitas ganadas en las últimas ~24 h. |
+
+## Emergentes 🌱
+
+Un juego entra en la lista si:
+- tiene **menos de 30M visitas** (no es conocido todavía),
+- tiene **≥300 jugadores**,
+- está **creciendo** (y no bajando),
+- y su puntuación (0–100) llega a 45.
+
+La puntuación suma:
+- **30 pts:** visitas ganadas al día respecto al total. Un juego nuevo que peta gana un % enorme de sus visitas cada día.
+- **25 pts:** crecimiento de jugadores.
+- **20 pts:** juventud del juego (creado hace menos de 120 días).
+- **15 pts:** tamaño actual.
+- **10 pts:** % de likes.
+
+Si sube solo por un pico de evento, la puntuación se reduce.
+
+## Horror 👻
+
+Antes solo se miraban palabras en el nombre y se perdían muchos juegos. Ahora cada señal suma puntos (`HORROR` en `config.py`):
+
+- **Nombre:** palabras fuertes (doors, backrooms, killer, anomaly, fnaf…) y débiles (escape, survive, night…). Restan palabras de juegos que no dan miedo (brainrot, tsunami, tycoon, obby…). Las etiquetas entre corchetes tipo `[HAUNTED]` o `[🎃 HALLOWEEN]` se ignoran, porque suelen ser eventos temporales.
+- **Descripción:** horror, scary, jumpscare, killer, hide from, survive the night, entity…
+- **Género antiguo del creador:** Roblox guarda un género "Horror" que elige el propio creador. Así entran *Spider*, *Teddy*, *Keys*, *Evade*, *Piggy*…
+- **Género oficial:** Survival › 1 vs All, Survival › Escape, Adventure › Story…
+
+Un juego es de horror si suma **≥5 puntos y tiene al menos una señal fuerte**. Para corregir un caso concreto, añade su `universe_id` a `force_include` o a `force_exclude`. Cada ficha del dashboard muestra por qué se ha clasificado así.
+
+## Datos
+
+```
+data/raw/AAAA-MM-DD.csv   muestras intradía (se guardan 35 días)
+data/daily/AAAA-MM.csv    un registro por juego y día: n, mediana, media, mín, máx, visitas, favoritos, likes
+data/games.json           ficha de cada juego + caché place_id → universe_id
+data/dashboard.json       resumen para el dashboard
+data/history.json         series para los gráficos
+data/state.json           qué avisos de Telegram ya se han enviado
+```
+
+Son ficheros de texto para que git guarde solo los cambios. Las bases de datos SQLite antiguas (`data/tracker_*.db`) se importan solas en la primera ejecución y después se borran. Los días anteriores al cambio tienen una sola muestra.
+
+## Uso local
 
 ```bash
-cd roblox-tracker
-python -m venv venv && source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-
-# Primera ejecución de prueba (una por categoría)
-python tracker.py brainrot
-python tracker.py horror
-```
-
-Si todo va bien verás algo como:
-```
-▶ Tracker [Brainrot] iniciado — 2026-05-16T...
-  Total juegos en Rolimons: 5,400
-  Candidatos tras filtro: 87
-  ...
-✓ Guardados 87 snapshots en data/tracker.db
-```
-
-### Paso 2 — Probar el dashboard (2 min)
-
-```bash
+python tracker.py              # ~3 min la primera vez, luego ~2 min
 python export_dashboard.py
-# Sirve los archivos en http://localhost:8000
-python -m http.server 8000
+python -m http.server 8000     # → http://localhost:8000/dashboard.html
+python notifier.py --dry-run   # ver los mensajes de Telegram sin enviarlos
 ```
 
-Abre `http://localhost:8000/dashboard.html` en el navegador.
+## Telegram
 
-> **Nota:** la primera vez solo verás 1 punto por juego. Los gráficos cobran sentido después de 2-3 días de ejecuciones.
+1. En Telegram, habla con **@BotFather** → `/newbot` → guarda el token.
+2. Escribe `/start` a tu bot y copia el `chat.id` de `https://api.telegram.org/bot<TOKEN>/getUpdates`.
+3. En el repo: **Settings → Secrets and variables → Actions** → crea `TELEGRAM_TOKEN` y `TELEGRAM_CHAT_ID`.
 
-### Paso 3 — Bot de Telegram (3 min)
+Opciones: `--daily` y `--weekly` fuerzan esos resúmenes; `--dry-run` imprime los mensajes sin enviarlos.
 
-1. En Telegram, escribe a **@BotFather** → `/newbot` → guarda el token.
-2. Escribe a tu bot recién creado (al menos un `/start`).
-3. Visita `https://api.telegram.org/bot<TU_TOKEN>/getUpdates` y copia el `chat.id` que aparece.
-4. Exporta variables y prueba:
+## Limitaciones
 
-```bash
-export TELEGRAM_TOKEN="123456:ABC..."
-export TELEGRAM_CHAT_ID="987654321"
-python notifier.py
-```
-
-Sin variables, el mensaje se imprime en consola (útil para debug).
-
-### Paso 4 — Automatización
-
-**Opción A — GitHub Actions (recomendado, gratis y sin servidor):**
-
-1. Crea un repo público o privado en GitHub.
-2. Sube los archivos (`git init && git add . && git commit -m "init" && git push`).
-3. En el repo → **Settings → Secrets and variables → Actions → New secret**:
-   - `TELEGRAM_TOKEN`
-   - `TELEGRAM_CHAT_ID`
-4. Ya está. El workflow `.github/workflows/tracker.yml` corre cada día a las 9:00 UTC y commitea los datos.
-
-Bonus: si haces público el repo, puedes activar **GitHub Pages** (Settings → Pages → branch `main` / root) y tu dashboard estará en `https://<tu-usuario>.github.io/<repo>/dashboard.html` con datos actualizados automáticamente.
-
-**Opción B — Cron local:**
-
-```bash
-crontab -e
-# Añade esta línea (ajusta la ruta absoluta):
-0 9 * * * cd /ruta/a/roblox-tracker && /ruta/a/venv/bin/python tracker.py && /ruta/a/venv/bin/python export_dashboard.py && /ruta/a/venv/bin/python notifier.py
-```
-
-## Ajustes que querrás hacer
-
-En `tracker.py` arriba del todo:
-
-| Variable             | Por defecto       | Para qué                                          |
-|----------------------|-------------------|---------------------------------------------------|
-| `KEYWORDS`           | brainrot, obby, … | Palabras que deben aparecer en el nombre          |
-| `MIN_PLAYERS`        | 5000              | Umbral para considerar un juego                   |
-| `MAX_GAMES_TO_TRACK` | 200               | Tope para no saturar la API de Roblox             |
-
-## Roadmap / ideas
-
-- Alertas instantáneas cuando un juego supere +50% en 24h.
-- Detectar juegos "emergentes" (de <5K a >10K en pocos días).
-- Análisis de correlación entre favorites/visits y player count.
-- Comparar vs juegos conocidos como referencia ("Steal a Brainrot" tuvo X jugadores el día Y).
-
-## Limitaciones honestas
-
-- La API de Rolimons puede caer o cambiar formato. Si pasa, hay que ajustar `tracker.py`.
-- Los endpoints públicos de `games.roblox.com` están sujetos a rate limiting. El script ya hace pausas, pero si tienes problemas baja `MAX_GAMES_TO_TRACK`.
-- No detecta juegos antes de que aparezcan en Rolimons (suele ser cuando ya tienen >100 jugadores).
+- Rolimons solo lista juegos con un mínimo de actividad. Los que no aparecen ahí no se ven.
+- GitHub puede retrasar o saltarse ejecuciones programadas. Por eso el cron va en el minuto 17 y cada 3 h: si se pierde una, el día sigue teniendo varias muestras.
+- La clasificación de horror es heurística. Revisa los motivos en la ficha y corrige con `force_include` / `force_exclude`.
