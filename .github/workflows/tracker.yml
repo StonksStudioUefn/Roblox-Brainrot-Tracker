@@ -6,6 +6,12 @@ on:
     # (o se salta) los cron de las horas en punto porque es cuando más cola hay.
     - cron: "17 */3 * * *"
   workflow_dispatch:        # ejecución manual desde la pestaña Actions
+    inputs:
+      aviso:
+        description: "Forzar un resumen de Telegram"
+        type: choice
+        options: [ninguno, diario, semanal]
+        default: ninguno
   push:                     # al cambiar el código, se regenera todo al momento
     branches: [main]
     paths: ["*.py", ".github/workflows/tracker.yml"]
@@ -42,7 +48,13 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python notifier.py
+          AVISO: ${{ github.event.inputs.aviso }}
+        run: |
+          case "$AVISO" in
+            diario)  python notifier.py --daily ;;
+            semanal) python notifier.py --weekly ;;
+            *)       python notifier.py ;;
+          esac
 
       - name: Commit cambios
         run: |
