@@ -84,7 +84,9 @@ python notifier.py --dry-run   # ver los mensajes de Telegram sin enviarlos
 2. Escribe `/start` a tu bot y copia el `chat.id` de `https://api.telegram.org/bot<TOKEN>/getUpdates`.
 3. En el repo: **Settings → Secrets and variables → Actions** → crea `TELEGRAM_TOKEN` y `TELEGRAM_CHAT_ID`.
 
-Opciones: `--daily` y `--weekly` fuerzan esos resúmenes; `--dry-run` imprime los mensajes sin enviarlos.
+Los mensajes están pensados para el móvil: el resumen diario es un mensaje por categoría con la miniatura del juego más destacado, y cada juego ocupa dos líneas (nombre / jugadores · crecimiento). Las alertas de emergentes llevan su miniatura, sus datos y enlaces para jugar y ver la ficha.
+
+Para probarlo: **Actions → Roblox Tracker → Run workflow** y elige `diario` o `semanal` en "Forzar un resumen de Telegram". En local: `--daily` y `--weekly` fuerzan esos resúmenes y `--dry-run` imprime los mensajes sin enviarlos.
 
 ## Limitaciones
 
