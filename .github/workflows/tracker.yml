@@ -30,6 +30,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+        with:
+          # La punta de main en este momento, no el commit que lanzó el run:
+          # si había otro run en cola, así se parte de los datos que guardó
+          ref: main
 
       - uses: actions/setup-python@v6
         with:
@@ -63,7 +67,14 @@ jobs:
           git add -A data/
           git diff --staged --quiet && echo "Sin cambios" && exit 0
           git commit -m "track: $(date -u +%Y-%m-%dT%H:%M)"
+          # Si a la vez se subió otro commit, se rebasa encima. Las muestras
+          # de data/raw se juntan (.gitattributes: merge=union); en el resto de
+          # data/ manda lo de este run (-X theirs en un rebase), que se
+          # recalcula igualmente en la siguiente ejecución
           for i in 1 2 3; do
-            git pull --rebase origin main && git push && break
+            if git pull --rebase -X theirs origin main && git push; then exit 0; fi
+            git rebase --abort 2>/dev/null || true
             echo "Reintento push $i…" && sleep 5
           done
+          echo "::error::No se pudieron subir los datos tras 3 intentos"
+          exit 1
