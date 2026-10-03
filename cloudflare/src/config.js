@@ -28,10 +28,23 @@ export const SEARCH_QUERIES = [
 export const SEARCH_QUERIES_PER_RUN = 3;
 export const SEARCH_PAGES_PER_QUERY = 3;
 
+// ─── Radar y juegos seguidos ──────────────────────────────────────────────────
+// El radar mira en cada muestreo todos los juegos con ≥ TRACK_MIN_PLAYERS (la
+// lista de Rolimons: 1 petición) y guarda de cada uno un solo dato al día.
+// Solo los juegos SEGUIDOS (elegidos una vez al día) tienen muestras cada 3 h,
+// votos y salen en la web y en Telegram.
+export const SELECTION = {
+  top: 10,                 // los que más jugadores tienen, en cada pestaña
+  emerging_general: 150,   // mejores candidatos a emergente (todo Roblox)
+  emerging_horror: 50,     // mejores candidatos a emergente de horror
+  keep_factor: 1.5,        // un juego ya seguido sigue mientras esté en el 150 % de su lista
+};
+
 // ─── Categorías (pestañas del dashboard) ──────────────────────────────────────
+// Con min_players = TRACK_MIN_PLAYERS cada pestaña lista todos sus juegos seguidos.
 export const CATEGORIES = {
-  general: { label: "General", icon: "🎮", min_players: 2500, classifier: "all" },
-  horror: { label: "Horror", icon: "👻", min_players: 500, classifier: "horror" },
+  general: { label: "General", icon: "🎮", min_players: 300, classifier: "all" },
+  horror: { label: "Horror", icon: "👻", min_players: 300, classifier: "horror" },
 };
 
 // ─── Clasificación de horror ──────────────────────────────────────────────────

@@ -22,8 +22,10 @@ CREATE TABLE IF NOT EXISTS games (
   sources TEXT,                  -- JSON array: "rolimons", "explore", "search:<query>"
   tracked INTEGER DEFAULT 1,     -- 1 = se muestrea en cada pasada
   low_since TEXT,                -- fecha desde la que está por debajo de TRACK_MIN_PLAYERS
-  meta_date TEXT                 -- último día en que se refrescaron meta + horror + votos
+  meta_date TEXT,                -- último día en que se refrescaron meta + horror + votos
+  sel INTEGER DEFAULT 0          -- 1 = seguido (muestras cada 3 h, votos, export); lo elige `select` cada día
 );
+-- En una base anterior a `sel`: ALTER TABLE games ADD COLUMN sel INTEGER DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS places (place_id INTEGER PRIMARY KEY, universe_id INTEGER);  -- caché Rolimons
 

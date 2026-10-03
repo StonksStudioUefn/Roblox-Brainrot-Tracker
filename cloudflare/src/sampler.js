@@ -15,33 +15,43 @@
  * necesitan las siguientes (ids a muestrear, places por resolver, votos) van a
  * R2 tmp/run/<id>/ y se borran al terminar. Estado en D1: run_current.
  *
+ * Radar y juegos seguidos: en cada pasada se lee la lista de Rolimons (1
+ * petición) y los jugadores de todos los juegos del radar (tracked = 1) se
+ * apuntan en R2 radar/<día>/<ts>.json; al cerrar el día se convierten en UNA fila
+ * diaria por juego. Solo los juegos seguidos (sel = 1, unos 200 elegidos cada
+ * día en `select`) tienen muestras cada 3 h y votos, y salen en el export.
+ *
  * Pasos:  init → explore-0..P (una página de get-sorts por paso) → explore-more →
- *         search-0..N → search-cursor → [rolimons → resolve-0..K] →
- *         sample-list → sample-0..M (en la 1ª pasada del día: meta, horror y votos) →
- *         [close] → maint → export-plan → export-0..E → export-join → telegram → finish
+ *         search-0..N → search-cursor → rolimons (radar; en la 1ª del día, también
+ *         places nuevos) → [resolve-0..K] → sample-list → sample-0..M (seguidos; en
+ *         la 1ª pasada del día todo el radar con meta y horror, y votos de los
+ *         seguidos) → [close (+ filas del radar)] → [select-plan → select-0..R →
+ *         select-apply] → maint → export-plan → export-0..E → export-join →
+ *         telegram → finish
  *
  * Parámetros (event.payload): now (ISO), daily (forzar 1ª pasada del día),
  * skip: [nombres], only: [nombres] (explore, search, rolimons, sample, close,
- * maint, export, telegram), telegram_force ('daily' | 'weekly').
+ * select, maint, export, telegram), telegram_force ('daily' | 'weekly').
  */
 
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import {
   SAMPLE_RETENTION_DAYS, SEARCH_PAGES_PER_QUERY, SEARCH_QUERIES, SEARCH_QUERIES_PER_RUN,
-  TRACK_MIN_PLAYERS,
+  SELECTION, TRACK_MIN_PLAYERS,
 } from "./config.js";
 import {
   Budget, SubBudget, chunks, fetchGames, fetchRolimons, fetchSearch, fetchSortContent, fetchSortsPage, fetchVotes,
   resolvePlaces,
 } from "./sources.js";
 import {
-  DAY_MIN, addDays, applyVotesStmt, buildExportSlice, closeDayStmt, exportHeader, exportPlan, getState,
-  getStates, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs, lowSinceStmts,
-  mergeHistStmt, minuteOf, pruneOrphansStmt, pruneSamplesStmt, retrackPlacesStmt,
-  setState, setStateStmt, sortHitsStmt, trackedIds, unknownPlaces, untrackStmt, updateMetaStmt,
-  upsertDiscoveredStmt, written,
+  DAY_MIN, addDays, applySelectionStmt, applyVotesStmt, buildExportSlice, closeDayStmt, exportHeader, exportPlan,
+  getState, getStates, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs, lowSinceStmts,
+  mergeHistStmt, minuteOf, pruneOrphansStmt, pruneSamplesStmt, radarCloseStmt, radarCounts, radarPlayers,
+  radarSlice, retrackPlacesStmt, setState, setStateStmt, sortHitsStmt, trackedIds, unknownPlaces,
+  untrackStmt, updateMetaStmt, upsertDiscoveredStmt, written,
 } from "./db.js";
 import { classifyHorror } from "./horror.js";
+import { radarScore } from "./metrics.js";
 import { pickCandidates, runTelegram, telegramScanText } from "./telegram.js";
 
 // Tamaños de trozo (CPU medida en frío: ver README "CPU por paso")
@@ -56,6 +66,11 @@ export const EXPORT_KEY = "data/export.json";
 export const TELEGRAM_KEY = "data/telegram.json";
 export const PART_PREFIX = "tmp/export/part-";
 export const RUN_PREFIX = "tmp/run/";        // listas que pasan de una ejecución a otra
+export const RADAR_PREFIX = "radar/";        // radar/<día>/<ts>.json: lecturas de Rolimons de cada muestreo
+export const RADAR_KEEP_DAYS = 7;            // días de ficheros del radar en R2
+export const RADAR_MIN_PLAYERS = 150;        // lecturas desde aquí (un bajón nocturno no deja huecos)
+export const RADAR_DAYS = 14;                // filas diarias por juego para elegir los seguidos
+export const SELECT_SLICE = 250;             // juegos del radar por paso de select (en frío ≈ 5 ms)
 
 // Peticiones externas: el plan gratis da 50 por invocación. Se deja margen.
 export const INVOCATION_BUDGET = 46;
@@ -120,12 +135,13 @@ export class Sampler extends WorkflowEntrypoint {
       const ms = p.now ? Date.parse(p.now) : new Date(event.timestamp || Date.now()).getTime();
       const ts = minuteOf(ms);
       const today = isoDate(ts);
-      const st = await getStates(db, ["day", "closed_day", "search_cursor"]);
+      const st = await getStates(db, ["day", "closed_day", "search_cursor", "sel_day"]);
       await setState(db, "run_current", { base, seg, id: base, phase: "discover", cursor: 0 });
       return {
         ts, today,
         firstOfDay: !!p.daily || st.day !== today,
         closedDay: st.closed_day || null,
+        selDay: st.sel_day || null,
         cursor: Number(st.search_cursor) || 0,
         session: crypto.randomUUID(),
       };
@@ -204,14 +220,23 @@ export class Sampler extends WorkflowEntrypoint {
       });
     }
 
-    // ── rolimons (1ª pasada del día): la lista de places por resolver va a R2
+    // ── rolimons: lecturas del radar (cada pasada) y, en la 1ª pasada del día,
+    // los places por resolver (a R2)
     const daily = init.firstOfDay && want("rolimons");
-    if (daily && reach("rolimons")) {
+    if (reach("rolimons") && want("rolimons")) {
       if (inv.left < ROLIMONS_NEED) return await next("rolimons");
       await safe("rolimons", async () => {
         const budget = sub(ROLIMONS_NEED);
-        const list = await fetchRolimons(budget, TRACK_MIN_PLAYERS);
-        if (!list || !list.length) throw new Error("Rolimons no devolvió la lista");
+        const all = await fetchRolimons(budget, RADAR_MIN_PLAYERS);
+        if (!all || !all.length) throw new Error("Rolimons no devolvió la lista");
+        // Un fichero por muestreo (un reintento lo reescribe igual): sin leer ni
+        // reescribir el del día entero, que costaría CPU en cada pasada
+        const players = await radarPlayers(db, all);
+        await env.BUCKET.put(`${RADAR_PREFIX}${today}/${ts}.json`, JSON.stringify(players));
+        const stats = { radar: Object.keys(players).length, calls: budget.used };
+        if (!daily) return { stats };
+
+        const list = all.filter(r => r[2] >= TRACK_MIN_PLAYERS);
         const pids = list.map(r => r[0]);
         const [unknown, res] = await Promise.all([
           unknownPlaces(db, pids),
@@ -222,7 +247,7 @@ export class Sampler extends WorkflowEntrypoint {
         const todo = unknown.map(pid => byPid.get(pid)).sort((a, b) => b[2] - a[2])
           .slice(0, RESOLVE_PER_DAY).map(([pid, name]) => [pid, name]);
         await env.BUCKET.put(`${tmp}resolve.json`, JSON.stringify(todo));
-        return { stats: { games: list.length, unknown: unknown.length, todo: todo.length, calls: budget.used, written: written(res) } };
+        return { stats: { ...stats, games: list.length, unknown: unknown.length, todo: todo.length, written: written(res) } };
       });
     }
     if (daily && reach("resolve")) {
@@ -248,19 +273,23 @@ export class Sampler extends WorkflowEntrypoint {
       }
     }
 
-    // ── sample-N (+ meta diario): la lista de ids va a R2 para las demás ejecuciones
+    // ── sample-N (+ meta diario): la lista de ids va a R2 para las demás ejecuciones.
+    // Muestras de los seguidos; en la 1ª pasada del día, meta de todo el radar.
     if (reach("sample") && want("sample")) {
       const meta = init.firstOfDay;
-      const ids = await step.do(`sample-list-${seg}`, STEP, async () => {
+      const { ids, sel } = await step.do(`sample-list-${seg}`, STEP, async () => {
         const key = `${tmp}ids.json`;
         if (p.phase === "sample") {
           const o = await env.BUCKET.get(key);
           if (o) return await o.json();
         }
-        const list = await trackedIds(db);
+        const selected = await trackedIds(db, { selected: true });
+        // Sin selección todavía (recién desplegado): todo el radar, como antes
+        const list = { ids: meta || !selected.length ? await trackedIds(db) : selected, sel: selected.length ? selected : null };
         await env.BUCKET.put(key, JSON.stringify(list));
         return list;
       });
+      const selSet = sel ? new Set(sel) : null;
       const size = meta ? META_CHUNK : SAMPLE_CHUNK;
       const need = meta ? META_NEED : SAMPLE_NEED;
       const parts = chunks(ids, size);
@@ -271,9 +300,9 @@ export class Sampler extends WorkflowEntrypoint {
         let r = null;
         try {
           r = await step.do(name, STEP, async () => {
-            const out = await sampleChunk(db, parts[i], { ts, today, meta, budget: sub(need) });
-            // Los votos se aplican en el cierre del día, que puede ir en otra ejecución
-            if (out.votes) await env.BUCKET.put(`${tmp}votes-${i}.json`, JSON.stringify(out.votes));
+            const out = await sampleChunk(db, parts[i], { ts, today, meta, budget: sub(need), sel: selSet });
+            // Votos y datos del radar se aplican en el cierre del día, que puede ir en otra ejecución
+            if (out.votes) await env.BUCKET.put(`${tmp}votes-${i}.json`, JSON.stringify({ v: out.votes, r: out.radar }));
             return { stats: out.stats };
           });
         } catch (e) {
@@ -292,12 +321,15 @@ export class Sampler extends WorkflowEntrypoint {
     if (want("close") && (init.firstOfDay || !init.closedDay || init.closedDay < yesterday)) {
       await safe("close", async () => {
         // Votos guardados por los pasos sample-N con meta
-        const votes = {};
+        const votes = {}, radarMeta = {};
         if (init.firstOfDay) {
           const listed = await env.BUCKET.list({ prefix: `${tmp}votes-` });
           for (const o of listed.objects) {
             const obj = await env.BUCKET.get(o.key);
-            if (obj) Object.assign(votes, await obj.json());
+            if (!obj) continue;
+            const part = await obj.json();
+            Object.assign(votes, part.v || {});
+            Object.assign(radarMeta, part.r || {});
           }
         }
         const oldest = addDays(today, -SAMPLE_RETENTION_DAYS);
@@ -305,9 +337,16 @@ export class Sampler extends WorkflowEntrypoint {
         if (from < oldest) from = oldest;
         const stmts = [];
         const dates = [];
+        let radarRows = 0;
         for (let d = from; d <= yesterday; d = addDays(d, 1)) {
           dates.push(d);
-          stmts.push(closeDayStmt(db, d, d === yesterday ? votes : null), mergeHistStmt(db, d));
+          // Radar: lecturas de Rolimons del día y, para ayer, jugadores y visitas del meta de hoy
+          const readings = await radarReadings(env.BUCKET, d);
+          const rm = d === yesterday ? radarMeta : null;
+          radarRows += readings ? Object.keys(readings).length : 0;
+          stmts.push(closeDayStmt(db, d, d === yesterday ? votes : null));
+          if (readings || (rm && Object.keys(rm).length)) stmts.push(radarCloseStmt(db, d, readings, rm));
+          stmts.push(mergeHistStmt(db, d));
         }
         if (!dates.length && Object.keys(votes).length) {
           stmts.push(applyVotesStmt(db, yesterday, votes), mergeHistStmt(db, yesterday));
@@ -316,18 +355,31 @@ export class Sampler extends WorkflowEntrypoint {
         stmts.push(setStateStmt(db, "closed_day", closed));
         if (init.firstOfDay) stmts.push(setStateStmt(db, "day", today));
         const res = await db.batch(stmts);
-        return { dates, votes: Object.keys(votes).length, written: written(res) };
+        return { dates, votes: Object.keys(votes).length, radar: radarRows, radar_meta: Object.keys(radarMeta).length, written: written(res) };
       });
     }
 
-    // ── maint: poda de muestras y untrack ─────────────────────────────────
+    // ── select: los juegos seguidos (una vez al día, con el día de ayer cerrado)
+    if (want("select") && (init.firstOfDay || init.selDay !== today || p.select)) {
+      await runSelect(env, step, ts * 60000, today, safe, summary);
+    }
+
+    // ── maint: poda de muestras, untrack y ficheros viejos del radar ────────
     if (want("maint")) {
       await safe("maint", async () => {
         const cutoff = ts - SAMPLE_RETENTION_DAYS * DAY_MIN;
         const stmts = [pruneSamplesStmt(db, cutoff), untrackStmt(db, today)];
         if (init.firstOfDay) stmts.push(pruneOrphansStmt(db, cutoff));
         const res = await db.batch(stmts);
-        return { pruned: res[0]?.meta?.changes ?? 0, untracked: res[1]?.meta?.changes ?? 0, written: written(res) };
+        let radarFiles = 0;
+        if (init.firstOfDay) {
+          const old = `${RADAR_PREFIX}${addDays(today, -RADAR_KEEP_DAYS)}/`;
+          const listed = await env.BUCKET.list({ prefix: RADAR_PREFIX, limit: 1000 });
+          const keys = listed.objects.map(o => o.key).filter(k => k < old);
+          if (keys.length) await env.BUCKET.delete(keys);
+          radarFiles = keys.length;
+        }
+        return { pruned: res[0]?.meta?.changes ?? 0, untracked: res[1]?.meta?.changes ?? 0, radar_files: radarFiles, written: written(res) };
       });
     }
 
@@ -374,7 +426,7 @@ function compact(summary) {
   const out = { ...summary, errors: (summary.errors || []).slice(-30) };
   const steps = {};
   for (const [k, v] of Object.entries(summary.steps || {})) {
-    if (/^(explore-\d+|resolve-\d+|search-\d+|export-\d+|tg-scan-)/.test(k)) continue;   // demasiados: van en el total
+    if (/^(explore-\d+|resolve-\d+|search-\d+|export-\d+|select-\d+|tg-scan-)/.test(k)) continue;   // demasiados: van en el total
     steps[k] = v;
   }
   out.steps = steps;
@@ -407,16 +459,18 @@ async function saveExplore(db, sorts, today, firstSeen, offsets = {}) {
 }
 
 /** Un trozo de juegos: muestras (+ meta, horror y votos si `meta`). */
-export async function sampleChunk(db, ids, { ts, today, meta, budget = new Budget(45) }) {
+export async function sampleChunk(db, ids, { ts, today, meta, budget = new Budget(45), sel = null }) {
+  // sel: Set de ids seguidos (null = todos). Votos solo de los seguidos.
+  const voteIds = meta ? (sel ? ids.filter(id => sel.has(id)) : ids) : [];
   const [games, vts] = await Promise.all([
     fetchGames(budget, ids),
-    meta ? fetchVotes(budget, ids) : null,
+    voteIds.length ? fetchVotes(budget, voteIds) : null,
   ]);
   const batches = Math.ceil(ids.length / 50);
   if (games.failed * 2 > batches || (batches === 1 && games.failed)) {
     throw new Error(`Games API: ${games.failed}/${batches} lotes sin respuesta`);
   }
-  const { samples, low, metaRows, votes } = processGames(ids, games, vts, meta);
+  const { samples, low, metaRows, votes, radar } = processGames(ids, games, vts, meta, sel);
   const stmts = [];
   if (samples.length) {
     stmts.push(insertSamplesStmt(db, samples, ts));
@@ -433,17 +487,18 @@ export async function sampleChunk(db, ids, { ts, today, meta, budget = new Budge
   return {
     stats: { games: ids.length, samples: samples.length, failed: games.failed, meta: metaRows.length, calls: budget.used, written: written(res) },
     votes: meta ? votes : undefined,
+    radar: meta ? radar : undefined,
   };
 }
 
 /** Parte de puro cómputo de sampleChunk (separada para medir la CPU en Node). */
-export function processGames(ids, games, vts, meta) {
+export function processGames(ids, games, vts, meta, sel = null) {
   const got = new Map();
   for (const g of games.data) got.set(g.id, g);
   const vmap = new Map();
   if (vts) for (const v of vts.data) vmap.set(v.id, v);
   const samples = [], low = [], metaRows = [];
-  const votes = {};
+  const votes = {}, radar = {};
   for (const id of ids) {
     const g = got.get(id);
     if (!g) {
@@ -452,10 +507,13 @@ export function processGames(ids, games, vts, meta) {
       continue;
     }
     const playing = g.playing || 0;
+    const followed = !sel || sel.has(id);
     // Como tracker.py: solo se guardan muestras con ≥ TRACK_MIN_PLAYERS (los
     // que están por debajo siguen vigilados hasta UNTRACK_AFTER_DAYS, pero no
-    // gastan escrituras: cada muestra es 1 fila insertada y luego 1 borrada)
-    if (playing >= TRACK_MIN_PLAYERS) samples.push([id, playing, g.visits ?? null]);
+    // gastan escrituras: cada muestra es 1 fila insertada y luego 1 borrada).
+    // Los del radar que no se siguen no tienen muestras: su dato del día va al cierre.
+    if (followed && playing >= TRACK_MIN_PLAYERS) samples.push([id, playing, g.visits ?? null]);
+    if (!followed) radar[id] = [playing, g.visits ?? null];
     low.push([id, playing]);
     if (meta) {
       const c = g.creator || {};
@@ -470,10 +528,98 @@ export function processGames(ids, games, vts, meta) {
         g.maxPlayers ?? null, h.horror ? 1 : 0, h.score, JSON.stringify(h.reasons || []),
       ]);
       const v = vmap.get(id);
-      votes[id] = [g.favoritedCount ?? null, v?.upVotes ?? null, v?.downVotes ?? null];
+      if (followed) votes[id] = [g.favoritedCount ?? null, v?.upVotes ?? null, v?.downVotes ?? null];
     }
   }
-  return { samples, low, metaRows, votes };
+  return { samples, low, metaRows, votes, radar };
+}
+
+/** Lecturas del radar de un día: {universe_id: [jugadores de cada muestreo…]}, o null. */
+export async function radarReadings(bucket, date) {
+  const listed = await bucket.list({ prefix: `${RADAR_PREFIX}${date}/` });
+  if (!listed.objects.length) return null;
+  const out = {};
+  for (const o of listed.objects) {
+    const obj = await bucket.get(o.key);
+    if (!obj) continue;
+    const players = await obj.json();
+    for (const id in players) (out[id] ||= []).push(players[id]);
+  }
+  return out;
+}
+
+/**
+ * Elige los juegos seguidos. rows: [[id, horror, sel, typical, candidato|null], …]
+ * Top por jugadores (general y horror) y mejores candidatos a emergente
+ * (general y horror). Un juego ya seguido se queda mientras siga dentro del
+ * keep_factor de alguna de sus listas, para no entrar y salir cada día.
+ */
+export function chooseSelection(rows, cfg = SELECTION) {
+  const byPlayers = (a, b) => (b[3] - a[3]) || (a[0] - b[0]);
+  const byScore = (a, b) => (b[4] - a[4]) || (b[3] - a[3]) || (a[0] - b[0]);
+  // Si no hay candidatos para llenar una lista de emergentes (en horror pasa:
+  // muchos superan las visitas máximas), se completa con los siguientes por jugadores
+  const fill = (cands, pool) => {
+    const ids = new Set(cands.map(r => r[0]));
+    return cands.concat(pool.filter(r => !ids.has(r[0])));
+  };
+  const all = rows.slice().sort(byPlayers), horror = all.filter(r => r[1]);
+  const lists = {
+    top: [all, cfg.top],
+    top_horror: [horror, cfg.top],
+    emerging: [fill(rows.filter(r => r[4] != null).sort(byScore), all.slice(cfg.top)), cfg.emerging_general],
+    emerging_horror: [fill(horror.filter(r => r[4] != null).sort(byScore), horror.slice(cfg.top)), cfg.emerging_horror],
+  };
+  const chosen = new Set(), kept = new Set(), counts = {};
+  for (const [name, [list, n]] of Object.entries(lists)) {
+    const keepN = Math.ceil(n * cfg.keep_factor);
+    counts[name] = Math.min(n, list.length);
+    for (let i = 0; i < list.length && i < keepN; i++) {
+      if (i < n) chosen.add(list[i][0]);
+      else if (list[i][2]) kept.add(list[i][0]);
+    }
+  }
+  for (const id of kept) chosen.add(id);
+  return { ids: [...chosen].sort((a, b) => a - b), counts: { ...counts, kept: [...kept].filter(id => chosen.has(id)).length, total: chosen.size, radar: rows.length } };
+}
+
+/**
+ * select-plan (rangos del radar) → select-i (filas diarias + métricas de 500
+ * juegos: radarScore de metrics.js) → select-apply (elige y escribe sel).
+ */
+export async function runSelect(env, step, nowMs, today, safe, summary) {
+  const db = env.DB;
+  const plan = await safe("select-plan", async () => ({ ranges: await exportPlan(db, SELECT_SLICE) }));
+  if (!plan) return null;
+  const now = new Date(nowMs).toISOString();
+  const rows = [];
+  for (const [i, [lo, hi]] of plan.ranges.entries()) {
+    try {
+      rows.push(...await step.do(`select-${i}`, STEP, async () => {
+        const out = [];
+        for (const [id, horror, sel, created, firstSeen, firstDay, sorts, d] of
+          await radarSlice(db, { lo, hi, days: RADAR_DAYS, before: today, today })) {
+          const r = radarScore({ id, created, first_seen: firstSeen, first_day: firstDay, sorts, d, s: [] }, { now });
+          if (r) out.push([id, horror ? 1 : 0, sel ? 1 : 0, r[0], r[1] == null ? null : Math.round(r[1] * 10) / 10]);
+        }
+        return out;
+      }));
+    } catch (e) {
+      // Sin todos los trozos no se cambia la selección (se queda la de ayer)
+      summary?.errors.push(`select-${i}: ${String(e?.message || e).slice(0, 200)}`);
+      return null;
+    }
+  }
+  return await safe("select-apply", async () => {
+    const { ids, counts } = chooseSelection(rows);
+    if (!ids.length) throw new Error("La selección ha salido vacía");
+    const res = await db.batch([
+      applySelectionStmt(db, ids),
+      setStateStmt(db, "sel_day", today),
+      setStateStmt(db, "selection", { day: today, ...counts }),
+    ]);
+    return { ...counts, changed: res[0]?.meta?.changes ?? 0, written: written(res) };
+  });
 }
 
 /**
@@ -486,11 +632,14 @@ export function processGames(ids, games, vts, meta) {
 export async function runExport(env, step, nowMs, safe, summary) {
   const db = env.DB;
   const plan = await safe("export-plan", async () => {
-    const [lastTs, closed, ranges] = await Promise.all([
-      lastSampleTs(db), getState(db, "closed_day"), exportPlan(db, EXPORT_SLICE),
+    const [lastTs, closed, radar] = await Promise.all([
+      lastSampleTs(db), getState(db, "closed_day"), radarCounts(db),
     ]);
+    // Solo los juegos seguidos; si aún no hay selección, todo el radar
+    const selected = radar.selected > 0;
+    const ranges = await exportPlan(db, EXPORT_SLICE, { selected });
     const today = isoDate(minuteOf(nowMs));
-    return { lastTs, openDay: closed ? addDays(closed, 1) : today, ranges };
+    return { lastTs, openDay: closed ? addDays(closed, 1) : today, ranges, selected, radar };
   });
   if (!plan) return null;
   const slices = [];
@@ -499,7 +648,7 @@ export async function runExport(env, step, nowMs, safe, summary) {
     let r = null;
     try {
       r = await step.do(name, STEP, async () => {
-        const s = await buildExportSlice(db, { nowMs, lastTs: plan.lastTs, openDay: plan.openDay, lo, hi });
+        const s = await buildExportSlice(db, { nowMs, lastTs: plan.lastTs, openDay: plan.openDay, lo, hi, selected: plan.selected });
         const obj = await env.BUCKET.put(`${PART_PREFIX}${i}.json`, s.frag);
         return { n: s.n, bytes: obj?.size ?? 0, last_ts: s.last_ts, ts24: s.ts24, rows_read: s.meta?.rows_read ?? null };
       });
@@ -511,7 +660,7 @@ export async function runExport(env, step, nowMs, safe, summary) {
     slices.push(r);
   }
   const lastTs = slices.reduce((m, s) => (s.last_ts != null && s.last_ts > (m ?? -1) ? s.last_ts : m), null) ?? plan.lastTs;
-  const header = exportHeader({ nowMs, lastTs, ts24: slices.flatMap(s => s.ts24) });
+  const header = exportHeader({ nowMs, lastTs, ts24: slices.flatMap(s => s.ts24), radar: plan.radar });
   const total = slices.reduce((a, s) => a + s.n, 0);
 
   const join = await safe("export-join", async () => {

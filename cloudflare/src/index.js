@@ -12,7 +12,7 @@
  *   GET /api/game/<id>       ficha en vivo
  *
  * Admin (en cualquier host, "Authorization: Bearer <ADMIN_TOKEN>"):
- *   POST /api/admin/run      lanza un muestreo  {daily?, skip?: [...], only?: [...], telegram_force?, now?}
+ *   POST /api/admin/run      lanza un muestreo  {daily?, select?, skip?: [...], only?: [...], telegram_force?, now?}
  *   GET  /api/admin/status   estado (state + instancia) ?id=<instancia> &counts=1
  *   POST /api/admin/import   {table, columns, rows}  (migración, por lotes)
  *   POST /api/admin/rebuild  recalcula state.hist_agg desde daily y lanza un export
@@ -238,6 +238,7 @@ async function admin(req, env, url) {
       const body = await readBody(req);
       const params = {};
       if (body.daily) params.daily = true;
+      if (body.select) params.select = true;
       if (Array.isArray(body.skip)) params.skip = body.skip.map(String);
       if (body.telegram_force) params.telegram_force = String(body.telegram_force);
       if (body.now) params.now = new Date(body.now).toISOString();
@@ -274,7 +275,7 @@ async function admin(req, env, url) {
 
 async function adminStatus(env, url) {
   const out = { now: new Date().toISOString() };
-  out.state = await getStates(env.DB, ["last_run", "last_partial_run", "run_current", "day", "closed_day", "search_cursor", "last_sample_ts"]);
+  out.state = await getStates(env.DB, ["last_run", "last_partial_run", "run_current", "day", "closed_day", "search_cursor", "last_sample_ts", "sel_day", "selection"]);
   // La pasada en curso va por ejecuciones encadenadas (<id>-sN): se enseña la actual
   const id = url.searchParams.get("id") || out.state.run_current?.id || out.state.last_run?.instance;
   if (id) {

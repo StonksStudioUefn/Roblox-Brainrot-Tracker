@@ -290,3 +290,30 @@ Medido en producción:
 
 Hay invocaciones con más de 10 ms de CPU porque suman varios pasos (hasta 168 ms), y terminan en `ok`: el
 límite de CPU se aplica por paso.
+
+## Radar y juegos seguidos (03/10/2026)
+
+Se pasa de muestrear todo el catálogo (~2.500 juegos) a un **radar** de todo y
+**~200 juegos seguidos** (`SELECTION` en `config.js`).
+
+- `games.sel` (0/1): seguido. Lo escribe el paso `select` una vez al día, con el
+  día anterior cerrado (`state.sel_day`, resumen en `state.selection`). Base anterior:
+  `ALTER TABLE games ADD COLUMN sel INTEGER DEFAULT 0`.
+- Radar: en cada pasada, `rolimons` lee la lista de Rolimons (≥ 150 jugadores),
+  la cruza con `places` y guarda `{universe_id: jugadores}` en R2
+  `radar/<día>/<ts>.json` (un fichero por muestreo; 7 días).
+- `samples` y votos solo de los seguidos. El meta diario (Games API) sigue siendo de
+  todo el radar: ficha, horror, y jugadores y visitas de los no seguidos, que van al
+  cierre por `tmp/run/<id>/votes-<i>.json` = `{v: votos de seguidos, r: {id: [playing, visits]}}`.
+- Cierre del día: `closeDayStmt` (desde samples) y después `radarCloseStmt`
+  (desde las lecturas del radar; mismas mediana y media). Si un juego tiene las
+  dos, se queda la que tiene más lecturas.
+- `select`: `select-plan` → `select-<i>` (250 juegos por paso: últimas 14 filas
+  diarias + `radarScore` de `metrics.js`, ≈ 5 ms en frío) → `select-apply`
+  (`chooseSelection` de `sampler.js`). Top 10 por jugadores en general y en horror,
+  150 mejores candidatos general y 50 de horror (completados por jugadores si no
+  hay bastantes), y los ya seguidos dentro del 150 % de su lista.
+- Export: solo `sel = 1` (si aún no hay selección, todo el radar). La cabecera
+  añade `radar_games` y `selected_games`. `buildDashboard` añade `categories.*.top`
+  (10 primeros por jugadores) y las dos categorías bajan `min_players` a 300.
+- Admin: `POST /api/admin/run {"only":["select"],"select":true}` rehace la selección.

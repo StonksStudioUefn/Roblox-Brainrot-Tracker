@@ -331,6 +331,16 @@
   <section class="sec">
     <div class="sec-head">
       <div>
+        <h2 class="sec-title">🏆 Top 10 por jugadores</h2>
+        <p class="sec-sub" id="top-sub">Los que más jugadores tienen ahora mismo.</p>
+      </div>
+    </div>
+    <div class="trend-list" id="top"></div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div>
         <h2 class="sec-title">🔥 En tendencia</h2>
         <p class="sec-sub">Crecimiento sostenido de los últimos días. Un pico suelto por un evento cuenta menos.</p>
       </div>
@@ -341,7 +351,7 @@
   <section class="sec" id="all">
     <div class="sec-head">
       <div>
-        <h2 class="sec-title">📋 Todos los juegos</h2>
+        <h2 class="sec-title">📋 Juegos seguidos</h2>
         <p class="sec-sub" id="all-sub"></p>
       </div>
     </div>
@@ -384,8 +394,9 @@
   <details class="how">
     <summary>¿Cómo se calculan los datos?</summary>
     <ul>
-      <li><b>Descubrimiento:</b> los juegos se encuentran con las listas oficiales de Roblox (Top Trending, Up-and-Coming, Top Playing Now…), con el buscador oficial de Roblox (palabras de horror, por turnos) y con la lista de Rolimons una vez al día. Se sigue a todos los que tienen ≥<span id="m-min">300</span> jugadores; tras <span id="m-untrack">3</span> días seguidos por debajo dejan de seguirse.</li>
-      <li><b>Muestras:</b> un Worker de Cloudflare toma una foto de todos los juegos seguidos cada 3 h y la guarda en Cloudflare D1. El valor de cada día es la <b>mediana</b> de sus muestras, así que un pico de una hora no cambia el día.</li>
+      <li><b>Radar:</b> los juegos se encuentran con las listas oficiales de Roblox (Top Trending, Up-and-Coming, Top Playing Now…), con el buscador oficial de Roblox (palabras de horror, por turnos) y con la lista de Rolimons. Cada 3 h se miran los jugadores de todos los que tienen ≥<span id="m-min">300</span> (<span id="m-radar">unos 2.500</span>) y de cada uno se guarda un solo dato al día; tras <span id="m-untrack">3</span> días seguidos por debajo salen del radar.</li>
+      <li><b>Juegos seguidos:</b> cada día se eligen unos 200 (<span id="m-sel">—</span> hoy): en cada pestaña los <span id="m-top">10</span> con más jugadores y los mejores candidatos a emergente (<span id="m-eg">150</span> de todo Roblox y <span id="m-eh">50</span> de horror). Un juego elegido se queda mientras siga cerca de su lista, para que no entre y salga cada día. Solo se ven aquí los seguidos.</li>
+      <li><b>Muestras:</b> un Worker de Cloudflare toma una foto de los juegos seguidos cada 3 h y la guarda en Cloudflare D1. El valor de cada día es la <b>mediana</b> de sus muestras, así que un pico de una hora no cambia el día.</li>
       <li><b>Cálculo:</b> las métricas se calculan en tu navegador con los últimos <span id="m-days">21</span> días de cada juego y sus muestras de las últimas 48 h; la ficha pide <span id="m-hist">120</span> días de historia para el gráfico.</li>
       <li><b>Jugadores:</b> mediana de las muestras de las últimas 24 h. "Ahora" (🟢) se pide a Roblox en el momento al abrir la página, cada ~2 min o con 🔄 Actualizar; no se guarda en el histórico.</li>
       <li><b>Eventos:</b> un día se marca como evento si está muy por encima de la mediana de los días de alrededor (filtro de Hampel) y después vuelve a bajar (si el salto se mantiene es crecimiento real), descontando el efecto fin de semana. Esos días se pintan en amarillo y <b>no cuentan</b> para medias, 7d ni tendencia.</li>
@@ -396,7 +407,7 @@
       <li>Los días anteriores al 03/10/2026 tienen una sola muestra (formato antiguo).</li>
     </ul>
   </details>
-  <footer>Datos de las APIs públicas de Roblox (listas de Explore, buscador y juegos) y de Rolimons · muestras cada 3 h con un Worker de Cloudflare · datos en Cloudflare D1 y R2</footer>
+  <footer>Datos de las APIs públicas de Roblox (listas de Explore, buscador y juegos) y de Rolimons · radar y muestras cada 3 h con un Worker de Cloudflare · datos en Cloudflare D1 y R2</footer>
 </main>
 
 <div class="scrim" id="scrim"></div>
@@ -406,7 +417,7 @@
 // Las métricas se calculan aquí, en el navegador, con el mismo módulo que usa el
 // Worker para Telegram (port de analytics.py + export_dashboard.py).
 import { buildDashboard, flagEvents, ROBLOX_SORT_POINTS } from '/metrics.js';
-import { EXPORT_DAILY_DAYS, HISTORY_DAYS, UNTRACK_AFTER_DAYS } from '/config.js';
+import { EXPORT_DAILY_DAYS, HISTORY_DAYS, SELECTION, UNTRACK_AFTER_DAYS } from '/config.js';
 
 // ─── Estado ───────────────────────────────────────────────────────────────────
 // La dirección antigua de GitHub Pages lleva a la nueva
@@ -541,6 +552,8 @@ async function fetchExport(revalidate = false) {
 function compute(exp) {
   const t0 = performance.now();
   const d = buildDashboard(exp, { now: Date.now() });
+  d.radar_games = exp.radar_games ?? null;
+  d.selected_games = exp.selected_games ?? null;
   console.info(`buildDashboard: ${exp.games.length} juegos → ${Object.keys(d.games).length} en listas, ${(performance.now() - t0).toFixed(0)} ms`);
   EXPORT_AT = exp.generated_at;
   return d;
@@ -563,12 +576,13 @@ function renderHeader() {
   document.getElementById('hero-title').innerHTML = CAT === 'horror'
     ? 'Radar de <em>horror</em> en Roblox'
     : 'Lo que está <em>petando</em> en Roblox';
+  const radar = RAW.radar_games ? `El radar vigila ${num(RAW.radar_games)} juegos con ≥${num(RAW.track_min_players)} jugadores y cada día elige los que merece la pena seguir.` : '';
   document.getElementById('hero-sub').textContent = CAT === 'horror'
-    ? `Juegos de terror, de escapar de monstruos, de sobrevivir a un asesino o de backrooms, aunque no pongan "horror" en el nombre. Se listan los que tienen ≥${num(c.min_players)} jugadores.`
-    : `Todos los juegos de Roblox con ≥${num(c.min_players)} jugadores. Se toman muestras varias veces al día para que los eventos no ensucien las medias.`;
+    ? `Juegos de terror, de escapar de monstruos, de sobrevivir a un asesino o de backrooms, aunque no pongan "horror" en el nombre. Aquí salen los 10 con más jugadores y los que tienen más pinta de despegar. ${radar}`
+    : `Los 10 juegos con más jugadores de Roblox y los que tienen más pinta de despegar. Se toman muestras varias veces al día para que los eventos no ensucien las medias. ${radar}`;
   const s = c.stats;
   document.getElementById('kpis').innerHTML = [
-    ['Juegos en lista', s.games, `≥${num(c.min_players)} jugadores`],
+    ['Juegos seguidos', s.games, RAW.radar_games ? `de ${num(RAW.radar_games)} en el radar` : `≥${num(c.min_players)} jugadores`],
     ['Jugadores', num(s.players), 'suma de los típicos'],
     ['📈 Subiendo', s.rising, 'tendencia positiva'],
     ['📉 Bajando', s.falling, 'perdiendo jugadores'],
@@ -580,6 +594,11 @@ function renderHeader() {
   document.getElementById('m-min').textContent = RAW.track_min_players;
   document.getElementById('m-visits').textContent = num(RAW.emerging_max_visits);
   document.getElementById('m-untrack').textContent = UNTRACK_AFTER_DAYS;
+  if (RAW.radar_games) document.getElementById('m-radar').textContent = num(RAW.radar_games);
+  document.getElementById('m-sel').textContent = RAW.selected_games ?? '—';
+  document.getElementById('m-top').textContent = SELECTION.top;
+  document.getElementById('m-eg').textContent = SELECTION.emerging_general;
+  document.getElementById('m-eh').textContent = SELECTION.emerging_horror;
   document.getElementById('m-days').textContent = EXPORT_DAILY_DAYS;
   document.getElementById('m-hist').textContent = HISTORY_DAYS;
   document.getElementById('m-uac').textContent = ROBLOX_SORT_POINTS['up-and-coming'];
@@ -616,6 +635,25 @@ function renderEmerging() {
           ${g.emerging_reasons.filter(r => !r.startsWith('Roblox:')).map(r => `<span class="chip accent">${esc(r)}</span>`).join('')}
         </div>
       </div>
+    </button>`).join('');
+}
+
+function renderTop() {
+  const el = document.getElementById('top');
+  const list = (catData().top || []).map(G).filter(Boolean);
+  if (!list.length) {
+    el.innerHTML = `<div class="empty" style="grid-column:1/-1"><b>Sin datos todavía</b>Aparecerán tras el próximo muestreo.</div>`;
+    return;
+  }
+  el.innerHTML = list.map((g, i) => `
+    <button class="trow" data-id="${g.id}">
+      <span class="rank">${i + 1}</span>
+      ${icon(g, 'sm')}
+      <div class="mid">
+        <div class="t" title="${esc(g.name)}">${esc(g.title)}</div>
+        <div class="s">${num(g.typical)} · ${pct(g.growth_24h)} 24h${g.trend != null ? ` · ${pct(g.trend)}/día` : ''}</div>
+      </div>
+      ${spark(g.spark, g.spark_ev, 84, 28)}
     </button>`).join('');
 }
 
@@ -946,9 +984,9 @@ async function fetchThumbs(ids) {
 async function refreshLive(force = false) {
   if (!RAW) return;
   const c = catData();
-  const ids = [...c.emerging, ...c.trending, ...filtered().slice(0, LIMIT).map(g => g.id)];
+  const ids = [...c.emerging, ...(c.top || []), ...c.trending, ...filtered().slice(0, LIMIT).map(g => g.id)];
   const [a, b] = await Promise.all([fetchLive(ids, force), fetchThumbs(c.emerging)]);
-  if (a || b) { renderEmerging(); renderTrending(); renderTable(false); updateDrawerLive(); }
+  if (a || b) { renderEmerging(); renderTop(); renderTrending(); renderTable(false); updateDrawerLive(); }
 }
 
 let LIVE_TIMER;
@@ -993,7 +1031,7 @@ function switchCat(k) {
 }
 
 function renderAll() {
-  renderTabs(); renderHeader(); renderEmerging(); renderTrending(); renderGenres(); renderTable();
+  renderTabs(); renderHeader(); renderEmerging(); renderTop(); renderTrending(); renderGenres(); renderTable();
 }
 
 function bind() {
