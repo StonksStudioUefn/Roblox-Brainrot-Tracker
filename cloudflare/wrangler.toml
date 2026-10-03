@@ -20,7 +20,7 @@ database_id = "108fb0af-6f2f-46ef-8b06-ebd322fc4894"
 
 [[r2_buckets]]
 binding = "BUCKET"
-bucket_name = "roblox-tracker"
+bucket_name = "stonks-archivos"   # bucket común de STONKS: el tracker usa su carpeta roblox-tracker/
 
 [[workflows]]
 name = "roblox-sampler"

@@ -52,6 +52,7 @@ import {
 } from "./db.js";
 import { classifyHorror } from "./horror.js";
 import { radarScore } from "./metrics.js";
+import { withApp } from "./stonks.js";
 import { pickCandidates, runTelegram, telegramScanText } from "./telegram.js";
 
 // Tamaños de trozo (CPU medida en frío: ver README "CPU por paso")
@@ -85,7 +86,7 @@ const STEP_ONCE = { retries: { limit: 1, delay: "30 seconds", backoff: "constant
 
 export class Sampler extends WorkflowEntrypoint {
   async run(event, step) {
-    const env = this.env;
+    const env = withApp(this.env);   // el bucket, dentro de la carpeta roblox-tracker/
     const db = env.DB;
     const p = event.payload || {};
     const skip = new Set(p.skip || []);

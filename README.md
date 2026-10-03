@@ -10,7 +10,7 @@ Todo vive en **Cloudflare** (plan gratuito). GitHub solo guarda el código.
 
 ```
 Cron cada hora (min 0) ─▶ Workflow roblox-sampler ──▶ D1 roblox-tracker (muestras, días, fichas)
-                              │                     └─▶ R2 roblox-tracker (export.json, telegram.json, web)
+                              │                     └─▶ R2 stonks-archivos/roblox-tracker/ (web, export, radar)
                               └─▶ Telegram (alertas y resúmenes)
 
 Worker roblox-tracker (robloxtracker.stonksstudio.com)
@@ -113,14 +113,15 @@ Se guarda solo lo básico, en la base de datos **D1 `roblox-tracker`**:
 | `sort_hits` | en qué listas oficiales de Roblox aparece cada juego y en qué puesto (1 año) |
 | `state` | estado del muestreo y qué avisos de Telegram ya se han enviado |
 
-En el bucket **R2 `roblox-tracker`** van la web (`site/`), los ficheros generados (`data/export.json`, `data/telegram.json`) y las lecturas del radar de cada muestreo (`radar/<día>/`, 7 días). No se guardan descripciones, iconos ni miniaturas: el Worker los pide a Roblox cuando hacen falta.
+En el bucket común de STONKS, **R2 `stonks-archivos`**, dentro de la carpeta **`roblox-tracker/`**, van la web (`site/`), los ficheros generados (`data/export.json`, `data/telegram.json`) y las lecturas del radar de cada muestreo (`radar/<día>/`, 7 días). Así salen en el **Almacén** (almacen.stonksstudio.com) como una app más, junto con lo que ocupa la base D1, que el tracker le da con `espacio()`. No se guardan descripciones, iconos ni miniaturas: el Worker los pide a Roblox cuando hacen falta.
 
 El historial hasta el 03/10/2026 sigue en git, en los commits anteriores a la migración.
 
 ## Cloudflare
 
 - **Worker `roblox-tracker`** en `robloxtracker.stonksstudio.com`, protegido por la regla de Access de `*.stonksstudio.com`. Su URL `*.workers.dev` solo responde a `/api/admin/*` con `ADMIN_TOKEN`.
-- **Workflow `roblox-sampler`**, **D1 `roblox-tracker`** y **R2 `roblox-tracker`**.
+- **Workflow `roblox-sampler`**, **D1 `roblox-tracker`** y la carpeta `roblox-tracker/` del **R2 `stonks-archivos`** (el bucket común de STONKS).
+- **Almacén de STONKS:** el Worker exporta el entrypoint `Operaciones` (`cloudflare/src/stonks.js`) con `espacio()` y `nombres()`; el Almacén lo llama por service binding (repo `stonks-ecosistema/almacen`). `GET /api/admin/espacio` da la misma medida.
 - **Secrets del Worker:** `ADMIN_TOKEN`, `TELEGRAM_TOKEN` y `TELEGRAM_CHAT_ID`.
 - Código, pruebas y despliegue: [`cloudflare/README.md`](cloudflare/README.md). La interfaz entre piezas está en [`cloudflare/CONTRACT.md`](cloudflare/CONTRACT.md).
 
