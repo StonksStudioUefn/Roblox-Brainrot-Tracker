@@ -266,3 +266,27 @@ en D1 `state`, clave `telegram`. Los secrets son `TELEGRAM_TOKEN` y `TELEGRAM_CH
    El filtro de emergentes exige visitas conocidas (de samples o, si no, la última de `daily`), como
    make_export.py. Mediana y media de `daily` redondean los .5 al par, como `round()` de Python.
 6. **`data/telegram.json`** (nuevo, ver el paso 8 del muestreo).
+
+## Nota del coordinador (03/10/2026): 50 peticiones por invocación
+
+Comprobado en producción: en el plan gratis el límite de 50 peticiones externas es **por invocación**, y
+los pasos de una instancia de Workflow comparten invocación (ni el `step.sleep` de 1 s ni los reintentos
+la cambian). Error: «Too many subrequests by single Worker invocation».
+
+Solución (`sampler.js`):
+- **Cuenta común por invocación.** Cada pasada lleva un `Budget(INVOCATION_BUDGET = 46)` para toda la
+  invocación. Cada paso coge su parte con `SubBudget`.
+- **Pasada en varias ejecuciones encadenadas.** Antes de un paso con red se comprueba si caben sus
+  peticiones. Si no caben, se crea la siguiente ejecución (`<id>-s<N>`) con `phase` y `cursor`, y la
+  actual termina. Las fases son discover → search → rolimons → resolve → sample → finalize.
+- **Datos entre ejecuciones.** Las listas que necesita la siguiente ejecución (ids, places por resolver y
+  votos) van a R2 `tmp/run/<id>/` y se borran en `finish`.
+- **Estado.** D1 `state.run_current` dice qué ejecución va ahora; `/api/admin/status` la enseña.
+
+Medido en producción:
+- pasada normal: 3 ejecuciones;
+- primera pasada del día: 6 ejecuciones y ~3,5 min;
+- 0 errores.
+
+Hay invocaciones con más de 10 ms de CPU porque suman varios pasos (hasta 168 ms), y terminan en `ok`: el
+límite de CPU se aplica por paso.

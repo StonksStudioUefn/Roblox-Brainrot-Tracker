@@ -6,12 +6,14 @@
  * ≤ 45 peticiones externas (Budget), y es idempotente: Workflows lo reintenta
  * si falla, y los pasos ya hechos no se repiten al reanudar.
  *
- * Límite de 50 peticiones externas: en el plan gratis la documentación lo da
- * "por invocación" ("50/request" en la tabla de límites de Workflows) sin
- * aclarar si cada paso es una invocación (la CPU sí es "por paso"). Para no
- * depender de ello, antes de cada paso con red hay un `step.sleep` (no cuenta
- * en el límite de pasos), para que el motor reanude la instancia en otra
- * invocación. Ver README / CONTRACT.md.
+ * Límite de 50 peticiones externas: en el plan gratis es POR INVOCACIÓN y los
+ * pasos de una instancia comparten invocación (comprobado en producción el
+ * 03/10/2026: «Too many subrequests by single Worker invocation»). Por eso una
+ * pasada son varias ejecuciones encadenadas: cada una lleva la cuenta de sus
+ * peticiones (INVOCATION_BUDGET) y, cuando el paso siguiente ya no cabe, crea
+ * la siguiente (`<id>-sN`) con la fase y el punto donde seguir. Las listas que
+ * necesitan las siguientes (ids a muestrear, places por resolver, votos) van a
+ * R2 tmp/run/<id>/ y se borran al terminar. Estado en D1: run_current.
  *
  * Pasos:  init → explore-0..P (una página de get-sorts por paso) → explore-more →
  *         search-0..N → search-cursor → [rolimons → resolve-0..K] →
@@ -29,7 +31,7 @@ import {
   TRACK_MIN_PLAYERS,
 } from "./config.js";
 import {
-  Budget, chunks, fetchGames, fetchRolimons, fetchSearch, fetchSortContent, fetchSortsPage, fetchVotes,
+  Budget, SubBudget, chunks, fetchGames, fetchRolimons, fetchSearch, fetchSortContent, fetchSortsPage, fetchVotes,
   resolvePlaces,
 } from "./sources.js";
 import {
@@ -45,7 +47,7 @@ import { pickCandidates, runTelegram, telegramScanText } from "./telegram.js";
 // Tamaños de trozo (CPU medida en frío: ver README "CPU por paso")
 export const SAMPLE_CHUNK = 400;       // 8 lotes de 50: parsear ~560 KB de la Games API ≈ 4,3 ms
 export const META_CHUNK = 50;          // 1 lote + votos + horror de 50 (horror en frío ≈ 4,2 ms)
-export const RESOLVE_CHUNK = 40;       // place → universe por paso
+export const RESOLVE_CHUNK = 40;       // place → universe por paso (1 petición cada uno)
 export const RESOLVE_PER_DAY = 200;
 export const EXPLORE_MAX_PAGES = 8;    // páginas de get-sorts (hoy son 5)
 export const EXPORT_SLICE = 500;       // juegos seguidos por trozo del export (≈ 250 exportados, ≈ 450 KB)
@@ -53,6 +55,15 @@ export const TG_SCAN_GAMES = 50;       // juegos por paso de telegramScanText (e
 export const EXPORT_KEY = "data/export.json";
 export const TELEGRAM_KEY = "data/telegram.json";
 export const PART_PREFIX = "tmp/export/part-";
+export const RUN_PREFIX = "tmp/run/";        // listas que pasan de una ejecución a otra
+
+// Peticiones externas: el plan gratis da 50 por invocación. Se deja margen.
+export const INVOCATION_BUDGET = 46;
+export const SEARCH_NEED = 9;          // 3 páginas + reintentos
+export const ROLIMONS_NEED = 4;
+export const SAMPLE_NEED = 12;         // 8 lotes de la Games API + reintentos
+export const META_NEED = 6;            // 1 lote + votos + reintentos
+export const TELEGRAM_NEED = 30;       // miniaturas + envíos (peor caso medido: 27)
 
 const STEP = { retries: { limit: 3, delay: "20 seconds", backoff: "exponential" }, timeout: "10 minutes" };
 const STEP_ONCE = { retries: { limit: 1, delay: "30 seconds", backoff: "constant" }, timeout: "5 minutes" };
@@ -65,7 +76,17 @@ export class Sampler extends WorkflowEntrypoint {
     const skip = new Set(p.skip || []);
     const only = p.only ? new Set(p.only) : null;
     const want = name => !skip.has(name) && (!only || only.has(name));
-    const summary = { steps: {}, errors: [] };
+    const seg = p.seg || 0;                        // nº de esta ejecución dentro de la pasada
+    const base = p.base || event.instanceId;       // id de la primera ejecución de la pasada
+    const tmp = `${RUN_PREFIX}${base}/`;
+    // Peticiones externas de ESTA invocación (plan gratis: 50). Los pasos ya
+    // hechos que se reanudan no vuelven a pedir nada, así que no gastan.
+    const inv = new Budget(INVOCATION_BUDGET);
+    const sub = n => new SubBudget(inv, n);
+    const summary = p.summary || { steps: {}, errors: [] };
+    summary.steps ||= {};
+    summary.errors ||= [];
+    summary.segments = seg + 1;
 
     // Un paso que falla tras sus reintentos no tumba la pasada entera
     const safe = async (name, fn, cfg = STEP) => {
@@ -78,14 +99,29 @@ export class Sampler extends WorkflowEntrypoint {
         return null;
       }
     };
-    const pause = name => step.sleep(`pausa ${name}`, "1 second");
 
-    // ── init ──────────────────────────────────────────────────────────────
-    const init = await step.do("init", STEP, async () => {
+    // Sigue la pasada en otra ejecución (= otra invocación, con sus 50 peticiones)
+    const next = async (phase, cursor = 0) => {
+      await step.do(`next-${phase}-${cursor}`, STEP, async () => {
+        const id = `${base}-s${seg + 1}`;
+        try {
+          await env.SAMPLER.create({ id, params: { ...p, seg: seg + 1, base, init, phase, cursor, summary: compact(summary) } });
+        } catch (e) {
+          if (!/already exists|duplicate/i.test(String(e?.message || e))) throw e;
+        }
+        await setState(db, "run_current", { base, seg: seg + 1, id, phase, cursor });
+        return { next: id, phase, cursor };
+      });
+      return { ...compact(summary), continued_in: `${base}-s${seg + 1}` };
+    };
+
+    // ── init (solo en la primera ejecución; las demás lo reciben) ─────────
+    const init = p.init || await step.do("init", STEP, async () => {
       const ms = p.now ? Date.parse(p.now) : new Date(event.timestamp || Date.now()).getTime();
       const ts = minuteOf(ms);
       const today = isoDate(ts);
       const st = await getStates(db, ["day", "closed_day", "search_cursor"]);
+      await setState(db, "run_current", { base, seg, id: base, phase: "discover", cursor: 0 });
       return {
         ts, today,
         firstOfDay: !!p.daily || st.day !== today,
@@ -98,15 +134,18 @@ export class Sampler extends WorkflowEntrypoint {
     const firstSeen = isoMinute(ts);
     summary.ts = firstSeen;
     summary.first_of_day = init.firstOfDay;
+    const order = ["discover", "search", "rolimons", "resolve", "sample", "finalize"];
+    const at = order.indexOf(p.phase || "discover");
+    const reach = ph => order.indexOf(ph) >= at;
+    const startCursor = ph => (ph === (p.phase || "discover") ? p.cursor || 0 : 0);
 
-    // ── explore: una página de get-sorts por paso, luego get-sort-content ──
-    if (want("explore")) {
+    // ── discover: explore (una página de get-sorts por paso, luego get-sort-content)
+    if (reach("discover") && want("explore")) {
       let token = null;
       const pending = [];
       for (let i = 0; i < EXPLORE_MAX_PAGES; i++) {
-        await pause(`explore-${i}`);
         const r = await safe(`explore-${i}`, async () => {
-          const budget = new Budget(6);
+          const budget = sub(4);
           const page = await fetchSortsPage(budget, init.session, token);
           if (!page) throw new Error("Explore API sin respuesta");
           const res = await saveExplore(db, page.sorts, today, firstSeen);
@@ -118,9 +157,8 @@ export class Sampler extends WorkflowEntrypoint {
         if (!token) break;
       }
       if (pending.length) {
-        await pause("explore-more");
         await safe("explore-more", async () => {
-          const budget = new Budget(30);
+          const budget = sub(12);
           const sorts = {}, offsets = {};
           for (const [sortId, t, firstLen] of pending) {
             sorts[sortId] = await fetchSortContent(budget, init.session, sortId, t, 6);
@@ -133,15 +171,16 @@ export class Sampler extends WorkflowEntrypoint {
     }
 
     // ── search (por turnos) ───────────────────────────────────────────────
-    if (want("search")) {
+    if (reach("search") && want("search")) {
       const n = Math.min(SEARCH_QUERIES_PER_RUN, SEARCH_QUERIES.length);
-      for (let k = 0; k < n; k++) {
+      for (let k = startCursor("search"); k < n; k++) {
+        if (inv.left < SEARCH_NEED) return await next("search", k);
         const query = SEARCH_QUERIES[(init.cursor + k) % SEARCH_QUERIES.length];
         const source = `search:${query}`;
-        // La Search API castiga las ráfagas: pausa más larga entre búsquedas
-        await step.sleep(`pausa search-${k}`, k ? "3 seconds" : "1 second");
+        // La Search API castiga las ráfagas: pausa entre búsquedas
+        if (k) await step.sleep(`pausa search-${k}`, "3 seconds");
         await safe(`search-${k}`, async () => {
-          const budget = new Budget(12);
+          const budget = sub(SEARCH_NEED);
           const found = await fetchSearch(budget, query, { pages: SEARCH_PAGES_PER_QUERY });
           if (!found.length) throw new Error(`Search API sin resultados para "${query}"`);
           const seen = new Set();
@@ -159,17 +198,18 @@ export class Sampler extends WorkflowEntrypoint {
         });
       }
       await safe("search-cursor", async () => {
-        const next = (init.cursor + n) % SEARCH_QUERIES.length;
-        await setState(db, "search_cursor", next);
-        return { next };
+        const nxt = (init.cursor + n) % SEARCH_QUERIES.length;
+        await setState(db, "search_cursor", nxt);
+        return { next: nxt };
       });
     }
 
-    // ── rolimons (1ª pasada del día) ──────────────────────────────────────
-    if (init.firstOfDay && want("rolimons")) {
-      await pause("rolimons");
-      const rol = await safe("rolimons", async () => {
-        const budget = new Budget(4);
+    // ── rolimons (1ª pasada del día): la lista de places por resolver va a R2
+    const daily = init.firstOfDay && want("rolimons");
+    if (daily && reach("rolimons")) {
+      if (inv.left < ROLIMONS_NEED) return await next("rolimons");
+      await safe("rolimons", async () => {
+        const budget = sub(ROLIMONS_NEED);
         const list = await fetchRolimons(budget, TRACK_MIN_PLAYERS);
         if (!list || !list.length) throw new Error("Rolimons no devolvió la lista");
         const pids = list.map(r => r[0]);
@@ -181,12 +221,21 @@ export class Sampler extends WorkflowEntrypoint {
         // Primero los que más jugadores tienen; tope diario
         const todo = unknown.map(pid => byPid.get(pid)).sort((a, b) => b[2] - a[2])
           .slice(0, RESOLVE_PER_DAY).map(([pid, name]) => [pid, name]);
-        return { stats: { games: list.length, unknown: unknown.length, calls: budget.used, written: written(res) }, todo };
+        await env.BUCKET.put(`${tmp}resolve.json`, JSON.stringify(todo));
+        return { stats: { games: list.length, unknown: unknown.length, todo: todo.length, calls: budget.used, written: written(res) } };
       });
-      for (const [i, part] of chunks(rol?.todo || [], RESOLVE_CHUNK).entries()) {
-        await pause(`resolve-${i}`);
+    }
+    if (daily && reach("resolve")) {
+      const todo = await step.do(`resolve-list-${seg}`, STEP, async () => {
+        const o = await env.BUCKET.get(`${tmp}resolve.json`);
+        return o ? await o.json() : [];
+      });
+      const parts = chunks(todo, RESOLVE_CHUNK);
+      for (let i = startCursor("resolve"); i < parts.length; i++) {
+        if (inv.left < RESOLVE_CHUNK + 4) return await next("resolve", i);
+        const part = parts[i];
         await safe(`resolve-${i}`, async () => {
-          const budget = new Budget(45);
+          const budget = sub(RESOLVE_CHUNK + 4);
           const got = await resolvePlaces(budget, part.map(r => r[0]));
           const names = new Map(part);
           const ok = got.filter(([, uid]) => uid);
@@ -199,32 +248,58 @@ export class Sampler extends WorkflowEntrypoint {
       }
     }
 
-    // ── sample-N (+ meta diario) ──────────────────────────────────────────
-    const votes = {};
-    if (want("sample")) {
-      const ids = await step.do("sample-list", STEP, () => trackedIds(db));
+    // ── sample-N (+ meta diario): la lista de ids va a R2 para las demás ejecuciones
+    if (reach("sample") && want("sample")) {
       const meta = init.firstOfDay;
-      const parts = chunks(ids, meta ? META_CHUNK : SAMPLE_CHUNK);
-      const agg = { games: 0, samples: 0, failed: 0, meta: 0, calls: 0, written: 0, steps: parts.length };
-      for (const [i, part] of parts.entries()) {
-        await pause(`sample-${i}`);
+      const ids = await step.do(`sample-list-${seg}`, STEP, async () => {
+        const key = `${tmp}ids.json`;
+        if (p.phase === "sample") {
+          const o = await env.BUCKET.get(key);
+          if (o) return await o.json();
+        }
+        const list = await trackedIds(db);
+        await env.BUCKET.put(key, JSON.stringify(list));
+        return list;
+      });
+      const size = meta ? META_CHUNK : SAMPLE_CHUNK;
+      const need = meta ? META_NEED : SAMPLE_NEED;
+      const parts = chunks(ids, size);
+      const agg = summary.steps.sample || { games: 0, samples: 0, failed: 0, meta: 0, calls: 0, written: 0, steps: parts.length };
+      for (let i = startCursor("sample"); i < parts.length; i++) {
+        if (inv.left < need) { summary.steps.sample = agg; return await next("sample", i); }
         const name = `sample-${i}`;
         let r = null;
         try {
-          r = await step.do(name, STEP, () => sampleChunk(db, part, { ts, today, meta }));
+          r = await step.do(name, STEP, async () => {
+            const out = await sampleChunk(db, parts[i], { ts, today, meta, budget: sub(need) });
+            // Los votos se aplican en el cierre del día, que puede ir en otra ejecución
+            if (out.votes) await env.BUCKET.put(`${tmp}votes-${i}.json`, JSON.stringify(out.votes));
+            return { stats: out.stats };
+          });
         } catch (e) {
           summary.errors.push(`${name}: ${String(e?.message || e).slice(0, 200)}`);
         }
-        if (r?.votes) Object.assign(votes, r.votes);
         for (const k of Object.keys(agg)) if (k !== "steps") agg[k] += r?.stats?.[k] || 0;
       }
-      summary.steps.sample = agg;   // un resumen (con meta son ~55 pasos)
+      summary.steps.sample = agg;   // un resumen (con meta son ~45 pasos)
     }
 
-    // ── close (cierre de daily de los días anteriores) ───────────────────
+    // ── finalize: cierre, mantenimiento, export y Telegram (en una ejecución
+    // nueva si ya no quedan peticiones para Telegram)
+    if (inv.left < TELEGRAM_NEED && want("telegram") && p.phase !== "finalize") return await next("finalize");
+
     const yesterday = addDays(today, -1);
     if (want("close") && (init.firstOfDay || !init.closedDay || init.closedDay < yesterday)) {
       await safe("close", async () => {
+        // Votos guardados por los pasos sample-N con meta
+        const votes = {};
+        if (init.firstOfDay) {
+          const listed = await env.BUCKET.list({ prefix: `${tmp}votes-` });
+          for (const o of listed.objects) {
+            const obj = await env.BUCKET.get(o.key);
+            if (obj) Object.assign(votes, await obj.json());
+          }
+        }
         const oldest = addDays(today, -SAMPLE_RETENTION_DAYS);
         let from = init.closedDay ? addDays(init.closedDay, 1) : yesterday;
         if (from < oldest) from = oldest;
@@ -271,6 +346,7 @@ export class Sampler extends WorkflowEntrypoint {
           getState: key => getState(db, key),
           setState: (key, value) => setState(db, key, value),
           force: p.telegram_force || undefined,
+          maxFetch: Math.max(0, inv.left),   // lo que queda de las 50 de esta invocación
         });
         return r ?? { ok: true };
       }, STEP_ONCE);
@@ -280,12 +356,29 @@ export class Sampler extends WorkflowEntrypoint {
     await step.do("finish", STEP, async () => {
       summary.finished_at = new Date().toISOString().slice(0, 19) + "Z";
       summary.instance = event.instanceId || null;
+      summary.base = base;
       // Las pasadas parciales (only: […], p. ej. un export manual) no tapan la última completa
-      await setState(db, only ? "last_partial_run" : "last_run", summary);
-      return { errors: summary.errors.length };
+      await setState(db, only ? "last_partial_run" : "last_run", compact(summary));
+      await setState(db, "run_current", null);
+      // Ficheros temporales de la pasada
+      const listed = await env.BUCKET.list({ prefix: tmp });
+      if (listed.objects.length) await env.BUCKET.delete(listed.objects.map(o => o.key));
+      return { errors: summary.errors.length, segments: seg + 1 };
     });
-    return summary;
+    return compact(summary);
   }
+}
+
+/** Resumen que viaja entre ejecuciones (los parámetros de un Workflow tienen tope). */
+function compact(summary) {
+  const out = { ...summary, errors: (summary.errors || []).slice(-30) };
+  const steps = {};
+  for (const [k, v] of Object.entries(summary.steps || {})) {
+    if (/^(explore-\d+|resolve-\d+|search-\d+|export-\d+|tg-scan-)/.test(k)) continue;   // demasiados: van en el total
+    steps[k] = v;
+  }
+  out.steps = steps;
+  return out;
 }
 
 /** Guarda una tanda de listas de Explore. `offsets[sortId]`: filas ya vistas de esa lista. */
@@ -314,8 +407,7 @@ async function saveExplore(db, sorts, today, firstSeen, offsets = {}) {
 }
 
 /** Un trozo de juegos: muestras (+ meta, horror y votos si `meta`). */
-export async function sampleChunk(db, ids, { ts, today, meta }) {
-  const budget = new Budget(45);
+export async function sampleChunk(db, ids, { ts, today, meta, budget = new Budget(45) }) {
   const [games, vts] = await Promise.all([
     fetchGames(budget, ids),
     meta ? fetchVotes(budget, ids) : null,

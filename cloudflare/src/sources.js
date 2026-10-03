@@ -42,6 +42,23 @@ export class Budget {
 export class BudgetError extends Error {}
 
 /**
+ * Presupuesto de un paso que además descuenta del de la invocación (`parent`).
+ * En el plan gratis el límite de 50 peticiones externas es POR INVOCACIÓN y
+ * varios pasos de un Workflow comparten invocación (comprobado en producción:
+ * «Too many subrequests by single Worker invocation»), así que el Sampler lleva
+ * un Budget por invocación y cada paso coge su parte de él.
+ */
+export class SubBudget extends Budget {
+  constructor(parent, max) { super(max); this.parent = parent; }
+  take() {
+    if (this.used >= this.max) throw new BudgetError(`Presupuesto del paso agotado (${this.max})`);
+    this.parent.take();
+    this.used++;
+  }
+  get left() { return Math.min(this.max - this.used, this.parent.left); }
+}
+
+/**
  * GET con reintentos. Devuelve el cuerpo (JSON o texto) o `null` si no hay datos.
  *  - 429 y 5xx: reintenta con backoff exponencial (respeta Retry-After).
  *  - otros 4xx: null sin reintentar.

@@ -16,7 +16,7 @@ binding = "DB"
 database_name = "roblox-tracker"
 # database_id: lo da `wrangler d1 create roblox-tracker` (o el aprovisionamiento
 # automático de `wrangler deploy`). Ponerlo aquí antes de desplegar.
-# database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "108fb0af-6f2f-46ef-8b06-ebd322fc4894"
 
 [[r2_buckets]]
 binding = "BUCKET"

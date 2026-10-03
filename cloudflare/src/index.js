@@ -274,8 +274,9 @@ async function admin(req, env, url) {
 
 async function adminStatus(env, url) {
   const out = { now: new Date().toISOString() };
-  out.state = await getStates(env.DB, ["last_run", "last_partial_run", "day", "closed_day", "search_cursor", "last_sample_ts"]);
-  const id = url.searchParams.get("id") || out.state.last_run?.instance;
+  out.state = await getStates(env.DB, ["last_run", "last_partial_run", "run_current", "day", "closed_day", "search_cursor", "last_sample_ts"]);
+  // La pasada en curso va por ejecuciones encadenadas (<id>-sN): se enseña la actual
+  const id = url.searchParams.get("id") || out.state.run_current?.id || out.state.last_run?.instance;
   if (id) {
     try { out.instance = { id, ...(await (await env.SAMPLER.get(id)).status()) }; }
     catch (e) { out.instance = { id, error: String(e?.message || e) }; }
