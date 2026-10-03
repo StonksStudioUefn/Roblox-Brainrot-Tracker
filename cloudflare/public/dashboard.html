@@ -867,17 +867,33 @@ function drawChart(g) {
   if (CHART) CHART.destroy();
   const accent = cssVar('--accent'), event = cssVar('--event'), grid = cssVar('--border'), muted = cssVar('--muted');
   const legend = document.getElementById('legend');
-  let labels, datasets, rows = null;
+  let labels, datasets, rows = null, xScale = null;
   if (CHART_MODE === 'day') {
-    // El día por horas: las muestras de las últimas 24 h (una por hora)
+    // El día por horas: eje de tiempo real con una división por hora. Cada
+    // muestra va en su minuto exacto: una de las 1:20 (un muestreo manual) no
+    // abre una división nueva, solo corrige la línea entre la 1:00 y las 2:00.
+    const HOUR = 3600e3;
     const r = h.r || [];
-    const last = r.length ? Date.parse(r[r.length - 1][0].replace('Z', ':00Z')) : Date.now();
-    const day = r.filter(([t]) => Date.parse(t.replace('Z', ':00Z')) > last - 24 * 3600e3);
-    labels = day.map(([t]) => new Date(t.replace('Z', ':00Z')).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' }));
+    const ms = t => Date.parse(t.replace('Z', ':00Z'));
+    const last = r.length ? ms(r[r.length - 1][0]) : Date.now();
+    const max = Math.ceil(last / HOUR) * HOUR, min = max - 24 * HOUR;
+    const day = r.filter(([t]) => ms(t) >= min);
     datasets = [{
-      label: 'Jugadores', data: day.map(x => x[1]), borderColor: accent, backgroundColor: accent + '22',
-      fill: true, tension: .3, pointRadius: day.length < 40 ? 2 : 0, borderWidth: 2,
+      label: 'Jugadores', data: day.map(([t, p]) => ({ x: ms(t), y: p })), borderColor: accent, backgroundColor: accent + '22',
+      fill: true, cubicInterpolationMode: 'monotone', pointRadius: day.length < 40 ? 2 : 0, borderWidth: 2,
     }];
+    // Etiquetas cada 1, 2, 3, 4 o 6 h según el ancho de la gráfica; las líneas, siempre cada hora
+    const every = w => [1, 2, 3, 4, 6].find(k => w / 24 * k >= 46) || 6;
+    xScale = {
+      type: 'linear', min, max, grid: { color: grid },
+      ticks: {
+        stepSize: HOUR, autoSkip: false, maxRotation: 0, color: muted, font: { family: 'JetBrains Mono', size: 10 },
+        callback(v) {
+          return new Date(v).getHours() % every(this.chart.chartArea?.width || this.chart.width)
+            ? '' : new Date(v).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' });
+        },
+      },
+    };
     legend.innerHTML = day.length
       ? `<span><i style="background:${accent}"></i>Cada hora · últimas 24 h</span>`
       : 'Todavía no hay muestras de las últimas 24 h.';
@@ -909,13 +925,16 @@ function drawChart(g) {
     data: { labels, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, animation: { duration: 250 },
-      interaction: { mode: 'index', intersect: false },
+      interaction: xScale ? { mode: 'nearest', axis: 'x', intersect: false } : { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
         tooltip: {
           backgroundColor: '#14161d', borderColor: '#343a4c', borderWidth: 1, padding: 10,
           titleFont: { family: 'Plus Jakarta Sans', weight: '700' }, bodyFont: { family: 'JetBrains Mono' },
           callbacks: {
+            title: items => (xScale && items.length
+              ? new Date(items[0].parsed.x).toLocaleString('es', { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+              : items[0]?.label ?? ''),
             label: c => `${c.dataset.label}: ${num(c.parsed.y)}`,
             afterBody: items => {
               if (!rows) return '';
@@ -926,7 +945,7 @@ function drawChart(g) {
         },
       },
       scales: {
-        x: { ticks: { color: muted, maxTicksLimit: 8, font: { family: 'JetBrains Mono', size: 10 } }, grid: { color: grid } },
+        x: xScale || { ticks: { color: muted, maxTicksLimit: 8, font: { family: 'JetBrains Mono', size: 10 } }, grid: { color: grid } },
         y: { ticks: { color: muted, callback: v => num(v), font: { family: 'JetBrains Mono', size: 10 } }, grid: { color: grid } },
       },
     },
