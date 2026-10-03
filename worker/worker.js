@@ -27,6 +27,8 @@ const ICONS_API = "https://thumbnails.roblox.com/v1/games/icons";
 const THUMBS_API = "https://thumbnails.roblox.com/v1/games/multiget/thumbnails";
 
 const MAX_LIVE_IDS = 200;
+// Origen de /data/* durante la transición (vacío = R2)
+const GITHUB_DATA = "https://raw.githubusercontent.com/StonksStudioUefn/Roblox-Brainrot-Tracker/main";
 const TYPES = {
   html: "text/html; charset=utf-8",
   json: "application/json; charset=utf-8",
@@ -94,9 +96,18 @@ async function site(env, path) {
   else if (path.startsWith("/data/") && !path.includes("..")) key = path.slice(1);
   else return text("No encontrado", 404);
 
+  const ext = key.split(".").pop();
+  // Transición: mientras GitHub Actions siga muestreando, los datos se leen
+  // del repo público (cacheados 2 min). La web sí sale de R2.
+  if (key.startsWith("data/") && GITHUB_DATA) {
+    const r = await fetch(`${GITHUB_DATA}/${key}`, { cf: { cacheTtl: 120, cacheEverything: true } });
+    if (!r.ok) return text("No encontrado", 404);
+    return new Response(r.body, {
+      headers: { "content-type": TYPES[ext] || "application/octet-stream", "cache-control": "public, max-age=60" },
+    });
+  }
   const obj = await env.BUCKET.get(key);
   if (!obj) return text("No encontrado", 404);
-  const ext = key.split(".").pop();
   return new Response(obj.body, {
     headers: {
       "content-type": TYPES[ext] || "application/octet-stream",
