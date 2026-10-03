@@ -6,26 +6,31 @@ Tracker de juegos de Roblox con dos vistas: **General** (todo Roblox) y **Horror
 
 ## Cómo funciona
 
+Todo vive en **Cloudflare** (plan gratuito). GitHub solo guarda el código.
+
 ```
-GitHub Actions (cada 3 h)            Cloudflare
-  remote.py pull  ◀──────────────▶  Worker roblox-tracker ──▶ R2 "roblox-tracker"
-  tracker.py                          ├─ web y datos (robloxtracker.stonksstudio.com)
-  export_dashboard.py                 └─ /api/live, /api/thumbs, /api/game → Roblox al momento
-  notifier.py → Telegram
-  remote.py push
+Cron cada 3 h (min 17) ──▶ Workflow roblox-sampler ──▶ D1 roblox-tracker (muestras, días, fichas)
+                              │                     └─▶ R2 roblox-tracker (export.json, telegram.json, web)
+                              └─▶ Telegram (alertas y resúmenes)
+
+Worker roblox-tracker (robloxtracker.stonksstudio.com)
+  ├─ web y datos desde R2/D1
+  └─ /api/live, /api/thumbs, /api/game → Roblox en el momento
 ```
 
-Cada **3 horas** GitHub Actions:
+En cada muestreo el Workflow:
 
-1. **`remote.py pull`**: descarga los datos del bucket R2 de Cloudflare a `data/`.
-2. **`tracker.py`**: descarga de Rolimons la lista de todos los juegos y se queda con los que tienen **≥300 jugadores** (unos 2.000). Completa con la API oficial de Roblox: nombre, creador, géneros, fechas, visitas, favoritos y likes. Con la descripción calcula la clasificación de horror, pero no la guarda. Añade una muestra a `data/raw/HOY.csv` y recalcula el día en `data/daily/MES.csv`.
-3. **`export_dashboard.py`**: calcula métricas, eventos, emergentes y las listas de cada categoría, y genera `data/dashboard.json` y `data/history.json`.
-4. **`notifier.py`**: Telegram (alertas de emergentes, resumen diario y semanal).
-5. **`remote.py push`**: sube a R2 solo lo que ha cambiado, junto con la web (`dashboard.html`).
+1. **Descubre juegos** con las APIs oficiales de Roblox: listas de Explore (*Up-and-Coming*, *Top Trending*…) y el buscador, con palabras de horror que van rotando. Completa con la lista de Rolimons.
+2. **Toma una muestra** de los que tienen **≥300 jugadores** (unos 2.000–2.500): jugadores y visitas. Una vez al día actualiza la ficha (nombre, creador, géneros, fechas, favoritos, likes) y la clasificación de horror, que usa la descripción, pero esta no se guarda.
+3. **Cierra el día anterior** (mediana, media, mín, máx…) y borra las muestras de más de 8 días.
+4. **Genera el export** para la web y la lista de candidatos para Telegram.
+5. **Telegram**: alertas de emergentes, resumen diario (desde las 18:00 UTC) y semanal.
 
-El **Worker** (`worker/worker.js`) sirve la web y los datos desde R2. También pide a Roblox en el momento lo que no se guarda: **jugadores en vivo**, iconos, miniaturas y descripciones. La web los pide al abrirse, cada ~2 min y con el botón 🔄 Actualizar. Eso no se guarda en el histórico ni manda nada a Telegram.
+El plan gratuito permite 50 peticiones externas por invocación, así que el muestreo se reparte en varias ejecuciones encadenadas (3 en una pasada normal y unas 6 en la primera del día).
 
-Toda la configuración está en **`config.py`**: umbrales, categorías, reglas de horror y criterios de emergentes.
+La web pide al Worker lo que no se guarda: **jugadores en vivo**, iconos, miniaturas y descripciones. Lo hace al abrirse, cada ~2 min y con el botón 🔄 Actualizar. Eso no se guarda en el histórico ni manda nada a Telegram.
+
+Toda la configuración está en **`cloudflare/src/config.js`**: umbrales, categorías, reglas de horror, criterios de emergentes y Telegram. La usan el Worker y la web.
 
 ## Métricas (y por qué no las ensucian los eventos)
 
@@ -55,11 +60,11 @@ La puntuación suma:
 - **15 pts:** tamaño actual.
 - **10 pts:** % de likes.
 
-Si sube solo por un pico de evento, la puntuación se reduce.
+Si aparece en las listas oficiales de Roblox suma **+15** (*Up-and-Coming*) o **+10** (*Top Trending*), con un máximo de 100. Si sube solo por un pico de evento, la puntuación se reduce.
 
 ## Horror 👻
 
-Antes solo se miraban palabras en el nombre y se perdían muchos juegos. Ahora cada señal suma puntos (`HORROR` en `config.py`):
+Antes solo se miraban palabras en el nombre y se perdían muchos juegos. Ahora cada señal suma puntos (`HORROR` en `cloudflare/src/config.js`):
 
 - **Nombre:** palabras fuertes (doors, backrooms, killer, anomaly, fnaf…) y débiles (escape, survive, night…). Restan palabras de juegos que no dan miedo (brainrot, tsunami, tycoon, obby…). Las etiquetas entre corchetes tipo `[HAUNTED]` o `[🎃 HALLOWEEN]` se ignoran, porque suelen ser eventos temporales.
 - **Descripción:** horror, scary, jumpscare, killer, hide from, survive the night, entity…
@@ -70,53 +75,50 @@ Un juego es de horror si suma **≥5 puntos y tiene al menos una señal fuerte**
 
 ## Datos
 
-Todo vive en el bucket **R2 `roblox-tracker`** de Cloudflare, no en git. Se guarda solo lo básico:
+Se guarda solo lo básico, en la base de datos **D1 `roblox-tracker`**:
 
-```
-data/raw/AAAA-MM-DD.csv   muestras de cada 3 h: hora, juego, jugadores, visitas (35 días)
-data/daily/AAAA-MM.csv    un registro por juego y día: n, mediana, media, mín, máx, visitas, favoritos, likes
-data/games.json           ficha básica: nombre, creador, géneros, fechas y clasificación de horror
-data/dashboard.json       resumen para la web
-data/history.json         series para los gráficos
-data/state.json           qué avisos de Telegram ya se han enviado
-site/dashboard.html       la web (se sube en cada ejecución desde el repo)
-```
+| Tabla | Qué guarda |
+|---|---|
+| `games` | ficha básica: nombre, creador, géneros, fechas y clasificación de horror |
+| `places` | qué juego (universe) corresponde a cada place |
+| `samples` | una muestra cada 3 h: hora, juego, jugadores, visitas (8 días) |
+| `daily` | un registro por juego y día: n, mediana, media, mín, máx, visitas, favoritos, likes |
+| `sort_hits` | en qué listas oficiales de Roblox aparece cada juego y en qué puesto |
+| `state` | estado del muestreo y qué avisos de Telegram ya se han enviado |
 
-No se guardan descripciones, iconos ni miniaturas: el Worker los pide a Roblox cuando hacen falta. Se pueden ver y descargar en el panel de Cloudflare → R2 → `roblox-tracker`. Desde la web también, en `https://robloxtracker.stonksstudio.com/data/<fichero>`.
+En el bucket **R2 `roblox-tracker`** van la web (`site/`) y los ficheros generados (`data/export.json`, `data/telegram.json`). No se guardan descripciones, iconos ni miniaturas: el Worker los pide a Roblox cuando hacen falta.
 
-El historial hasta el 03/10/2026 sigue en git (en commits antiguos).
-
-## Uso local
-
-```bash
-pip install -r requirements.txt
-export TRACKER_TOKEN=...       # el mismo secret que en GitHub
-python remote.py pull          # baja los datos de R2
-python tracker.py              # ~3 min
-python export_dashboard.py
-python notifier.py --dry-run   # ver los mensajes de Telegram sin enviarlos
-python remote.py push          # solo si quieres guardar lo que has hecho
-```
+El historial hasta el 03/10/2026 sigue en git, en los commits anteriores a la migración.
 
 ## Cloudflare
 
-- **Worker `roblox-tracker`**, en `robloxtracker.stonksstudio.com`, protegido por la regla de Access de `*.stonksstudio.com`. Su URL `*.workers.dev` solo atiende el almacenamiento, con token, y la usa GitHub Actions.
-- **Bucket R2 `roblox-tracker`** con los datos.
-- **Secrets:** `INGEST_TOKEN` en el Worker y el mismo valor como `TRACKER_TOKEN` en GitHub (Settings → Secrets and variables → Actions).
-- Para cambiar el Worker: `cd worker && npx wrangler deploy`. Los cambios en `dashboard.html` no necesitan desplegar nada: se publican en la siguiente ejecución.
+- **Worker `roblox-tracker`** en `robloxtracker.stonksstudio.com`, protegido por la regla de Access de `*.stonksstudio.com`. Su URL `*.workers.dev` solo responde a `/api/admin/*` con `ADMIN_TOKEN`.
+- **Workflow `roblox-sampler`**, **D1 `roblox-tracker`** y **R2 `roblox-tracker`**.
+- **Secrets del Worker:** `ADMIN_TOKEN`, `TELEGRAM_TOKEN` y `TELEGRAM_CHAT_ID`.
+- Código, pruebas y despliegue: [`cloudflare/README.md`](cloudflare/README.md). La interfaz entre piezas está en [`cloudflare/CONTRACT.md`](cloudflare/CONTRACT.md).
+
+Operaciones (con `Authorization: Bearer $ADMIN_TOKEN` contra la URL `*.workers.dev`):
+
+```bash
+curl -X POST $URL/api/admin/run -d '{}'                          # muestreo ahora
+curl -X POST $URL/api/admin/run -d '{"telegram_force":"daily"}'  # forzar el resumen diario (o "weekly")
+curl $URL/api/admin/status                                       # estado del último muestreo
+```
+
+Los scripts Python de la raíz (`tracker.py`, `analytics.py`, `export_dashboard.py`, `notifier.py`…) ya no se ejecutan. Se quedan como referencia para las pruebas de paridad de `cloudflare/test/`.
 
 ## Telegram
 
+Los mensajes llegan al grupo del equipo. Para cambiar de bot o de chat:
+
 1. En Telegram, habla con **@BotFather** → `/newbot` → guarda el token.
-2. Escribe `/start` a tu bot y copia el `chat.id` de `https://api.telegram.org/bot<TOKEN>/getUpdates`.
-3. En el repo: **Settings → Secrets and variables → Actions** → crea `TELEGRAM_TOKEN` y `TELEGRAM_CHAT_ID`.
+2. Añade el bot al grupo, escribe algo y copia el `chat.id` de `https://api.telegram.org/bot<TOKEN>/getUpdates`.
+3. En Cloudflare: **Workers → roblox-tracker → Settings → Variables and Secrets** → cambia `TELEGRAM_TOKEN` y `TELEGRAM_CHAT_ID`.
 
 Los mensajes están pensados para el móvil: el resumen diario es un mensaje por categoría con la miniatura del juego más destacado, y cada juego ocupa dos líneas (nombre / jugadores · crecimiento). Las alertas de emergentes llevan su miniatura, sus datos y enlaces para jugar y ver la ficha.
-
-Para probarlo: **Actions → Roblox Tracker → Run workflow** y elige `diario` o `semanal` en "Forzar un resumen de Telegram". En local: `--daily` y `--weekly` fuerzan esos resúmenes y `--dry-run` imprime los mensajes sin enviarlos.
 
 ## Limitaciones
 
 - Rolimons solo lista juegos con un mínimo de actividad. Los que no aparecen ahí no se ven.
-- GitHub puede retrasar o saltarse ejecuciones programadas. Por eso el cron va en el minuto 17 y cada 3 h: si se pierde una, el día sigue teniendo varias muestras.
+- El buscador de Roblox a veces devuelve resultados vacíos si se le pide mucho. Por eso las palabras van rotando, unas pocas en cada muestreo.
 - La clasificación de horror es heurística. Revisa los motivos en la ficha y corrige con `force_include` / `force_exclude`.
