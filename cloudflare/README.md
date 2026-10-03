@@ -5,7 +5,7 @@ La interfaz entre piezas está en [`CONTRACT.md`](CONTRACT.md).
 
 | Fichero | Qué hace |
 |---|---|
-| `wrangler.toml` | Bindings `DB` (D1), `BUCKET` (R2), `SAMPLER` (Workflow), cron `17 */3 * * *`, dominio |
+| `wrangler.toml` | Bindings `DB` (D1), `BUCKET` (R2), `SAMPLER` (Workflow), cron `0 */3 * * *` (00:00, 03:00, 06:00… UTC), dominio |
 | `schema.sql` | Esquema D1 (idempotente) |
 | `src/index.js` | `fetch` (web, API, admin) y `scheduled` (crea la instancia del Workflow) |
 | `src/sampler.js` | `class Sampler extends WorkflowEntrypoint`: el muestreo por pasos |
@@ -33,7 +33,7 @@ python3 scripts/migrate_from_git.py --url http://127.0.0.1:8787 --token test-adm
 # Lanzar un muestreo completo contra las APIs reales y ver el estado
 curl -X POST -H "Authorization: Bearer test-admin" http://127.0.0.1:8787/api/admin/run -d '{}'
 curl -H "Authorization: Bearer test-admin" "http://127.0.0.1:8787/api/admin/status?id=<id>&counts=1"
-# El cron: curl "http://127.0.0.1:8787/cdn-cgi/handler/scheduled?cron=17+*/3+*+*+*"
+# El cron: curl "http://127.0.0.1:8787/cdn-cgi/handler/scheduled?cron=0+*/3+*+*+*"
 
 # Reglas de host: workers.dev solo responde /api/admin/*
 curl -H "Host: roblox-tracker.x.workers.dev" http://127.0.0.1:8787/api/export     # → 404
