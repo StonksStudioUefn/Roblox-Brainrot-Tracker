@@ -4,7 +4,7 @@ notifier.py — Avisos por Telegram a partir de data/dashboard.json.
 Como el tracker corre varias veces al día, el notificador decide solo qué
 toca enviar (y guarda en data/state.json lo ya enviado):
   · Alerta en cuanto aparece un emergente fuerte (una vez por juego), con su
-    miniatura.
+    miniatura (se pide a Roblox en el momento de enviar).
   · Resumen diario a partir de REPORT_HOUR_UTC: un mensaje por categoría, con
     la miniatura del juego más destacado.
   · Resumen semanal los lunes.
@@ -41,7 +41,7 @@ TITLE_CHARS = 30              # para que el nombre quepa en una línea del móvi
 CAPTION_LIMIT = 1024          # límite de Telegram para el texto de una foto
 DASHBOARD_URL = os.environ.get(
     "DASHBOARD_URL",
-    "https://stonksstudiouefn.github.io/Roblox-Brainrot-Tracker/dashboard.html",
+    "https://robloxtracker.stonksstudio.com/",
 )
 DAYS = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"]
 
@@ -127,7 +127,7 @@ def daily_report(key, cat, games, now) -> tuple[str, str | None]:
     lines += ["", f'📊 <a href="{DASHBOARD_URL}#cat={key}">Abrir dashboard</a>']
 
     top = (emerging or trending or [None])[0]
-    return "\n".join(lines), (top or {}).get("thumb")
+    return "\n".join(lines), (top or {}).get("id")
 
 
 def weekly_report(key, cat, games, now) -> tuple[str, str | None]:
@@ -144,7 +144,7 @@ def weekly_report(key, cat, games, now) -> tuple[str, str | None]:
         lines += ["", "🧊 <b>Lo que más ha caído</b>",
                   *[entry(i, g, f"7d {pct(g['growth_7d'])}", medals=False) for i, g in enumerate(down, 1)]]
     lines += ["", f'📊 <a href="{DASHBOARD_URL}#cat={key}">Abrir dashboard</a>']
-    return "\n".join(lines), (up[0] if up else {}).get("thumb")
+    return "\n".join(lines), (up[0] if up else {}).get("id")
 
 
 def alert(key, cat, g) -> tuple[str, str | None]:
@@ -174,7 +174,7 @@ def alert(key, cat, g) -> tuple[str, str | None]:
         "",
         f'▶️ <a href="https://www.roblox.com/games/{g["place_id"]}">Jugar</a>   ·   📊 {card_link(key, g, "Ver ficha")}',
     ]
-    return "\n".join(lines), g.get("thumb")
+    return "\n".join(lines), g.get("id")
 
 
 # ─── Envío ─────────────────────────────────────────────────────────────────────
@@ -183,22 +183,33 @@ def visible_len(message: str) -> int:
     return len(html.unescape(re.sub(r"<[^>]+>", "", message)))
 
 
-def as_jpeg(url: str | None) -> str | None:
-    # Las miniaturas de Roblox vienen en WebP; Telegram se lleva mejor con JPEG
-    return url.replace("/Image/Webp/", "/Image/Jpeg/") if url else None
+def thumb_url(uid) -> str | None:
+    """Miniatura 16:9 del juego, pedida a Roblox en el momento (no se guarda)."""
+    if not uid:
+        return None
+    try:
+        r = requests.get("https://thumbnails.roblox.com/v1/games/multiget/thumbnails", params={
+            "universeIds": uid, "countPerUniverse": 1, "size": "768x432", "format": "Jpeg", "defaults": "true",
+        }, timeout=15)
+        shots = (r.json().get("data") or [{}])[0].get("thumbnails") or []
+        return next((s["imageUrl"] for s in shots if s.get("state") == "Completed"), None)
+    except (requests.RequestException, ValueError, IndexError):
+        return None
 
 
-def send(message: str, photo: str | None, dry: bool) -> bool:
+def send(message: str, game_id, dry: bool) -> bool:
+    """Envía el mensaje; si hay juego, con su miniatura como foto."""
     token, chat = os.environ.get("TELEGRAM_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
     if dry or not token or not chat:
-        print(f"--- mensaje (no enviado){' · foto: ' + photo if photo else ''} ---")
+        print(f"--- mensaje (no enviado){f' · foto del juego {game_id}' if game_id else ''} ---")
         print(message)
         return not dry  # sin credenciales cuenta como "hecho" para no repetir
     api = f"https://api.telegram.org/bot{token}"
     # Con foto si cabe en el pie de foto; si falla la imagen, como texto
-    if photo and visible_len(message) <= CAPTION_LIMIT:
+    photo = thumb_url(game_id) if visible_len(message) <= CAPTION_LIMIT else None
+    if photo:
         r = requests.post(f"{api}/sendPhoto", json={
-            "chat_id": chat, "photo": as_jpeg(photo), "caption": message, "parse_mode": "HTML",
+            "chat_id": chat, "photo": photo, "caption": message, "parse_mode": "HTML",
         }, timeout=20)
         if r.ok:
             return True

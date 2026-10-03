@@ -2,7 +2,9 @@
 export_dashboard.py — Genera los JSON que lee dashboard.html.
 
   data/dashboard.json  resumen de cada juego + listas por categoría (carga rápida)
-  data/history.json    series diarias e intradía + descripción (carga diferida)
+  data/history.json    series diarias e intradía (carga diferida)
+
+Iconos, miniaturas y descripciones no van aquí: la web los pide al Worker.
 
 Uso:
   python export_dashboard.py
@@ -49,7 +51,10 @@ def build():
         m = an.game_metrics(rows, raw.get(uid, []), meta, now)
         m["status"] = an.status(m)
         m["momentum"] = an.momentum_score(m)
-        horror, h_score, h_reasons = an.is_horror(meta, uid)
+        if "horror" in meta:   # calculado por tracker.py con la descripción
+            horror, h_score, h_reasons = meta["horror"], meta.get("horror_score", 0), meta.get("horror_reasons", [])
+        else:                  # juegos sin detalles todavía: solo con el nombre
+            horror, h_score, h_reasons = an.is_horror(meta, uid)
         em = an.emerging(m)
         events = m.pop("_events")
         metrics[uid] = (m, horror, em)
@@ -62,8 +67,6 @@ def build():
             "name": meta.get("name"),
             "title": title,
             "tags": tags,
-            "icon": meta.get("icon"),
-            "thumb": meta.get("thumb"),
             "creator": meta.get("creator"),
             "creator_verified": meta.get("creator_verified"),
             "genre": meta.get("genre_l1"),
@@ -86,7 +89,6 @@ def build():
             "d": [[r["date"], r["median"], r["min"], r["max"], r["n"], int(e)] for r, e in hist_rows],
             "r": [[s["ts"], s["playing"]] for s in sorted(raw.get(uid, []), key=lambda s: s["ts"])
                   if s["ts"] >= intraday_cut],
-            "desc": meta.get("description") or "",
         }
 
     categories = {}

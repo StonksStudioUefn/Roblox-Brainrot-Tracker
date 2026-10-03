@@ -4,7 +4,10 @@ store.py — Lectura/escritura de los datos en disco.
 Formato (texto plano, para que git guarde solo las diferencias):
   data/raw/AAAA-MM-DD.csv   muestras intradía   ts,universe_id,playing,visits
   data/daily/AAAA-MM.csv    agregados por día   date,universe_id,n,median,mean,min,max,visits,favorites,up,down
-  data/games.json           ficha de cada juego {universe_id: {...}}
+  data/games.json           ficha básica de cada juego {universe_id: {...}}
+
+Los ficheros viven en el bucket R2 de Cloudflare; remote.py los baja y los
+sube en cada ejecución.
 """
 
 import csv
@@ -34,9 +37,11 @@ def load_games() -> dict[int, dict]:
 
 def save_games(games: dict[int, dict]):
     GAMES_PATH.parent.mkdir(exist_ok=True)
-    ordered = {str(k): games[k] for k in sorted(games)}
+    # Compacto: solo lo básico, sin campos vacíos
+    ordered = {str(k): {f: v for f, v in games[k].items() if v not in (None, "", [])}
+               for k in sorted(games)}
     GAMES_PATH.write_text(
-        json.dumps(ordered, ensure_ascii=False, indent=0, sort_keys=True) + "\n",
+        json.dumps(ordered, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
         encoding="utf-8",
     )
 

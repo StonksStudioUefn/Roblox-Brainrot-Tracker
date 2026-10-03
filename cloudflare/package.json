@@ -1,0 +1,14 @@
+{
+  "name": "roblox-tracker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy",
+    "schema:local": "wrangler d1 execute roblox-tracker --local --file=schema.sql",
+    "schema:remote": "wrangler d1 execute roblox-tracker --remote --file=schema.sql"
+  },
+  "devDependencies": {
+    "wrangler": "^4.147.0"
+  }
+}
