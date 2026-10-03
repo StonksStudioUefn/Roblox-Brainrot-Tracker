@@ -17,6 +17,7 @@ Opciones para las pruebas de paridad:
   --daily-days N|all  días de serie diaria (por defecto 21)
   --daily-mode rows|calendar  últimas N filas (por defecto) o últimos N días de calendario
   --sample-hours N|all  horas de muestras (por defecto 48; all = 8 días, como Python)
+  --sample-cut last|now  corte de las muestras: última muestra − N h (por defecto) o now − N h
   --no-filter         todos los juegos con serie diaria (sin el filtro del contrato)
   --sorts FILE        respuesta de explore-api get-sorts → campo `sorts` (rank 1-based)
   --out FILE          salida (por defecto stdout)
@@ -56,6 +57,7 @@ def main():
     ap.add_argument("--daily-days", default=str(EXPORT_DAILY_DAYS))
     ap.add_argument("--sample-hours", default=str(EXPORT_SAMPLE_HOURS))
     ap.add_argument("--daily-mode", choices=("rows", "calendar"), default="rows")
+    ap.add_argument("--sample-cut", choices=("last", "now"), default="last")
     ap.add_argument("--no-filter", action="store_true")
     ap.add_argument("--sorts")
     ap.add_argument("--out")
@@ -84,7 +86,7 @@ def main():
     if args.sample_hours == "all":
         s_cut = (today - timedelta(days=PY_RAW_DAYS)).isoformat()      # como Python
     else:
-        ref = datetime.fromisoformat(last_sample.replace("Z", "+00:00"))
+        ref = datetime.fromisoformat(last_sample.replace("Z", "+00:00")) if args.sample_cut == "last" else now
         s_cut = fmt_min(ref - timedelta(hours=int(args.sample_hours)))
     act_cut = fmt_min(now - timedelta(hours=48))
     by_game = defaultdict(list)

@@ -15,7 +15,8 @@
  *   filter   solo el filtro de juegos del contrato;
  *   contract las tres cosas a la vez (lo que verá el dashboard), con filas;
  *   contractcal  lo mismo con días de calendario;
- *   d24      contrato pero con 24 días (para ver si compensa ampliar la ventana).
+ *   d24      contrato pero con 24 días (para ver si compensa ampliar la ventana);
+ *   cutnow   contrato pero cortando las muestras en now − 48 h (y no en última muestra − 48 h).
  * Con --sorts, además, el efecto de las listas de Roblox en los emergentes.
  *
  * Sale con código 1 si `full` no es idéntico.
@@ -66,6 +67,7 @@ const SCENARIOS = {
   contract: [],
   contractcal: ['--daily-mode', 'calendar'],
   d24: ['--daily-days', '24'],
+  cutnow: ['--sample-cut', 'now'],
 };
 
 // ─── Comparación ──────────────────────────────────────────────────────────────
@@ -239,4 +241,4 @@ async function main() {
   process.exitCode = fullOk ? 0 : 1;
 }
 
-main();
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) main();

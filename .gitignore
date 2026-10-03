@@ -7,3 +7,5 @@ data/
 node_modules/
 .wrangler/
 .dev.vars
+cloudflare/test/.build/
+cloudflare/test/.state/

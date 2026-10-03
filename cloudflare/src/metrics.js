@@ -21,9 +21,12 @@
  *   · las muestras son [ts_minutos_epoch, playing, visits] de las últimas
  *     EXPORT_SAMPLE_HOURS h (Python leía 8 días; solo se usan 48 h).
  *
- * Rendimiento: un recorrido por juego, arrays pequeños, medianas con
- * ordenación por inserción sobre un búfer reutilizado y sin copias del
- * export. Ver cloudflare/test/metrics.parity.mjs (mide CPU con 150 y 1.000).
+ * Rendimiento: una pasada por juego, arrays pequeños, medianas con
+ * ordenación por inserción sobre búferes reutilizados y sin copias del
+ * export. Medido con cloudflare/test/metrics.bench.mjs (Node 22, proceso
+ * nuevo): 150 juegos ≈ 2,5 ms en caliente y ≈ 10 ms la primera llamada (código
+ * aún sin optimizar); 1.000 juegos ≈ 8 ms en caliente, ≈ 25-40 ms en frío.
+ * La paridad con Python: cloudflare/test/metrics.parity.mjs.
  */
 
 import { CATEGORIES, EMERGING, EVENTS, SCAN_START, TRACK_MIN_PLAYERS } from './config.js';
@@ -47,7 +50,8 @@ const TRENDING_MAX = 12;
 // qué medir (tendencia, 24 h y 7 d en null, p. ej. juegos recién descubiertos);
 // si las medimos y no crecen, no entra. Tampoco salva a un juego en caída
 // (status down/down2) ni a uno con muchas visitas o pocos jugadores. Su motivo
-// va el primero para que no lo corte el límite de 4 motivos.
+// va el primero para que no lo corte el límite de 4 motivos. La puntuación se
+// recorta a 100 (sin la señal el máximo ya era 100).
 // Con las listas del 03/10/2026 (cloudflare/test/metrics.parity.mjs --sorts):
 // general pasa de 12 a 20 emergentes (8 juegos con 31-44 puntos que ya crecían).
 export const ROBLOX_SORT_POINTS = { 'up-and-coming': 15, 'top-trending': 10 };
@@ -111,11 +115,18 @@ function medianBuf(buf, n) {
   const h = n >> 1;
   return n % 2 ? buf[h] : (buf[h - 1] + buf[h]) / 2;
 }
-/** Mediana de arr[lo..hi). */
+/** Mediana de arr[lo..hi) sin tocar arr; atajo para ≤ 3 (el caso de flagEvents). */
 function medianRange(arr, lo, hi) {
-  const n = hi - lo, b = bufFor(n);
-  for (let i = 0; i < n; i++) b[i] = arr[lo + i];
-  return medianBuf(b, n);
+  const n = hi - lo;
+  if (n === 1) return arr[lo];
+  if (n === 2) return (arr[lo] + arr[lo + 1]) / 2;
+  if (n === 3) {
+    const a = arr[lo], b = arr[lo + 1], c = arr[lo + 2];
+    return a > b ? (b > c ? b : a > c ? c : a) : (a > c ? a : b > c ? c : b);
+  }
+  const buf = bufFor(n);
+  for (let i = 0; i < n; i++) buf[i] = arr[lo + i];
+  return medianBuf(buf, n);
 }
 
 /** "AAAA-MM-DD" → nº de día desde epoch. */
@@ -126,22 +137,28 @@ function isoDate(dn) {
   return new Date(dn * DAY_MS).toISOString().slice(0, 10);
 }
 
-// Como parse_ts (datetime.fromisoformat): fracción truncada a microsegundos.
-const ISO_RE = /^(\d{4})-(\d\d)-(\d\d)[T ](\d\d):(\d\d)(?::(\d\d)(?:[.,](\d+))?)?(Z|[+-]\d\d:?\d\d)?$/;
-/** ISO → microsegundos desde epoch (entero exacto) o null. */
+/**
+ * ISO de Roblox → microsegundos desde epoch (entero exacto) o null, como
+ * parse_ts (datetime.fromisoformat, que trunca la fracción a microsegundos).
+ * Date.parse acepta "…THH:MMZ" y fracciones de más de 3 cifras (las trunca a
+ * ms); los dígitos 4-6 se añaden a mano. Es mucho más barato que una regex
+ * cuando el código aún no está optimizado (isolate frío).
+ */
 function isoUs(s) {
   if (!s) return null;
-  const m = ISO_RE.exec(s);
-  if (!m) return null;
-  let ms = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], m[6] ? +m[6] : 0);
-  if (Number.isNaN(ms)) return null;
-  const tz = m[8];
-  if (tz && tz !== 'Z') {
-    const sign = tz[0] === '-' ? -1 : 1, hh = +tz.slice(1, 3), mm = +tz.slice(-2);
-    ms -= sign * (hh * 60 + mm) * 60000;
+  const ms = Date.parse(s);
+  if (ms !== ms) return null;
+  const dot = s.indexOf('.', 19);
+  if (dot < 0) return ms * 1000;
+  let us = 0, i = dot + 1;
+  while (i < dot + 4 && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) i++;
+  if (i < dot + 4) return ms * 1000;            // ≤ 3 cifras: ya están en ms
+  for (let k = 0; k < 3; k++, i++) {
+    const c = s.charCodeAt(i) - 48;
+    if (!(c >= 0 && c <= 9)) { for (; k < 3; k++) us *= 10; break; }
+    us = us * 10 + c;
   }
-  const frac = m[7] ? +(m[7] + '00000').slice(0, 6) : 0;
-  return ms * 1000 + frac;
+  return ms * 1000 + us;
 }
 
 function toUs(now) {
@@ -164,6 +181,11 @@ const pyIso = ms => new Date(ms).toISOString().slice(0, 19) + '+00:00';
  * el último día. `values`: medianas diarias; `dates`: "AAAA-MM-DD" ascendente.
  */
 export function flagEvents(values, dates) {
+  return flagCore(values, null, dates);
+}
+
+// `rows` (filas del export, fecha en [0]) o `dates`: así gameMetrics no copia las fechas
+function flagCore(values, rows, dates) {
   const n = values.length, w = Math.floor(EVENTS.window_days / 2);
   const minRatio = EVENTS.min_ratio, madK = EVENTS.mad_k;
   const flags = new Array(n).fill(false);
@@ -182,13 +204,13 @@ export function flagEvents(values, dates) {
     const mad = Math.max(medianBuf(b, k) * 1.4826, m * 0.05);
     if (!((v - base) > madK * mad)) continue;
     // ¿Se explica por el día de la semana?
-    const d = dayNum(dates[i]);
+    const d = dayNum(rows ? rows[i][0] : dates[i]);
     let maxSame = null;
     for (const back of [7, 14]) {
       const target = d - back;
       // dict(zip(dates, values)): si una fecha se repite, gana la última
       for (let j = n - 1; j >= 0; j--) {
-        if (dayNum(dates[j]) === target) {
+        if (dayNum(rows ? rows[j][0] : dates[j]) === target) {
           const x = values[j];
           if (x && (maxSame === null || x > maxSame)) maxSame = x;
           break;
@@ -200,19 +222,20 @@ export function flagEvents(values, dates) {
   return flags;
 }
 
-/** analytics.theil_sen_daily_growth: crecimiento diario típico (%). */
-function theilSen(vals) {
-  const xs = [], ys = [];
-  for (let i = 0; i < vals.length; i++) {
+const TX = new Float64Array(8), TY = new Float64Array(8), LAST8 = new Float64Array(8), BASE7 = new Float64Array(8);
+
+/** analytics.theil_sen_daily_growth sobre vals[0..k) (k ≤ 8): crecimiento diario típico (%). */
+function theilSen(vals, k) {
+  let n = 0;
+  for (let i = 0; i < k; i++) {
     const v = vals[i];
-    if (v && v > 0) { xs.push(i); ys.push(Math.log(v)); }
+    if (v && v > 0) { TX[n] = i; TY[n] = Math.log(v); n++; }
   }
-  const n = xs.length;
   if (n < 4) return null;
   const b = bufFor(n * (n - 1) / 2);
-  let k = 0;
-  for (let a = 0; a < n; a++) for (let c = a + 1; c < n; c++) b[k++] = (ys[c] - ys[a]) / (xs[c] - xs[a]);
-  return pyRound((Math.exp(medianBuf(b, k)) - 1) * 100, 1);
+  let m = 0;
+  for (let a = 0; a < n; a++) for (let c = a + 1; c < n; c++) b[m++] = (TY[c] - TY[a]) / (TX[c] - TX[a]);
+  return pyRound((Math.exp(medianBuf(b, m)) - 1) * 100, 1);
 }
 
 // ─── Métricas por juego ───────────────────────────────────────────────────────
@@ -220,9 +243,9 @@ function theilSen(vals) {
 function gameMetrics(g, ctx) {
   const d = g.d || [], s = g.s || [];
   const n = d.length;
-  const values = new Array(n), dates = new Array(n);
-  for (let i = 0; i < n; i++) { values[i] = d[i][1]; dates[i] = d[i][0]; }
-  const events = flagEvents(values, dates);
+  const values = new Array(n);
+  for (let i = 0; i < n; i++) values[i] = d[i][1];
+  const events = flagCore(values, d, null);
 
   // Muestras (ascendentes según el contrato)
   const ns = s.length;
@@ -246,32 +269,38 @@ function gameMetrics(g, ctx) {
   }
   const growth24 = pct(typical, prev);
 
-  // Medias sin días de evento
-  let sum7 = 0, c7 = 0;
-  for (let i = Math.max(0, n - 7); i < n; i++) if (!events[i]) { sum7 += values[i]; c7++; }
+  // Una pasada hacia atrás por la serie (k = 1 es el último día):
+  //   last7 = values[-7:], recent3 = values[-3:], week_ago = values[-10:-6] y
+  //   values[-8:] para la tendencia, todos sin días de evento; clean[-8:-1]
+  //   para el pico; días de evento de los últimos 30; las 2 últimas visitas.
+  let sum7 = 0, c7 = 0, sum3 = 0, c3 = 0, sumW = 0, cW = 0, evDays = 0;
+  let nc = 0, n8 = 0, nb7 = 0, vz = -1, va = -1;
+  for (let i = n - 1; i >= 0; i--) {
+    const k = n - i;
+    if (events[i]) {
+      if (k <= EVENT_DAYS_WINDOW) evDays++;
+    } else {
+      const v = values[i];
+      if (k <= 7) { sum7 += v; c7++; }
+      if (k <= 3) { sum3 += v; c3++; }
+      if (k >= 7 && k <= 10) { sumW += v; cW++; }
+      if (k <= 8) LAST8[n8++] = v;
+      nc++;
+      if (nc >= 2 && nc <= 8) BASE7[nb7++] = v;
+    }
+    if (va < 0 && d[i][5]) { if (vz < 0) vz = i; else va = i; }
+  }
   const avg7 = c7 ? pyRound0(sum7 / c7) : typical;
-  let sum3 = 0, c3 = 0;
-  for (let i = Math.max(0, n - 3); i < n; i++) if (!events[i]) { sum3 += values[i]; c3++; }
-  let sumW = 0, cW = 0;
-  for (let i = Math.max(0, n - 10), e = Math.max(0, n - 6); i < e; i++) if (!events[i]) { sumW += values[i]; cW++; }
   const growth7 = c3 && cW ? pct(sum3 / c3, sumW / cW) : null;
-  const last8 = [];
-  for (let i = Math.max(0, n - 8); i < n; i++) if (!events[i]) last8.push(values[i]);
-  const trend = theilSen(last8);
+  for (let a = 0, z = n8 - 1; a < z; a++, z--) { const t = LAST8[a]; LAST8[a] = LAST8[z]; LAST8[z] = t; }
+  const trend = theilSen(LAST8, n8);
 
   // Pico ahora: última muestra ≥ 1,8 × la mediana de los 7 días limpios anteriores
-  const clean = [];
-  for (let i = 0; i < n; i++) if (!events[i]) clean.push(values[i]);
-  const nc = clean.length;
-  const base7 = nc >= 4 ? medianRange(clean, Math.max(0, nc - 8), nc - 1) : null;
+  const base7 = nc >= 4 ? medianBuf(BASE7, nb7) : null;
   const spikeNow = !!(base7 && nowPlayers >= base7 * EVENTS.spike_now_ratio);
 
-  let evDays = 0;
-  for (let i = Math.max(0, n - EVENT_DAYS_WINDOW); i < n; i++) if (events[i]) evDays++;
-
   // Visitas: actuales y ganadas en el último día
-  let visits = null;
-  for (let i = n - 1; i >= 0; i--) if (d[i][5]) { visits = d[i][5]; break; }
+  const visits = vz >= 0 ? d[vz][5] : null;
   let visitsDay = null;
   let i1 = ns - 1;
   while (i1 >= 0 && !s[i1][2]) i1--;
@@ -284,13 +313,9 @@ function gameMetrics(g, ctx) {
       }
     }
   }
-  if (visitsDay === null) {
-    let a = -1, z = -1;
-    for (let i = n - 1; i >= 0; i--) if (d[i][5]) { if (z < 0) z = i; else { a = i; break; } }
-    if (a >= 0) {
-      const gap = (dayNum(d[z][0]) - dayNum(d[a][0])) || 1;
-      visitsDay = pyRound0((d[z][5] - d[a][5]) / gap);
-    }
+  if (visitsDay === null && va >= 0) {
+    const gap = (dayNum(d[vz][0]) - dayNum(d[va][0])) || 1;
+    visitsDay = pyRound0((d[vz][5] - d[va][5]) / gap);
   }
   if (visitsDay !== null && visitsDay < 0) visitsDay = null;
 
@@ -311,7 +336,7 @@ function gameMetrics(g, ctx) {
   const last = n ? d[n - 1] : null;
   return {
     players: nowPlayers,
-    players_ts: lastTs !== null ? pyIso(lastTs * 60000) : null,
+    _lastTs: lastTs,                    // players_ts se formatea en summary()
     typical: typical != null ? pyRound0(typical) : null,
     avg_7d: avg7,
     growth_24h: growth24,
@@ -334,6 +359,8 @@ function gameMetrics(g, ctx) {
     new_week: !!(trusted && firstSeenDays <= 7),
     days_tracked: g.days_tracked ?? n,
     samples_today: last && last[0] === ctx.todayIso ? last[4] : 0,
+    status: null,
+    momentum: 0,
     _events: events,
     _values: values,
   };
@@ -411,8 +438,9 @@ function emerging(m, sorts) {
   if (lr && lr >= 90) reasons.push(`${fmt0(lr)}% likes`);
   if (visits < 2_000_000) reasons.push('menos de 2M visitas');
 
-  // sRoblox va al final: con 0 la suma es la misma que en Python
-  let score = pyRound0(sVisits + sGrowth + sYoung + sSize + sLike + sRoblox);
+  // sRoblox va al final: con 0 la suma es la misma que en Python. Sin él el
+  // máximo ya es 100; con él se recorta a 100 para que siga siendo 0-100.
+  let score = Math.min(100, pyRound0(sVisits + sGrowth + sYoung + sSize + sLike + sRoblox));
   if (m.spike_now && (t || 0) < 5) score = pyRound0(score * 0.8);
   if (score < cfg.min_score) return null;
   return [score, reasons.slice(0, 4)];
@@ -523,7 +551,7 @@ function summary({ g, m, em }) {
     spark,
     spark_ev: sparkEv,
     players: m.players,
-    players_ts: m.players_ts,
+    players_ts: m._lastTs !== null ? pyIso(m._lastTs * 60000) : null,
     typical: m.typical,
     avg_7d: m.avg_7d,
     growth_24h: m.growth_24h,
