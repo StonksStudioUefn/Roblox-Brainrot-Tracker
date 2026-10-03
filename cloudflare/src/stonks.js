@@ -29,7 +29,10 @@ export function appBucket(bucket) {
     __app: true,
     get: (key, opts) => bucket.get(k(key), opts),
     head: key => bucket.head(k(key)),
-    put: (key, value, opts) => bucket.put(k(key), value, opts),
+    // Datos de cada archivo (ECOSISTEMA §5): la app que lo sube y cuándo
+    put: (key, value, opts = {}) => bucket.put(k(key), value, {
+      ...opts, customMetadata: { app: APP, fecha: new Date().toISOString(), ...(opts.customMetadata || {}) },
+    }),
     delete: keys => bucket.delete(Array.isArray(keys) ? keys.map(k) : k(keys)),
     async list(opts = {}) {
       const r = await bucket.list({ ...opts, prefix: PREFIX + (opts.prefix || "") });
