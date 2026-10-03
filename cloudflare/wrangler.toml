@@ -1,0 +1,32 @@
+# Roblox Tracker — Worker único en el plan gratis de Cloudflare.
+# Secrets (no van aquí):  wrangler secret put ADMIN_TOKEN | TELEGRAM_TOKEN | TELEGRAM_CHAT_ID
+name = "roblox-tracker"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+routes = [
+  { pattern = "robloxtracker.stonksstudio.com", custom_domain = true },
+]
+
+[triggers]
+crons = ["17 */3 * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "roblox-tracker"
+# database_id: lo da `wrangler d1 create roblox-tracker` (o el aprovisionamiento
+# automático de `wrangler deploy`). Ponerlo aquí antes de desplegar.
+# database_id = "00000000-0000-0000-0000-000000000000"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "roblox-tracker"
+
+[[workflows]]
+name = "roblox-sampler"
+binding = "SAMPLER"
+class_name = "Sampler"
+
+# Logs con cpuTime por invocación / paso (Workers Logs, incluido en el plan gratis)
+[observability]
+enabled = true

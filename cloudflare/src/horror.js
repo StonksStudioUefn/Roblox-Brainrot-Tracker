@@ -38,8 +38,13 @@ const PY_WS_SET = new Set(
 );
 
 /** `str.strip(chars)` de Python; sin `chars`, quita los espacios de Python. */
+const STRIP_SETS = new Map();
 export function pyStrip(s, chars) {
-  const set = chars === undefined ? PY_WS_SET : new Set(chars);
+  let set = PY_WS_SET;
+  if (chars !== undefined) {
+    set = STRIP_SETS.get(chars);
+    if (!set) STRIP_SETS.set(chars, (set = new Set(chars)));
+  }
   let a = 0, b = s.length;
   // Todos los caracteres a quitar están en el BMP: basta comparar unidades UTF-16
   while (a < b && set.has(s[a])) a++;
@@ -124,89 +129,64 @@ const refMatcher = {
   },
 };
 
-// ─── Escáner rápido (resultado idéntico a las regex) ─────────────────────────
-// Recorre el texto ORIGINAL una sola vez, pasando a minúsculas al vuelo, y en
-// cada inicio de palabra (carácter anterior fuera de [a-z0-9] tras `.lower()`)
-// prueba solo las palabras clave que empiezan por esa letra. Equivale a
-// `(?<![a-z0-9])palabra` sobre `texto.lower()` porque los únicos caracteres no
-// ASCII cuya minúscula contiene ASCII son U+212A (K de Kelvin → "k") y U+0130
-// (İ → "i" + U+0307), tanto en Python como en JS; se tratan aparte.
-const KELVIN = 0x212a, I_DOT = 0x130;
+// ─── Búsqueda rápida (resultado idéntico a las regex de una en una) ─────────
+// En vez de probar cada palabra con su regex, una sola regex con todas las
+// palabras de varias listas (en forma de árbol de prefijos) encuentra cada
+// posición del texto en minúsculas donde empieza alguna, y en esa posición se
+// comprueba con `startsWith` qué palabras de las que empiezan por esa letra
+// están ahí. Tras cada coincidencia se sigue desde la posición siguiente, así
+// que no se pierden palabras solapadas ("being hunted" / "hunted by").
+// Es exacto: si una palabra coincide en p, la alternativa de la regex también
+// coincide en p (la alternancia prueba todas las ramas).
 
-// Tablas ASCII: minúscula y "es [a-z0-9] tras .lower()"
-const LOWER = new Uint8Array(128), ALNUM = new Uint8Array(128);
-for (let c = 0; c < 128; c++) {
-  LOWER[c] = c >= 65 && c <= 90 ? c + 32 : c;
-  const l = LOWER[c];
-  ALNUM[c] = (l >= 97 && l <= 122) || (l >= 48 && l <= 57) ? 1 : 0;
+function trieSource(words) {
+  const root = {};
+  for (const w of words) {
+    let n = root;
+    for (const ch of w) n = n[ch] ||= {};
+    n[""] = true;
+  }
+  const emit = n => {
+    const keys = Object.keys(n).filter(k => k !== "");
+    if (!keys.length) return "";
+    const alts = keys.map(k => escapeRe(k) + emit(n[k]));
+    const body = alts.length === 1 ? alts[0] : `(?:${alts.join("|")})`;
+    return n[""] ? `(?:${body})?` : body;
+  };
+  return emit(root);
 }
 
 function makeScanner(keys) {
   const lists = keys.map(k => HORROR[k]);
-  if (!lists.flat().every(w => w && /^[\x00-\x7f]+$/.test(w))) return null;
-  // Palabras en un array plano; cubos por primera letra con índices al array
   const words = [], offsets = [];
   for (const list of lists) {
     offsets.push(words.length);
     words.push(...list);
   }
-  const byFirst = Array.from({ length: 128 }, () => []);
-  words.forEach((w, i) => byFirst[w.charCodeAt(0)].push(i));
-  const start = new Int32Array(129), ids = new Int32Array(words.length);
-  let k = 0;
-  for (let c = 0; c < 128; c++) {
-    start[c] = k;
-    for (const i of byFirst[c]) ids[k++] = i;
-  }
-  start[128] = k;
-  return { keys, lists, words, offsets, start, ids, marks: new Uint8Array(words.length) };
-}
-
-function matchAt(text, i, w) {
-  const n = w.length;
-  // Con İ el texto en minúsculas es más largo, pero İ solo puede ser el último
-  // carácter de una coincidencia: basta con exigir n caracteres del original
-  if (i + n > text.length) return false;
-  for (let j = 1; j < n; j++) {   // el primero ya coincide (cubo)
-    const c = text.charCodeAt(i + j);
-    if (c < 128) {
-      if (LOWER[c] !== w.charCodeAt(j)) return false;
-    } else if (c === KELVIN) {
-      if (w.charCodeAt(j) !== 107) return false;
-    } else if (c === I_DOT) {
-      return j === n - 1 && w.charCodeAt(j) === 105;
-    } else return false;
-  }
-  return true;
+  if (words.some(w => !w)) return null;   // una palabra vacía: solo la vía de referencia
+  const byFirst = new Map();
+  words.forEach((w, i) => {
+    const c = w.charCodeAt(0);
+    if (!byFirst.has(c)) byFirst.set(c, []);
+    byFirst.get(c).push(i);
+  });
+  const finder = new RegExp("(?<![a-z0-9])" + trieSource([...new Set(words)]), "g");
+  return { keys, lists, words, offsets, byFirst, finder, marks: new Uint8Array(words.length) };
 }
 
 function scan(sc, text) {
-  const { start, ids, words, marks } = sc;
+  const { words, byFirst, finder, marks } = sc;
   marks.fill(0);
-  let prevAlnum = 0;
-  for (let i = 0, n = text.length; i < n; i++) {
-    const c = text.charCodeAt(i);
-    let lc;
-    if (c < 128) lc = LOWER[c];
-    else if (c === KELVIN) lc = 107;
-    else if (c === I_DOT) {
-      // "i" + U+0307: solo vale como palabra de una letra "i"
-      if (prevAlnum === 0) {
-        for (let k = start[105]; k < start[106]; k++) if (words[ids[k]].length === 1) marks[ids[k]] = 1;
-      }
-      prevAlnum = 0;
-      continue;
-    } else {
-      prevAlnum = 0;
-      continue;
+  finder.lastIndex = 0;
+  let m;
+  while ((m = finder.exec(text)) !== null) {
+    const p = m.index;
+    const ids = byFirst.get(text.charCodeAt(p));
+    for (let k = 0; k < ids.length; k++) {
+      const id = ids[k];
+      if (marks[id] === 0 && text.startsWith(words[id], p)) marks[id] = 1;
     }
-    if (prevAlnum === 0) {
-      for (let k = start[lc], e = start[lc + 1]; k < e; k++) {
-        const id = ids[k];
-        if (marks[id] === 0 && matchAt(text, i, words[id])) marks[id] = 1;
-      }
-    }
-    prevAlnum = c < 128 ? ALNUM[c] : 1;   // Kelvin → "k"
+    finder.lastIndex = p + 1;
   }
 }
 
@@ -240,8 +220,8 @@ export function classifyHorror(game, { reference = false } = {}) {
   const pts = HORROR.points;
   const [title, tags] = cleanTitle(g.name || "");
   const fast = !reference && NAME_SCAN && DESC_SCAN;
-  const nm = fast ? scanMatcher(NAME_SCAN, title) : refMatcher;
-  const name = fast ? null : title.toLowerCase();
+  const name = title.toLowerCase();
+  const nm = fast ? scanMatcher(NAME_SCAN, name) : refMatcher;
   let score = 0;
   const reasons = [];
 
@@ -274,8 +254,8 @@ export function classifyHorror(game, { reference = false } = {}) {
   }
 
   // La descripción, después del nombre (los dos escáneres reutilizan sus marcas)
-  const desc = fast ? null : (g.description || "").toLowerCase();
-  const dm = fast ? scanMatcher(DESC_SCAN, g.description || "") : refMatcher;
+  const desc = (g.description || "").toLowerCase();
+  const dm = fast ? scanMatcher(DESC_SCAN, desc) : refMatcher;
   const ds = dm.all("desc_strong", desc);
   if (ds.length) {
     score += Math.min(ds.length * pts.desc_strong, pts.desc_strong_cap);
