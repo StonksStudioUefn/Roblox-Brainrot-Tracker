@@ -459,6 +459,17 @@ export function pruneSamplesStmt(db, cutoffTs) {
   ).bind(cutoffTs);
 }
 
+/**
+ * Lo que tiene más de un año: filas diarias y puestos en listas anteriores a
+ * `cutoffDate`. Por clave primaria juego a juego (solo lee las filas viejas).
+ */
+export function pruneOldStmts(db, cutoffDate) {
+  return [
+    db.prepare(`DELETE FROM daily WHERE date < ?1 AND universe_id IN (SELECT universe_id FROM games)`).bind(cutoffDate),
+    db.prepare(`DELETE FROM sort_hits WHERE date < ?1 AND universe_id IN (SELECT universe_id FROM games)`).bind(cutoffDate),
+  ];
+}
+
 /** Muestras huérfanas (juegos que ya no existen en games): casi nunca hay. */
 export function pruneOrphansStmt(db, cutoffTs) {
   return db.prepare(
@@ -670,14 +681,16 @@ export async function history(db, id, { nowMs = Date.now(), openDay } = {}) {
     part AS (
       SELECT day, MAX(cnt) AS n,
              ${MEDIAN_SQL} AS median,
+             ${MEAN_SQL} AS mean,
              MIN(p) AS mn, MAX(p) AS mx
       FROM pr GROUP BY day
     )
     SELECT json_object(
+      -- [fecha, mediana, mín, máx, n, (hueco: la web marca ahí los eventos), media]
       'd', json(COALESCE((SELECT json_group_array(json(r.x)) FROM (
-             SELECT json_array(date, median, min, max, n) AS x, date AS o FROM daily
+             SELECT json_array(date, median, min, max, n, 0, mean) AS x, date AS o FROM daily
              WHERE universe_id = ?1 AND date >= ?2 AND date < ?3
-             UNION ALL SELECT json_array(day, median, mn, mx, n), day FROM part
+             UNION ALL SELECT json_array(day, median, mn, mx, n, 0, mean), day FROM part
              ORDER BY o) r), '[]')),
       'r', json(COALESCE((SELECT json_group_array(json(r.x)) FROM (
              SELECT json_array(strftime('%Y-%m-%dT%H:%MZ', ts * 60, 'unixepoch'), playing) AS x

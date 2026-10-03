@@ -9,29 +9,32 @@
 // ─── Recolección ──────────────────────────────────────────────────────────────
 export const TRACK_MIN_PLAYERS = 300;     // por debajo de esto no se toman muestras
 export const UNTRACK_AFTER_DAYS = 3;      // días seguidos por debajo → deja de seguirse
-export const SAMPLE_RETENTION_DAYS = 8;   // muestras intradía en D1 (el resto vive en `daily`)
+export const SAMPLE_RETENTION_DAYS = 8;   // muestras de cada hora en D1 (el resto vive en `daily`)
+export const DATA_RETENTION_DAYS = 365;   // filas diarias y puestos en listas: se borran al pasar un año
+export const RADAR_EVERY_HOURS = 3;       // el radar (Rolimons) se lee cada 3 h: para su dato diario basta
 export const EXPORT_DAILY_DAYS = 24;      // filas de serie diaria por juego en /api/export (últimas N filas; 24 = paridad con Python)
 export const EXPORT_SAMPLE_HOURS = 48;    // horas de muestras intradía en /api/export
-export const HISTORY_DAYS = 120;          // días de serie en /api/history/:id
-export const HISTORY_SAMPLE_DAYS = 7;     // días de muestras en /api/history/:id
+export const HISTORY_DAYS = 365;          // días de serie en /api/history/:id (semana, mes y año de la ficha)
+export const HISTORY_SAMPLE_DAYS = 2;     // días de muestras en /api/history/:id (la vista "Día", por horas)
 
 // Hasta 2 días después no se marca ningún juego como "recién detectado"
 // (al empezar, todo el catálogo es nuevo para el tracker).
 export const SCAN_START = "2026-10-02";
 
-// Palabras que el buscador oficial de Roblox recorre por turnos (2–3 por muestreo)
+// Palabras que el buscador oficial de Roblox recorre por turnos (1 por muestreo,
+// cada hora: cada palabra sale ~1,5 veces al día sin forzar el límite del buscador)
 export const SEARCH_QUERIES = [
   "horror", "killer", "jumpscare", "escape monster", "haunted", "scary",
   "backrooms", "nightmare", "anomaly", "survive the night", "creepy", "fnaf",
   "asymmetrical", "monster", "hide and seek horror", "story horror",
 ];
-export const SEARCH_QUERIES_PER_RUN = 3;
+export const SEARCH_QUERIES_PER_RUN = 1;
 export const SEARCH_PAGES_PER_QUERY = 3;
 
 // ─── Radar y juegos seguidos ──────────────────────────────────────────────────
 // El radar mira en cada muestreo todos los juegos con ≥ TRACK_MIN_PLAYERS (la
 // lista de Rolimons: 1 petición) y guarda de cada uno un solo dato al día.
-// Solo los juegos SEGUIDOS (elegidos una vez al día) tienen muestras cada 3 h,
+// Solo los juegos SEGUIDOS (elegidos una vez al día) tienen muestras cada hora,
 // votos y salen en la web y en Telegram.
 export const SELECTION = {
   top: 10,                 // los que más jugadores tienen, en cada pestaña

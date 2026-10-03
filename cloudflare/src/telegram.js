@@ -722,9 +722,21 @@ function applyCounts(dash, counts) {
 }
 
 // ─── Envío ────────────────────────────────────────────────────────────────────
-function makeClient({ env, fetchImpl, log, maxFetch }) {
-  const token = env?.TELEGRAM_TOKEN, chat = env?.TELEGRAM_CHAT_ID;
+/**
+ * Chat al que se envía: TELEGRAM_CHAT_ID o, si Telegram dijo que ese grupo
+ * pasó a supergrupo, el id nuevo guardado en el estado ({from, to}). Solo se
+ * usa mientras el secret siga siendo el id antiguo: si alguien lo cambia, manda él.
+ */
+export function chatFor(envChat, migrated) {
+  if (envChat && migrated?.to && String(migrated.from) === String(envChat)) return String(migrated.to);
+  return envChat;
+}
+
+function makeClient({ env, fetchImpl, log, maxFetch, migrated }) {
+  const token = env?.TELEGRAM_TOKEN;
+  let chat = chatFor(env?.TELEGRAM_CHAT_ID, migrated);
   const counter = { used: 0 };
+  const moved = { to: null };   // id nuevo si Telegram avisa de que el grupo ha migrado
 
   async function call(url, init, timeoutMs) {
     if (counter.used >= maxFetch) throw new Error(`tope de ${maxFetch} peticiones externas`);
@@ -748,16 +760,27 @@ function makeClient({ env, fetchImpl, log, maxFetch }) {
     }
   }
 
-  async function post(method, body, timeoutMs) {
+  async function post(method, body, timeoutMs, retry = true) {
+    let res;
     try {
       const r = await call(`https://api.telegram.org/bot${token}/${method}`, {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...body, chat_id: chat }),
       }, timeoutMs);
-      return { ok: r.ok, status: r.status, text: r.ok ? "" : await r.text().catch(() => "") };
+      res = { ok: r.ok, status: r.status, text: r.ok ? "" : await r.text().catch(() => "") };
     } catch (e) {
       // Nunca se registra la URL: lleva el token
       return { ok: false, status: 0, text: String(e?.name === "TimeoutError" ? "timeout" : e?.message || e) };
     }
+    // El grupo pasó a supergrupo: Telegram da el id nuevo. Se sigue a ese id
+    // (y runTelegram lo guarda en el estado para los siguientes envíos).
+    const to = res.ok ? null : migrateTo(res.text);
+    if (to && retry && String(to) !== String(chat)) {
+      log(`  el grupo ahora es un supergrupo: se envía al id nuevo ${to}`);
+      chat = String(to);
+      moved.to = chat;
+      return post(method, body, timeoutMs, false);
+    }
+    return res;
   }
 
   /** Envía el mensaje; si hay juego, con su miniatura como foto. */
@@ -770,18 +793,28 @@ function makeClient({ env, fetchImpl, log, maxFetch }) {
     // Con foto si cabe en el pie de foto; si falla la imagen, como texto
     const photo = visibleLen(message) <= CAPTION_LIMIT ? await thumbUrl(gameId) : null;
     if (photo) {
-      const r = await post("sendPhoto", { chat_id: chat, photo, caption: message, parse_mode: "HTML" }, 20000);
+      const r = await post("sendPhoto", { photo, caption: message, parse_mode: "HTML" }, 20000);
       if (r.ok) return true;
       log(`  foto rechazada (${r.status}), se envía como texto`);
     }
     const r = await post("sendMessage", {
-      chat_id: chat, text: message, parse_mode: "HTML", link_preview_options: { is_disabled: true },
+      text: message, parse_mode: "HTML", link_preview_options: { is_disabled: true },
     }, 15000);
     if (!r.ok) log(`✗ Telegram ${r.status}: ${r.text}`);
     return r.ok;
   }
 
-  return { send, counter, hasCredentials: Boolean(token && chat) };
+  return { send, counter, moved, hasCredentials: Boolean(token && chat) };
+}
+
+/** migrate_to_chat_id de una respuesta de error de Telegram, o null. */
+function migrateTo(text) {
+  try {
+    const id = JSON.parse(text)?.parameters?.migrate_to_chat_id;
+    return id ? String(id) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -810,7 +843,7 @@ export async function runTelegram({
   const loaded = getState ? await getState(STATE_KEY) : null;
   const state = loaded && typeof loaded === "object" ? structuredClone(loaded) : {};
   const before = JSON.stringify(state);
-  const client = makeClient({ env, fetchImpl, log, maxFetch });
+  const client = makeClient({ env, fetchImpl, log, maxFetch, migrated: state.chat_migrated });
   const result = {
     credentials: client.hasCredentials, alerts: 0, daily: null, weekly: null, messages: 0,
     candidates: reduced.games?.length ?? null, total: reduced.telegram?.total ?? null,
@@ -879,6 +912,10 @@ export async function runTelegram({
       if (result.weekly) state.last_weekly = week;
     }
   } finally {
+    if (client.moved.to) {
+      state.chat_migrated = { from: String(env.TELEGRAM_CHAT_ID), to: client.moved.to };
+      result.chat_migrated = client.moved.to;
+    }
     // Lo enviado queda guardado aunque algo falle a medias (el paso se reintenta)
     await save();
   }
