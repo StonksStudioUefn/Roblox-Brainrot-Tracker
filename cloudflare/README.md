@@ -8,7 +8,7 @@ La interfaz entre piezas está en [`CONTRACT.md`](CONTRACT.md).
 | `wrangler.toml` | Bindings `DB` (D1), `BUCKET` (R2), `SAMPLER` (Workflow), cron `0 */3 * * *` (00:00, 03:00, 06:00… UTC), dominio |
 | `schema.sql` | Esquema D1 (idempotente) |
 | `src/index.js` | `fetch` (web, API, admin) y `scheduled` (crea la instancia del Workflow) |
-| `src/sampler.js` | `class Sampler extends WorkflowEntrypoint`: el muestreo por pasos |
+| `src/sampler.js` | `class Sampler extends WorkflowEntrypoint`: el muestreo por pasos, el radar y la elección de los juegos seguidos |
 | `src/sources.js` | Clientes de Rolimons, Explore, Search, Games, Votes, place→universe, iconos |
 | `src/db.js` | SQL: inserciones (`json_each`), cierre diario, `hist_agg`, export por trozos, historial, import |
 | `scripts/migrate_from_git.py` | Sube los datos actuales del repo (git o carpeta) a D1 por `/api/admin/import` |

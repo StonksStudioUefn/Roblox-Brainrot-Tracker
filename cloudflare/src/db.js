@@ -154,11 +154,118 @@ export function insertPlacesStmt(db, rows) {
 }
 
 // ─── Muestras ─────────────────────────────────────────────────────────────────
-export async function trackedIds(db) {
+/** Ids del radar (tracked = 1) o, con `selected`, solo los seguidos (sel = 1). */
+export async function trackedIds(db, { selected = false } = {}) {
   const { results } = await db.prepare(
-    "SELECT universe_id AS id FROM games WHERE tracked = 1 ORDER BY universe_id",
+    `SELECT universe_id AS id FROM games WHERE tracked = 1 ${selected ? "AND sel = 1" : ""} ORDER BY universe_id`,
   ).all();
   return results.map(r => r.id);
+}
+
+/** Ids seguidos (sel = 1) dentro de `ids`. */
+export async function selectedAmong(db, ids) {
+  const { results } = await db.prepare(
+    `SELECT g.universe_id AS id FROM json_each(?1) j JOIN games g ON g.universe_id = j.value WHERE g.sel = 1`,
+  ).bind(JSON.stringify(ids)).all();
+  return results.map(r => r.id);
+}
+
+// ─── Radar ────────────────────────────────────────────────────────────────────
+/**
+ * Lecturas de Rolimons [[placeId, name, players], …] → {universe_id: players}
+ * de los juegos del radar (tracked = 1) cuyo place está en la caché.
+ */
+export async function radarPlayers(db, list) {
+  const { results } = await db.prepare(
+    `SELECT g.universe_id AS id, j.value ->> 2 AS p
+     FROM json_each(?1) j JOIN places pl ON pl.place_id = (j.value ->> 0)
+     JOIN games g ON g.universe_id = pl.universe_id WHERE g.tracked = 1`,
+  ).bind(JSON.stringify(list.map(([pid, , players]) => [pid, null, players]))).all();
+  const out = {};
+  for (const r of results) out[r.id] = Math.max(out[r.id] ?? 0, r.p);   // varios places de un juego: el mayor
+  return out;
+}
+
+/**
+ * Filas diarias del radar para `date`: `readings` = {universe_id: [jugadores
+ * de cada muestreo (o null)…]} (Rolimons) y `meta` = {universe_id: [playing,
+ * visits]} (Games API del meta diario, de los juegos no seguidos). Mediana,
+ * media, mín y máx como el cierre desde samples. Un juego que ya tiene fila
+ * del día (de sus muestras) solo la cambia si el radar tiene más lecturas; las
+ * visitas solo se rellenan si faltaban.
+ */
+export function radarCloseStmt(db, date, readings, meta) {
+  return db.prepare(
+    `WITH r AS (
+       SELECT CAST(o.key AS INTEGER) AS id, i.value AS p
+       FROM json_each(?1) o, json_each(o.value) i WHERE i.value IS NOT NULL
+     ),
+     s AS (
+       SELECT id, p, ROW_NUMBER() OVER (PARTITION BY id ORDER BY p) AS rn, COUNT(*) OVER (PARTITION BY id) AS cnt
+       FROM r
+     ),
+     a AS (
+       SELECT id, MAX(cnt) AS n, ${MEDIAN_SQL} AS median, ${MEAN_SQL} AS mean, MIN(p) AS mn, MAX(p) AS mx
+       FROM s GROUP BY id
+     ),
+     mt AS MATERIALIZED (
+       SELECT CAST(key AS INTEGER) AS id, value ->> 0 AS p, value ->> 1 AS v FROM json_each(?2)
+     ),
+     u AS (
+       SELECT a.id, a.n, a.median, a.mean, a.mn, a.mx, mt.v FROM a LEFT JOIN mt ON mt.id = a.id
+       UNION ALL
+       SELECT mt.id, 1, mt.p, mt.p, mt.p, mt.p, mt.v FROM mt
+       WHERE mt.p IS NOT NULL AND mt.id NOT IN (SELECT id FROM a)
+     )
+     INSERT INTO daily (universe_id, date, n, median, mean, min, max, visits)
+     SELECT u.id, ?3, u.n, u.median, u.mean, u.mn, u.mx, u.v FROM u
+     WHERE EXISTS (SELECT 1 FROM games g WHERE g.universe_id = u.id)
+     ON CONFLICT (universe_id, date) DO UPDATE SET
+       n = CASE WHEN excluded.n > daily.n THEN excluded.n ELSE daily.n END,
+       median = CASE WHEN excluded.n > daily.n THEN excluded.median ELSE daily.median END,
+       mean = CASE WHEN excluded.n > daily.n THEN excluded.mean ELSE daily.mean END,
+       min = CASE WHEN excluded.n > daily.n THEN excluded.min ELSE daily.min END,
+       max = CASE WHEN excluded.n > daily.n THEN excluded.max ELSE daily.max END,
+       visits = COALESCE(daily.visits, excluded.visits)
+     WHERE excluded.n > daily.n OR (daily.visits IS NULL AND excluded.visits IS NOT NULL)`,
+  ).bind(JSON.stringify(readings || {}), JSON.stringify(meta || {}), date);
+}
+
+/**
+ * Datos para elegir los juegos seguidos: los del radar con universe_id en
+ * [lo, hi], con las últimas `days` filas diarias hasta `before` (excluido).
+ * → [[id, horror, sel, created, first_seen, first_day, sorts, d], …] (d como en el export)
+ */
+export async function radarSlice(db, { lo, hi, days, before, today }) {
+  const { results } = await db.prepare(
+    `WITH hj AS (SELECT COALESCE((SELECT value FROM state WHERE key = 'hist_agg'), '{}') AS j)
+     SELECT json_array(g.universe_id, COALESCE(g.horror, 0), COALESCE(g.sel, 0), g.created, g.first_seen,
+       json_extract(hj.j, '$."' || g.universe_id || '"[3]'),
+       json(COALESCE((SELECT json_group_object(k.sort_id, k.rank) FROM sort_hits k
+              WHERE k.universe_id = g.universe_id AND k.date = ?5 AND k.sort_id NOT LIKE 'search:%'), '{}')),
+       json(COALESCE((SELECT json_group_array(json_array(r.date, r.median, r.min, r.max, r.n, r.visits)) FROM (
+              SELECT * FROM (SELECT date, median, min, max, n, visits FROM daily
+                             WHERE universe_id = g.universe_id AND date < ?4 ORDER BY date DESC LIMIT ?3)
+              ORDER BY date) r), '[]'))) AS row
+     FROM games g CROSS JOIN hj WHERE g.tracked = 1 AND g.universe_id BETWEEN ?1 AND ?2`,
+  ).bind(lo, hi, days, before, today).all();
+  return results.map(r => JSON.parse(r.row));
+}
+
+/** sel = 1 para `ids` y 0 para el resto (solo escribe los que cambian). */
+export function applySelectionStmt(db, ids) {
+  return db.prepare(
+    `UPDATE games SET sel = (universe_id IN (SELECT value FROM json_each(?1)))
+     WHERE COALESCE(sel, 0) IS NOT (universe_id IN (SELECT value FROM json_each(?1)))`,
+  ).bind(JSON.stringify(ids));
+}
+
+/** Juegos en el radar y seguidos (para la cabecera del export). */
+export async function radarCounts(db) {
+  const row = await db.prepare(
+    "SELECT COUNT(*) AS radar, COALESCE(SUM(sel = 1), 0) AS selected FROM games WHERE tracked = 1",
+  ).first();
+  return { radar: row?.radar ?? 0, selected: row?.selected ?? 0 };
 }
 
 /** [[universe_id, playing, visits], …] con el mismo ts. Idempotente (OR IGNORE). */
@@ -388,10 +495,11 @@ export function untrackStmt(db, today) {
  */
 
 /** Rangos de universe_id con ~`size` juegos seguidos cada uno. → [[lo, hi], …] */
-export async function exportPlan(db, size) {
+export async function exportPlan(db, size, { selected = false } = {}) {
   const { results } = await db.prepare(
     `SELECT universe_id AS lo FROM (
-       SELECT universe_id, ROW_NUMBER() OVER (ORDER BY universe_id) - 1 AS rn FROM games WHERE tracked = 1)
+       SELECT universe_id, ROW_NUMBER() OVER (ORDER BY universe_id) - 1 AS rn FROM games
+       WHERE tracked = 1 ${selected ? "AND sel = 1" : ""})
      WHERE rn % ?1 = 0 ORDER BY lo`,
   ).bind(size).all();
   const los = results.map(r => r.lo);
@@ -414,7 +522,7 @@ export async function lastSampleTs(db) {
  * que cumplen el filtro del contrato (con `ids`, sin filtro).
  * → { frag: '{…},{…}', n, last_ts, ts24: [ts…], meta }
  */
-export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi = Number.MAX_SAFE_INTEGER, ids = null }) {
+export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi = Number.MAX_SAFE_INTEGER, ids = null, selected = false }) {
   const now = minuteOf(nowMs);
   const today = isoDate(now);
   openDay = openDay && openDay < today ? openDay : today;
@@ -427,7 +535,7 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
     s48 AS MATERIALIZED (
       SELECT s.universe_id AS id, s.ts, s.playing AS p, s.visits AS v
       FROM games g CROSS JOIN samples s ON s.universe_id = g.universe_id AND s.ts >= ?1
-      WHERE CASE WHEN ?13 IS NULL THEN g.universe_id BETWEEN ?11 AND ?12
+      WHERE CASE WHEN ?13 IS NULL THEN (g.universe_id BETWEEN ?11 AND ?12) AND (?15 = 0 OR g.sel = 1)
                  ELSE g.universe_id IN (SELECT value FROM json_each(?13)) END
     ),
     st AS MATERIALIZED (
@@ -522,7 +630,7 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
     CATEGORIES.general.min_players, CATEGORIES.horror.min_players,
     EMERGING.max_visits, EMERGING.min_players,
     openTs, today, EXPORT_DAILY_DAYS, openDay, lo, hi,
-    ids ? JSON.stringify(ids) : null, now - 24 * 60,
+    ids ? JSON.stringify(ids) : null, now - 24 * 60, selected ? 1 : 0,
   ).all();
   const row = res.results?.[0] || {};
   return {
@@ -535,11 +643,12 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
 }
 
 /** Cabecera común de export.json y telegram.json. */
-export function exportHeader({ nowMs, lastTs, ts24 }) {
+export function exportHeader({ nowMs, lastTs, ts24, radar = null }) {
   return {
     generated_at: new Date(nowMs).toISOString().slice(0, 19) + "Z",
     last_sample: lastTs != null ? isoMinute(lastTs) : null,
     samples_24h: new Set(ts24).size,
+    ...(radar ? { radar_games: radar.radar, selected_games: radar.selected } : {}),
   };
 }
 

@@ -29,7 +29,7 @@
  * La paridad con Python: cloudflare/test/metrics.parity.mjs.
  */
 
-import { CATEGORIES, EMERGING, EVENTS, SCAN_START, TRACK_MIN_PLAYERS } from './config.js';
+import { CATEGORIES, EMERGING, EVENTS, SCAN_START, SELECTION, TRACK_MIN_PLAYERS } from './config.js';
 import { cleanTitle } from './horror.js';
 
 export { cleanTitle };
@@ -393,9 +393,20 @@ function momentumScore(m) {
 const LOG30 = Math.log10(30);
 /** analytics.emerging + la señal de las listas de Roblox. → [score, motivos] o null. */
 function emerging(m, sorts) {
+  return emergingCore(m, sorts, true);
+}
+
+/**
+ * strict = true: la regla de emergentes (lo que sale en la web y en Telegram).
+ * strict = false: puntuación de CANDIDATO para elegir qué juegos se siguen
+ * (radar): la misma fórmula, pero sin corte por puntuación, con visitas aún
+ * desconocidas (juego recién descubierto) y, si no crece o está bajando, a mitad.
+ */
+function emergingCore(m, sorts, strict) {
   const cfg = EMERGING;
   const visits = m.visits, typical = m.typical || 0;
-  if (visits === null || visits > cfg.max_visits || typical < cfg.min_players) return null;
+  if (typical < cfg.min_players || (visits !== null && visits > cfg.max_visits)) return null;
+  if (visits === null && strict) return null;
   const t = m.trend, g24 = m.growth_24h, g7 = m.growth_7d;
   // Listas oficiales de Roblox (ver ROBLOX_SORT_POINTS)
   let sRoblox = 0;
@@ -411,8 +422,8 @@ function emerging(m, sorts) {
   const growing = (t !== null && t > 0) || (g24 !== null && g24 > 0) || (g7 !== null && g7 > 0)
     || (sRoblox > 0 && t === null && g24 === null && g7 === null);
   const fresh = m.fresh;
-  if (!growing && !fresh) return null;
-  if (m.status === 'down' || m.status === 'down2') return null;
+  const weak = (!growing && !fresh) || m.status === 'down' || m.status === 'down2';
+  if (weak && strict) return null;
 
   const reasons = rReasons;
   const vg = m.visits_growth || 0;
@@ -436,14 +447,42 @@ function emerging(m, sorts) {
   const lr = m.like_ratio;
   const sLike = 10 * clip(((lr || 0) - 75) / 20);
   if (lr && lr >= 90) reasons.push(`${fmt0(lr)}% likes`);
-  if (visits < 2_000_000) reasons.push('menos de 2M visitas');
+  if (visits !== null && visits < 2_000_000) reasons.push('menos de 2M visitas');
 
   // sRoblox va al final: con 0 la suma es la misma que en Python. Sin él el
   // máximo ya es 100; con él se recorta a 100 para que siga siendo 0-100.
   let score = Math.min(100, pyRound0(sVisits + sGrowth + sYoung + sSize + sLike + sRoblox));
   if (m.spike_now && (t || 0) < 5) score = pyRound0(score * 0.8);
+  if (!strict) return [weak ? score / 2 : score, reasons];
   if (score < cfg.min_score) return null;
   return [score, reasons.slice(0, 4)];
+}
+
+/**
+ * Radar: métricas mínimas de un juego para elegir los que se siguen.
+ * `g` como un juego del export (sin muestras basta: d con la serie diaria).
+ * → [typical, candidato (0-100) | null], o null si lleva 2 días sin datos.
+ */
+export function radarScore(g, { now } = {}) {
+  const ctx = radarCtx(now);
+  const d = g.d;
+  if (!d || !d.length || d[d.length - 1][0] < ctx.activeCut) return null;
+  const m = gameMetrics(g, ctx);
+  m.status = status(m);
+  const c = emergingCore(m, g.sorts, false);
+  return [m.typical || 0, c ? c[0] : null];
+}
+
+let RADAR_CTX = null;
+function radarCtx(now) {
+  const nowUs = toUs(now);
+  if (RADAR_CTX && RADAR_CTX.nowUs === nowUs) return RADAR_CTX;
+  const today = Math.floor(nowUs / DAY_US);
+  RADAR_CTX = {
+    nowUs, nowMin: nowUs / MIN, today, todayIso: isoDate(today), scanStart: dayNum(SCAN_START),
+    activeCut: isoDate(Math.floor((nowUs - ACTIVE_DAYS * DAY_US) / DAY_US)),
+  };
+  return RADAR_CTX;
 }
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
@@ -501,6 +540,7 @@ export function buildDashboard(exportData, { now } = {}) {
       icon: cfg.icon ?? '🎮',
       min_players: cfg.min_players,
       ids: ids.map(x => x.g.id),
+      top: ids.slice(0, SELECTION.top).map(x => x.g.id),
       emerging: emerg.map(x => x.g.id),
       trending: trending.map(x => x.g.id),
       stats: { games: ids.length, players, rising: up, falling: down, events, new_7d: new7 },

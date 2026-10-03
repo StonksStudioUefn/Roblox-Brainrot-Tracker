@@ -1,6 +1,6 @@
 # Roblox Tracker
 
-Tracker de juegos de Roblox con dos vistas: **General** (todo Roblox) y **Horror**. Detecta qué está creciendo, qué juegos poco conocidos empiezan a despegar y separa los picos de evento del crecimiento real. Tiene un dashboard web con miniaturas, fichas de juego y avisos por Telegram.
+Tracker de juegos de Roblox con dos vistas: **General** (todo Roblox) y **Horror**. Vigila unos 2.500 juegos con un radar ligero y sigue de cerca los ~200 que más interesan: el top 10 por jugadores de cada vista y los que tienen más pinta de despegar. Separa los picos de evento del crecimiento real. Tiene un dashboard web con miniaturas, fichas de juego y avisos por Telegram.
 
 **Dashboard:** https://robloxtracker.stonksstudio.com (privado: entra con el login de Cloudflare Access del equipo)
 
@@ -21,12 +21,28 @@ Worker roblox-tracker (robloxtracker.stonksstudio.com)
 En cada muestreo el Workflow:
 
 1. **Descubre juegos** con las APIs oficiales de Roblox: listas de Explore (*Up-and-Coming*, *Top Trending*…) y el buscador, con palabras de horror que van rotando. Completa con la lista de Rolimons.
-2. **Toma una muestra** de los que tienen **≥300 jugadores** (unos 2.000–2.500): jugadores y visitas. Una vez al día actualiza la ficha (nombre, creador, géneros, fechas, favoritos, likes) y la clasificación de horror, que usa la descripción, pero esta no se guarda.
-3. **Cierra el día anterior** (mediana, media, mín, máx…) y borra las muestras de más de 8 días.
-4. **Genera el export** para la web y la lista de candidatos para Telegram.
-5. **Telegram**: alertas de emergentes, resumen diario (desde las 18:00 UTC) y semanal.
+2. **Radar:** con la lista de Rolimons (1 sola petición) apunta los jugadores de todos los juegos con **≥300 jugadores** (unos 2.500).
+3. **Toma una muestra** de los **juegos seguidos** (~200): jugadores y visitas.
+4. En la primera pasada del día, además:
+   - actualiza la ficha de todo el radar (nombre, creador, géneros, fechas, visitas) y la clasificación de horror, que usa la descripción, pero esta no se guarda; los likes y favoritos, solo de los seguidos;
+   - **cierra el día anterior**: mediana, media, mín y máx de las muestras de los seguidos y de las lecturas del radar del resto;
+   - **elige los juegos seguidos** de hoy (ver abajo).
+5. **Genera el export** para la web (solo los seguidos) y la lista de candidatos para Telegram. Borra las muestras de más de 8 días.
+6. **Telegram**: alertas de emergentes, resumen diario (desde las 18:00 UTC) y semanal.
 
-El plan gratuito permite 50 peticiones externas por invocación, así que el muestreo se reparte en varias ejecuciones encadenadas (3 en una pasada normal y unas 6 en la primera del día).
+El plan gratuito permite 50 peticiones externas por invocación, así que el muestreo se reparte en varias ejecuciones encadenadas (1–2 en una pasada normal y unas 4–5 en la primera del día).
+
+## Radar y juegos seguidos
+
+Para encontrar lo que empieza a despegar hay que mirar muchos juegos, pero no hace falta guardarlo todo de todos:
+
+- **Radar (~2.500 juegos):** de cada juego con ≥300 jugadores se guarda **un solo dato al día** (la mediana de las lecturas de Rolimons de ese día, con sus visitas). Basta para ver si está creciendo y para tener su historia si un día entra en la lista.
+- **Seguidos (~200):** cada día, con el día anterior cerrado, se eligen en `cloudflare/src/config.js` → `SELECTION`:
+  - los **10 con más jugadores** de cada pestaña (General y Horror);
+  - los **150 mejores candidatos a emergente** de todo Roblox y los **50 mejores de horror**. La puntuación es la misma que la de emergentes, pero sin el corte de 45 puntos. Si en horror no hay 50 candidatos con menos de 30M visitas, se completa con los siguientes por jugadores.
+  - Un juego ya seguido se queda mientras siga dentro del 150 % de su lista, para que no entre y salga cada día.
+
+Solo los seguidos tienen muestras cada 3 h, likes, salen en la web y mandan avisos a Telegram. Así se escribe unas 4 veces menos en la base de datos que siguiendo todo el radar.
 
 La web pide al Worker lo que no se guarda: **jugadores en vivo**, iconos, miniaturas y descripciones. Lo hace al abrirse, cada ~2 min y con el botón 🔄 Actualizar. Eso no se guarda en el histórico ni manda nada a Telegram.
 
@@ -79,14 +95,14 @@ Se guarda solo lo básico, en la base de datos **D1 `roblox-tracker`**:
 
 | Tabla | Qué guarda |
 |---|---|
-| `games` | ficha básica: nombre, creador, géneros, fechas y clasificación de horror |
+| `games` | ficha básica: nombre, creador, géneros, fechas, clasificación de horror y si se sigue (`sel`) |
 | `places` | qué juego (universe) corresponde a cada place |
-| `samples` | una muestra cada 3 h: hora, juego, jugadores, visitas (8 días) |
-| `daily` | un registro por juego y día: n, mediana, media, mín, máx, visitas, favoritos, likes |
+| `samples` | una muestra cada 3 h de los seguidos: hora, juego, jugadores, visitas (8 días) |
+| `daily` | un registro por juego y día, de todo el radar: n, mediana, media, mín, máx, visitas (y favoritos y likes de los seguidos) |
 | `sort_hits` | en qué listas oficiales de Roblox aparece cada juego y en qué puesto |
 | `state` | estado del muestreo y qué avisos de Telegram ya se han enviado |
 
-En el bucket **R2 `roblox-tracker`** van la web (`site/`) y los ficheros generados (`data/export.json`, `data/telegram.json`). No se guardan descripciones, iconos ni miniaturas: el Worker los pide a Roblox cuando hacen falta.
+En el bucket **R2 `roblox-tracker`** van la web (`site/`), los ficheros generados (`data/export.json`, `data/telegram.json`) y las lecturas del radar de cada muestreo (`radar/<día>/`, 7 días). No se guardan descripciones, iconos ni miniaturas: el Worker los pide a Roblox cuando hacen falta.
 
 El historial hasta el 03/10/2026 sigue en git, en los commits anteriores a la migración.
 
@@ -122,3 +138,4 @@ Los mensajes están pensados para el móvil: el resumen diario es un mensaje por
 - Rolimons solo lista juegos con un mínimo de actividad. Los que no aparecen ahí no se ven.
 - El buscador de Roblox a veces devuelve resultados vacíos si se le pide mucho. Por eso las palabras van rotando, unas pocas en cada muestreo.
 - La clasificación de horror es heurística. Revisa los motivos en la ficha y corrige con `force_include` / `force_exclude`.
+- Un juego que entra hoy en la lista de seguidos sale en la web desde el siguiente muestreo (necesita su primera muestra). Su historia anterior viene del radar: un dato al día.
