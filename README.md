@@ -91,6 +91,8 @@ Un juego es de horror si suma **≥5 puntos y tiene al menos una señal fuerte**
 
 ## Ficha de un juego
 
+Al pulsar un juego se abre su ficha en una tarjeta en el centro de la pantalla (con scroll si hace falta): cabecera con creador, título y botones (jugar, copiar enlace), miniatura con la descripción, fechas y cifras (visitas, visitas/día, favoritos y likes, con su puesto entre los seguidos), y la sección de jugadores con las cifras de ahora, el pico de 24 h y el pico registrado.
+
 La gráfica de la ficha tiene cuatro vistas:
 
 - **Día:** las muestras de cada hora de las últimas 24 h. Se actualiza cada hora.
