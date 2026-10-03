@@ -317,3 +317,17 @@ Se pasa de muestrear todo el catálogo (~2.500 juegos) a un **radar** de todo y
   añade `radar_games` y `selected_games`. `buildDashboard` añade `categories.*.top`
   (10 primeros por jugadores) y las dos categorías bajan `min_players` a 300.
 - Admin: `POST /api/admin/run {"only":["select"],"select":true}` rehace la selección.
+
+## Cada hora y un año de datos (03/10/2026)
+
+- Cron `0 * * * *`. Muestras de los seguidos cada hora; el radar (Rolimons) solo
+  cada `RADAR_EVERY_HOURS` = 3 h y en la 1ª pasada del día; el buscador, 1 palabra
+  por pasada (`SEARCH_QUERIES_PER_RUN` = 1).
+- `DATA_RETENTION_DAYS` = 365: en la 1ª pasada del día `maint` borra `daily` y
+  `sort_hits` anteriores (`pruneOldStmts`, por clave primaria juego a juego).
+- `/api/history/:id`: `d` = 365 días de `[fecha, mediana, mín, máx, n, 0, media]`
+  (el 0 es el hueco donde la web marca los eventos) y `r` = muestras de 2 días.
+  La ficha: Día (por horas, 24 h) / Semana / Mes / Año (media + mín–máx).
+- Telegram: si un envío falla con `migrate_to_chat_id` (el grupo pasó a supergrupo),
+  se reintenta con el id nuevo y se guarda en `state.telegram.chat_migrated = {from, to}`;
+  se usa mientras `TELEGRAM_CHAT_ID` siga siendo `from`.

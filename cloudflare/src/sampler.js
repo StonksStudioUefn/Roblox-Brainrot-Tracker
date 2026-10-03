@@ -1,7 +1,7 @@
 /**
  * sampler.js — Workflow `Sampler`: un muestreo completo, por pasos.
  *
- * Lo lanza el cron cada 3 h (index.js → scheduled) o /api/admin/run.
+ * Lo lanza el cron cada hora (index.js → scheduled) o /api/admin/run.
  * Cada `step.do` cabe en 10 ms de CPU (medido: README "CPU por paso") y en
  * ≤ 45 peticiones externas (Budget), y es idempotente: Workflows lo reintenta
  * si falla, y los pasos ya hechos no se repiten al reanudar.
@@ -19,7 +19,7 @@
  * petición) y los jugadores de todos los juegos del radar (tracked = 1) se
  * apuntan en R2 radar/<día>/<ts>.json; al cerrar el día se convierten en UNA fila
  * diaria por juego. Solo los juegos seguidos (sel = 1, unos 200 elegidos cada
- * día en `select`) tienen muestras cada 3 h y votos, y salen en el export.
+ * día en `select`) tienen muestras cada hora y votos, y salen en el export.
  *
  * Pasos:  init → explore-0..P (una página de get-sorts por paso) → explore-more →
  *         search-0..N → search-cursor → rolimons (radar; en la 1ª del día, también
@@ -36,8 +36,8 @@
 
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import {
-  SAMPLE_RETENTION_DAYS, SEARCH_PAGES_PER_QUERY, SEARCH_QUERIES, SEARCH_QUERIES_PER_RUN,
-  SELECTION, TRACK_MIN_PLAYERS,
+  DATA_RETENTION_DAYS, RADAR_EVERY_HOURS, SAMPLE_RETENTION_DAYS, SEARCH_PAGES_PER_QUERY, SEARCH_QUERIES,
+  SEARCH_QUERIES_PER_RUN, SELECTION, TRACK_MIN_PLAYERS,
 } from "./config.js";
 import {
   Budget, SubBudget, chunks, fetchGames, fetchRolimons, fetchSearch, fetchSortContent, fetchSortsPage, fetchVotes,
@@ -46,7 +46,7 @@ import {
 import {
   DAY_MIN, addDays, applySelectionStmt, applyVotesStmt, buildExportSlice, closeDayStmt, exportHeader, exportPlan,
   getState, getStates, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs, lowSinceStmts,
-  mergeHistStmt, minuteOf, pruneOrphansStmt, pruneSamplesStmt, radarCloseStmt, radarCounts, radarPlayers,
+  mergeHistStmt, minuteOf, pruneOldStmts, pruneOrphansStmt, pruneSamplesStmt, radarCloseStmt, radarCounts, radarPlayers,
   radarSlice, retrackPlacesStmt, setState, setStateStmt, sortHitsStmt, trackedIds, unknownPlaces,
   untrackStmt, updateMetaStmt, upsertDiscoveredStmt, written,
 } from "./db.js";
@@ -223,7 +223,9 @@ export class Sampler extends WorkflowEntrypoint {
     // ── rolimons: lecturas del radar (cada pasada) y, en la 1ª pasada del día,
     // los places por resolver (a R2)
     const daily = init.firstOfDay && want("rolimons");
-    if (reach("rolimons") && want("rolimons")) {
+    // El radar se lee cada RADAR_EVERY_HOURS (y siempre en la 1ª pasada del día)
+    const radarHour = new Date(ts * 60000).getUTCHours() % RADAR_EVERY_HOURS === 0;
+    if (reach("rolimons") && want("rolimons") && (daily || radarHour)) {
       if (inv.left < ROLIMONS_NEED) return await next("rolimons");
       await safe("rolimons", async () => {
         const budget = sub(ROLIMONS_NEED);
@@ -369,7 +371,8 @@ export class Sampler extends WorkflowEntrypoint {
       await safe("maint", async () => {
         const cutoff = ts - SAMPLE_RETENTION_DAYS * DAY_MIN;
         const stmts = [pruneSamplesStmt(db, cutoff), untrackStmt(db, today)];
-        if (init.firstOfDay) stmts.push(pruneOrphansStmt(db, cutoff));
+        // Una vez al día: lo que tiene más de un año (días y puestos en listas)
+        if (init.firstOfDay) stmts.push(pruneOrphansStmt(db, cutoff), ...pruneOldStmts(db, addDays(today, -DATA_RETENTION_DAYS)));
         const res = await db.batch(stmts);
         let radarFiles = 0;
         if (init.firstOfDay) {
@@ -379,7 +382,8 @@ export class Sampler extends WorkflowEntrypoint {
           if (keys.length) await env.BUCKET.delete(keys);
           radarFiles = keys.length;
         }
-        return { pruned: res[0]?.meta?.changes ?? 0, untracked: res[1]?.meta?.changes ?? 0, radar_files: radarFiles, written: written(res) };
+        const oldRows = init.firstOfDay ? (res[3]?.meta?.changes ?? 0) + (res[4]?.meta?.changes ?? 0) : 0;
+        return { pruned: res[0]?.meta?.changes ?? 0, untracked: res[1]?.meta?.changes ?? 0, old_rows: oldRows, radar_files: radarFiles, written: written(res) };
       });
     }
 

@@ -394,10 +394,10 @@
   <details class="how">
     <summary>¿Cómo se calculan los datos?</summary>
     <ul>
-      <li><b>Radar:</b> los juegos se encuentran con las listas oficiales de Roblox (Top Trending, Up-and-Coming, Top Playing Now…), con el buscador oficial de Roblox (palabras de horror, por turnos) y con la lista de Rolimons. Cada 3 h se miran los jugadores de todos los que tienen ≥<span id="m-min">300</span> (<span id="m-radar">unos 2.500</span>) y de cada uno se guarda un solo dato al día; tras <span id="m-untrack">3</span> días seguidos por debajo salen del radar.</li>
+      <li><b>Radar:</b> los juegos se encuentran con las listas oficiales de Roblox (Top Trending, Up-and-Coming, Top Playing Now…), con el buscador oficial de Roblox (palabras de horror, por turnos) y con la lista de Rolimons. Cada 3 h se miran los jugadores de todos los que tienen ≥<span id="m-min">300</span> (<span id="m-radar">unos 2.500</span>) y de cada uno se guarda solo su día: mediana, media, mínimo y máximo; tras <span id="m-untrack">3</span> días seguidos por debajo salen del radar.</li>
       <li><b>Juegos seguidos:</b> cada día se eligen unos 200 (<span id="m-sel">—</span> hoy): en cada pestaña los <span id="m-top">10</span> con más jugadores y los mejores candidatos a emergente (<span id="m-eg">150</span> de todo Roblox y <span id="m-eh">50</span> de horror). Un juego elegido se queda mientras siga cerca de su lista, para que no entre y salga cada día. Solo se ven aquí los seguidos.</li>
-      <li><b>Muestras:</b> un Worker de Cloudflare toma una foto de los juegos seguidos cada 3 h y la guarda en Cloudflare D1. El valor de cada día es la <b>mediana</b> de sus muestras, así que un pico de una hora no cambia el día.</li>
-      <li><b>Cálculo:</b> las métricas se calculan en tu navegador con los últimos <span id="m-days">21</span> días de cada juego y sus muestras de las últimas 48 h; la ficha pide <span id="m-hist">120</span> días de historia para el gráfico.</li>
+      <li><b>Muestras:</b> un Worker de Cloudflare toma una foto de los juegos seguidos <b>cada hora</b> y la guarda 8 días en Cloudflare D1. De cada día quedan la mediana, la media, el mínimo y el máximo durante un año. Las métricas usan la <b>mediana</b>, así que un pico de una hora no cambia el día.</li>
+      <li><b>Cálculo:</b> las métricas se calculan en tu navegador con los últimos <span id="m-days">21</span> días de cada juego y sus muestras de las últimas 48 h; la ficha muestra el día por horas y la semana, el mes y el año con la media, el mínimo y el máximo de cada día (<span id="m-hist">365</span> días como mucho: lo que tiene más de un año se borra).</li>
       <li><b>Jugadores:</b> mediana de las muestras de las últimas 24 h. "Ahora" (🟢) se pide a Roblox en el momento al abrir la página, cada ~2 min o con 🔄 Actualizar; no se guarda en el histórico.</li>
       <li><b>Eventos:</b> un día se marca como evento si está muy por encima de la mediana de los días de alrededor (filtro de Hampel) y después vuelve a bajar (si el salto se mantiene es crecimiento real), descontando el efecto fin de semana. Esos días se pintan en amarillo y <b>no cuentan</b> para medias, 7d ni tendencia.</li>
       <li><b>Tendencia/día:</b> pendiente de Theil–Sen sobre los últimos 8 días limpios. Es robusta: un día raro no la arrastra.</li>
@@ -407,7 +407,7 @@
       <li>Los días anteriores al 03/10/2026 tienen una sola muestra (formato antiguo).</li>
     </ul>
   </details>
-  <footer>Datos de las APIs públicas de Roblox (listas de Explore, buscador y juegos) y de Rolimons · radar y muestras cada 3 h con un Worker de Cloudflare · datos en Cloudflare D1 y R2</footer>
+  <footer>Datos de las APIs públicas de Roblox (listas de Explore, buscador y juegos) y de Rolimons · muestras cada hora con un Worker de Cloudflare · datos en Cloudflare D1 y R2</footer>
 </main>
 
 <div class="scrim" id="scrim"></div>
@@ -432,7 +432,9 @@ let LIVE = {}, LIVE_TS = null, LIVE_STATE = 'loading', THUMBS = {}, INFO = {};
 let CAT = 'general';
 let SORT = { k: 'typical', asc: false };
 let FILTER = 'all', GENRE = '', QUERY = '', LIMIT = 50;
-let CHART = null, CHART_MODE = 'daily', OPEN_ID = null;
+let CHART = null, CHART_MODE = 'day', OPEN_ID = null;
+// Vistas de la gráfica de la ficha: 'day' = cada hora (24 h); el resto, un punto por día
+const CHART_DAYS = { week: 7, month: 30, year: 365 };
 
 const STATUS = {
   hot:   { icon: '🚀', label: 'Explosivo' },
@@ -795,8 +797,8 @@ async function openGame(id, push = true) {
       <div class="box">
         <h3>Jugadores
           <span class="seg" id="chart-mode">
-            <button data-m="daily" class="${CHART_MODE === 'daily' ? 'active' : ''}">Diario</button>
-            <button data-m="intraday" class="${CHART_MODE === 'intraday' ? 'active' : ''}">Intradía 7d</button>
+            ${[['day', 'Día'], ['week', 'Semana'], ['month', 'Mes'], ['year', 'Año']].map(([m, l]) =>
+              `<button data-m="${m}" class="${CHART_MODE === m ? 'active' : ''}">${l}</button>`).join('')}
           </span>
         </h3>
         <div class="chart-wrap"><canvas id="chart"></canvas></div>
@@ -865,28 +867,42 @@ function drawChart(g) {
   if (CHART) CHART.destroy();
   const accent = cssVar('--accent'), event = cssVar('--event'), grid = cssVar('--border'), muted = cssVar('--muted');
   const legend = document.getElementById('legend');
-  let labels, datasets;
-  if (CHART_MODE === 'intraday' && h.r && h.r.length) {
-    labels = h.r.map(([t]) => new Date(t.replace('Z', ':00Z')).toLocaleString('es', { weekday: 'short', hour: '2-digit', minute: '2-digit' }));
+  let labels, datasets, rows = null;
+  if (CHART_MODE === 'day') {
+    // El día por horas: las muestras de las últimas 24 h (una por hora)
+    const r = h.r || [];
+    const last = r.length ? Date.parse(r[r.length - 1][0].replace('Z', ':00Z')) : Date.now();
+    const day = r.filter(([t]) => Date.parse(t.replace('Z', ':00Z')) > last - 24 * 3600e3);
+    labels = day.map(([t]) => new Date(t.replace('Z', ':00Z')).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' }));
     datasets = [{
-      label: 'Jugadores', data: h.r.map(r => r[1]), borderColor: accent, backgroundColor: accent + '22',
-      fill: true, tension: .3, pointRadius: 2, borderWidth: 2,
+      label: 'Jugadores', data: day.map(x => x[1]), borderColor: accent, backgroundColor: accent + '22',
+      fill: true, tension: .3, pointRadius: day.length < 40 ? 2 : 0, borderWidth: 2,
     }];
-    legend.innerHTML = `<span><i style="background:${accent}"></i>Cada muestra (cada ~3 h)</span>`;
+    legend.innerHTML = day.length
+      ? `<span><i style="background:${accent}"></i>Cada hora · últimas 24 h</span>`
+      : 'Todavía no hay muestras de las últimas 24 h.';
   } else {
-    const d = h.d || [];
-    labels = d.map(r => new Date(r[0] + 'T12:00:00Z').toLocaleDateString('es', { day: '2-digit', month: 'short' }));
+    // Semana, mes o año: un punto por día con su media, mínimo y máximo
+    const n = CHART_DAYS[CHART_MODE] || 30;
+    const all = h.d || [];
+    const from = new Date(Date.now() - (n - 1) * 864e5).toISOString().slice(0, 10);
+    rows = all.filter(r => r[0] >= from);
+    const mean = r => r[6] ?? r[1];
+    const fmt = n > 7 ? { day: 'numeric', month: 'short' } : { weekday: 'short', day: 'numeric' };
+    labels = rows.map(r => new Date(r[0] + 'T12:00:00Z').toLocaleDateString('es', fmt));
     datasets = [
-      { label: 'Máximo del día', data: d.map(r => r[3]), borderColor: 'transparent', backgroundColor: accent + '1f', fill: '+1', pointRadius: 0, tension: .3 },
-      { label: 'Mínimo del día', data: d.map(r => r[2]), borderColor: 'transparent', backgroundColor: 'transparent', fill: false, pointRadius: 0, tension: .3 },
-      { label: 'Mediana del día', data: d.map(r => r[1]), borderColor: accent, backgroundColor: accent, fill: false, tension: .3, borderWidth: 2,
-        pointRadius: d.map(r => r[5] ? 5 : (d.length < 40 ? 2 : 0)),
-        pointBackgroundColor: d.map(r => r[5] ? event : accent),
-        pointBorderColor: d.map(r => r[5] ? event : accent) },
+      { label: 'Máximo del día', data: rows.map(r => r[3]), borderColor: 'transparent', backgroundColor: accent + '1f', fill: '+1', pointRadius: 0, tension: .3 },
+      { label: 'Mínimo del día', data: rows.map(r => r[2]), borderColor: 'transparent', backgroundColor: 'transparent', fill: false, pointRadius: 0, tension: .3 },
+      { label: 'Media del día', data: rows.map(mean), borderColor: accent, backgroundColor: accent, fill: false, tension: .3, borderWidth: 2,
+        pointRadius: rows.map(r => r[5] ? 5 : (rows.length < 40 ? 2 : 0)),
+        pointBackgroundColor: rows.map(r => r[5] ? event : accent),
+        pointBorderColor: rows.map(r => r[5] ? event : accent) },
     ];
-    legend.innerHTML = `<span><i style="background:${accent}"></i>Mediana del día</span>
-      <span><i style="background:${accent}33"></i>Rango mín.–máx.</span>
-      <span><i style="background:${event}"></i>Día con evento (no cuenta para las medias)</span>`;
+    const since = all.length ? all[0][0] : null;
+    legend.innerHTML = `<span><i style="background:${accent}"></i>Media del día</span>
+      <span><i style="background:${accent}33"></i>Mínimo–máximo del día</span>
+      <span><i style="background:${event}"></i>Día con evento</span>` +
+      (since && since > from ? `<span>Datos desde el ${new Date(since + 'T12:00:00Z').toLocaleDateString('es', { day: 'numeric', month: 'short' })}</span>` : '');
   }
   CHART = new Chart(canvas, {
     type: 'line',
@@ -902,8 +918,8 @@ function drawChart(g) {
           callbacks: {
             label: c => `${c.dataset.label}: ${num(c.parsed.y)}`,
             afterBody: items => {
-              if (CHART_MODE !== 'daily') return '';
-              const r = (h.d || [])[items[0].dataIndex];
+              if (!rows) return '';
+              const r = rows[items[0].dataIndex];
               return r ? [`${r[4]} muestra${r[4] === 1 ? '' : 's'}${r[5] ? ' · 🎉 evento' : ''}`] : '';
             },
           },
@@ -1079,7 +1095,7 @@ async function init() {
     if (!RAW.games) throw new Error('formato antiguo');
   } catch (e) {
     console.error(e);
-    document.querySelector('main').innerHTML = `<div class="empty" style="padding:80px 0"><b>No hay datos todavía</b>Se generan con el siguiente muestreo del Worker (cada 3 h).</div>`;
+    document.querySelector('main').innerHTML = `<div class="empty" style="padding:80px 0"><b>No hay datos todavía</b>Se generan con el siguiente muestreo del Worker (cada hora).</div>`;
     return;
   }
   const p = new URLSearchParams(location.hash.slice(1));

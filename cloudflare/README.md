@@ -1,11 +1,11 @@
 # Roblox Tracker en Cloudflare (plan gratis)
 
-Un solo Worker (`roblox-tracker`) con D1, R2 y un Workflow (`roblox-sampler`) que muestrea cada 3 h.
+Un solo Worker (`roblox-tracker`) con D1, R2 y un Workflow (`roblox-sampler`) que muestrea cada hora.
 La interfaz entre piezas está en [`CONTRACT.md`](CONTRACT.md).
 
 | Fichero | Qué hace |
 |---|---|
-| `wrangler.toml` | Bindings `DB` (D1), `BUCKET` (R2), `SAMPLER` (Workflow), cron `0 */3 * * *` (00:00, 03:00, 06:00… UTC), dominio |
+| `wrangler.toml` | Bindings `DB` (D1), `BUCKET` (R2), `SAMPLER` (Workflow), cron `0 * * * *` (cada hora en punto, UTC), dominio |
 | `schema.sql` | Esquema D1 (idempotente) |
 | `src/index.js` | `fetch` (web, API, admin) y `scheduled` (crea la instancia del Workflow) |
 | `src/sampler.js` | `class Sampler extends WorkflowEntrypoint`: el muestreo por pasos, el radar y la elección de los juegos seguidos |
