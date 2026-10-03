@@ -5,12 +5,13 @@ Cada ejecución:
   1. Descarga la lista de Rolimons (todos los juegos con su player count).
   2. Se queda con los que tienen ≥ TRACK_MIN_PLAYERS.
   3. Traduce place_id → universe_id (con caché en data/games.json).
-  4. Enriquece con la API oficial: nombre, descripción, creador, género,
-     fechas, visitas, favoritos, likes, icono y miniatura.
+  4. Enriquece con la API oficial: nombre, creador, género, fechas,
+     visitas, favoritos y likes. Con la descripción se calcula aquí la
+     clasificación de horror, pero la descripción no se guarda.
   5. Añade una muestra a data/raw/HOY.csv y recalcula data/daily/MES.csv.
 
-La clasificación por categoría (general / horror) se hace después, en
-export_dashboard.py, así que no hace falta una ejecución por categoría.
+Solo se guarda lo básico (números, nombre, géneros, fechas). Las
+descripciones, iconos y miniaturas las pide el Worker a Roblox al momento.
 Está pensado para correr varias veces al día: con varias muestras diarias
 un evento puntual no ensucia la media.
 
@@ -25,7 +26,7 @@ from datetime import datetime, timezone
 
 import requests
 
-import legacy
+import analytics as an
 import store
 from config import TRACK_MIN_PLAYERS
 
@@ -33,10 +34,9 @@ ROLIMONS_GAMELIST = "https://api.rolimons.com/games/v1/gamelist"
 GAMES_API = "https://games.roblox.com/v1/games"
 VOTES_API = "https://games.roblox.com/v1/games/votes"
 PLACE_UNIVERSE_API = "https://apis.roblox.com/universes/v1/places/{}/universe"
-ICONS_API = "https://thumbnails.roblox.com/v1/games/icons"
-THUMBS_API = "https://thumbnails.roblox.com/v1/games/multiget/thumbnails"
 
-DESCRIPTION_CHARS = 600   # se guarda un extracto, suficiente para clasificar
+# Campos que ya no se guardan (se piden al momento) y se limpian de fichas viejas
+DROPPED_FIELDS = ("description", "icon", "thumb", "creator_type")
 
 SESSION = requests.Session()
 SESSION.headers["User-Agent"] = "roblox-tracker/2.0"
@@ -115,7 +115,6 @@ def run():
     ts = now.strftime("%Y-%m-%dT%H:%MZ")
     print(f"▶ Tracker iniciado — {ts}")
 
-    legacy.import_legacy(resolve_universes)   # solo hace algo la primera vez
     games = store.load_games()
     place_to_uid = {g["place_id"]: uid for uid, g in games.items() if g.get("place_id")}
 
@@ -141,16 +140,6 @@ def run():
     print(f"  Descargando detalles de {len(uids)} juegos…")
     details = {d["id"]: d for d in fetch_batched(GAMES_API, uids, 50)}
     votes = {v["id"]: v for v in fetch_batched(VOTES_API, uids, 50)}
-    icons = {i["targetId"]: i.get("imageUrl")
-             for i in fetch_batched(ICONS_API, uids, 100,
-                                    {"size": "256x256", "format": "Webp", "returnPolicy": "PlaceHolder"})
-             if i.get("state") == "Completed"}
-    thumbs = {}
-    for t in fetch_batched(THUMBS_API, uids, 50,
-                           {"countPerUniverse": 1, "size": "768x432", "format": "Webp", "defaults": "true"}):
-        shots = [s for s in t.get("thumbnails") or [] if s.get("state") == "Completed"]
-        if shots:
-            thumbs[t["universeId"]] = shots[0]["imageUrl"]
 
     raw_rows, extra = [], {}
     for uid in uids:
@@ -165,12 +154,12 @@ def run():
         g.setdefault("first_seen", ts)
         g["place_id"] = pid   # el de Rolimons: así la caché place→universe acierta
         g["name"] = d.get("name") or g.get("name") or rol_name
+        for k in DROPPED_FIELDS:
+            g.pop(k, None)
         if d:
             creator = d.get("creator") or {}
             g.update({
-                "description": (d.get("description") or "")[:DESCRIPTION_CHARS],
                 "creator": creator.get("name"),
-                "creator_type": creator.get("type"),
                 "creator_verified": bool(creator.get("hasVerifiedBadge")),
                 "created": d.get("created"),
                 "updated": d.get("updated"),
@@ -179,10 +168,9 @@ def run():
                 "genre_l2": d.get("genre_l2"),
                 "max_players": d.get("maxPlayers"),
             })
-        if uid in icons:
-            g["icon"] = icons[uid]
-        if uid in thumbs:
-            g["thumb"] = thumbs[uid]
+            # Horror se decide con la descripción, que no se guarda
+            horror, score, reasons = an.is_horror({**g, "description": d.get("description") or ""}, uid)
+            g.update({"horror": horror, "horror_score": score, "horror_reasons": reasons})
 
         raw_rows.append({"ts": ts, "universe_id": uid, "playing": playing,
                          "visits": d.get("visits") or ""})

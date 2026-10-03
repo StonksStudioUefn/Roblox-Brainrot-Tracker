@@ -1,7 +1,10 @@
 /**
  * Roblox Tracker — Worker de Cloudflare (robloxtracker.stonksstudio.com)
  *
- * Público:
+ * El dominio está detrás de Cloudflare Access (login del equipo). La URL
+ * *.workers.dev solo atiende el almacenamiento privado.
+ *
+ * Web (robloxtracker.stonksstudio.com):
  *   GET /                    el dashboard (site/dashboard.html en R2)
  *   GET /favicon.svg
  *   GET /data/<fichero>      datos del tracker (dashboard.json, history.json, CSV…)
@@ -37,6 +40,9 @@ export default {
     const path = url.pathname;
     try {
       if (path === "/api/files" || path.startsWith("/api/file/")) return await storage(req, env, url);
+      // workers.dev no pasa por Cloudflare Access: ahí solo vale el
+      // almacenamiento con token; la web y el modo en vivo, solo en el dominio
+      if (url.hostname.endsWith(".workers.dev")) return text("No encontrado", 404);
       if (req.method !== "GET" && req.method !== "HEAD") return text("Método no permitido", 405);
       if (path === "/api/live") return await live(url);
       if (path === "/api/thumbs") return await thumbs(url);

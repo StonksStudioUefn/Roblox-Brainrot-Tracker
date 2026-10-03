@@ -12,17 +12,21 @@ on:
         type: choice
         options: [ninguno, diario, semanal]
         default: ninguno
-  push:                     # al cambiar el código, se regenera todo al momento
+  push:                     # al cambiar el código o la web, se regenera y se publica
     branches: [main]
-    paths: ["*.py", ".github/workflows/tracker.yml"]
+    paths: ["*.py", "dashboard.html", "favicon.svg", ".github/workflows/tracker.yml"]
 
 permissions:
-  contents: write
+  contents: read            # los datos ya no se guardan en el repo, sino en R2
 
-# Evita que dos ejecuciones pisen el repo a la vez
+# Dos ejecuciones a la vez se pisarían los datos en R2
 concurrency:
-  group: tracker-commit
+  group: tracker
   cancel-in-progress: false
+
+env:
+  TRACKER_API: https://roblox-tracker.stonksstudiouefn.workers.dev
+  TRACKER_TOKEN: ${{ secrets.TRACKER_TOKEN }}
 
 jobs:
   track:
@@ -30,10 +34,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-        with:
-          # La punta de main en este momento, no el commit que lanzó el run:
-          # si había otro run en cola, así se parte de los datos que guardó
-          ref: main
 
       - uses: actions/setup-python@v6
         with:
@@ -41,6 +41,10 @@ jobs:
           cache: pip
 
       - run: pip install -r requirements.txt
+
+      - name: Descargar datos de R2
+        id: pull
+        run: python remote.py pull
 
       - name: Tomar muestra de todos los juegos
         run: python tracker.py
@@ -60,21 +64,7 @@ jobs:
             *)       python notifier.py ;;
           esac
 
-      - name: Commit cambios
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A data/
-          git diff --staged --quiet && echo "Sin cambios" && exit 0
-          git commit -m "track: $(date -u +%Y-%m-%dT%H:%M)"
-          # Si a la vez se subió otro commit, se rebasa encima. Las muestras
-          # de data/raw se juntan (.gitattributes: merge=union); en el resto de
-          # data/ manda lo de este run (-X theirs en un rebase), que se
-          # recalcula igualmente en la siguiente ejecución
-          for i in 1 2 3; do
-            if git pull --rebase -X theirs origin main && git push; then exit 0; fi
-            git rebase --abort 2>/dev/null || true
-            echo "Reintento push $i…" && sleep 5
-          done
-          echo "::error::No se pudieron subir los datos tras 3 intentos"
-          exit 1
+      # Se guarda aunque falle Telegram; nunca si no se pudieron descargar
+      - name: Guardar datos y web en R2
+        if: always() && steps.pull.outcome == 'success'
+        run: python remote.py push

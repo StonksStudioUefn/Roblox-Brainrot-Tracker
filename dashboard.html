@@ -98,7 +98,14 @@
   .updated { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-2); }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--up); box-shadow: 0 0 10px var(--up); }
   .dot.stale { background: var(--down); box-shadow: 0 0 10px var(--down); }
-  @media (max-width: 640px) { .updated { margin-left: 0; width: 100%; } }
+  @media (max-width: 640px) { .updated { margin-left: 0; width: 100%; flex-wrap: wrap; } }
+  .live-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: var(--panel); border: 1px solid var(--border); font-weight: 600; white-space: nowrap; }
+  .live-chip.ok { color: var(--up); } .live-chip.loading { color: var(--text-2); } .live-chip.error { color: var(--down); }
+  .refresh { border: 1px solid var(--border); background: var(--panel); border-radius: 999px; padding: 4px 11px; cursor: pointer; font-weight: 600; font-size: 12px; }
+  .refresh:hover { border-color: var(--accent); }
+  .refresh.spin span { display: inline-block; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .live-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--up); margin-right: 4px; vertical-align: 1px; }
 
   /* ── Hero ───────────────────────────────────────────── */
   .hero { padding: 32px 0 8px; }
@@ -294,7 +301,11 @@
   <div class="topbar-in">
     <div class="brand"><img src="favicon.svg" alt="">Roblox <span>Tracker</span></div>
     <nav class="tabs" id="tabs" aria-label="Categorías"></nav>
-    <div class="updated"><span class="dot" id="dot"></span><span id="updated">Cargando…</span></div>
+    <div class="updated">
+      <span class="live-chip loading" id="live" title="Jugadores pedidos a Roblox en este momento">⏳ En vivo…</span>
+      <button class="refresh" id="refresh" title="Volver a pedir los jugadores en vivo"><span>🔄</span> Actualizar</button>
+      <span class="dot" id="dot"></span><span id="updated">Cargando…</span>
+    </div>
   </div>
 </header>
 
@@ -372,7 +383,7 @@
     <summary>¿Cómo se calculan los datos?</summary>
     <ul>
       <li><b>Muestras:</b> se toma una foto de todos los juegos con ≥<span id="m-min">300</span> jugadores varias veces al día (cada 3 h). El valor de cada día es la <b>mediana</b> de sus muestras, así que un pico de una hora no cambia el día.</li>
-      <li><b>Jugadores:</b> mediana de las muestras de las últimas 24 h. "Ahora" es la última muestra.</li>
+      <li><b>Jugadores:</b> mediana de las muestras de las últimas 24 h. "Ahora" (🟢) se pide a Roblox en el momento al abrir la página, cada ~2 min o con 🔄 Actualizar; no se guarda en el histórico.</li>
       <li><b>Eventos:</b> un día se marca como evento si está muy por encima de la mediana de los días de alrededor (filtro de Hampel) y después vuelve a bajar (si el salto se mantiene es crecimiento real), descontando el efecto fin de semana. Esos días se pintan en amarillo y <b>no cuentan</b> para medias, 7d ni tendencia.</li>
       <li><b>Tendencia/día:</b> pendiente de Theil–Sen sobre los últimos 8 días limpios. Es robusta: un día raro no la arrastra.</li>
       <li><b>Emergentes:</b> menos de <span id="m-visits">30M</span> visitas totales, ≥300 jugadores y creciendo. La puntuación combina las visitas ganadas al día respecto al total, el crecimiento de jugadores, lo reciente que es el juego, su tamaño y los likes.</li>
@@ -381,7 +392,7 @@
       <li>Los días anteriores al 03/10/2026 tienen una sola muestra (formato antiguo).</li>
     </ul>
   </details>
-  <footer>Datos de Rolimons y de las APIs públicas de Roblox · actualizado automáticamente con GitHub Actions</footer>
+  <footer>Datos de Rolimons y de las APIs públicas de Roblox · muestras cada 3 h con GitHub Actions · datos en Cloudflare R2</footer>
 </main>
 
 <div class="scrim" id="scrim"></div>
@@ -389,7 +400,14 @@
 
 <script>
 // ─── Estado ───────────────────────────────────────────────────────────────────
+// La dirección antigua de GitHub Pages lleva a la nueva
+if (location.hostname.endsWith('github.io')) location.replace('https://robloxtracker.stonksstudio.com/' + location.hash);
+
 let RAW = null, HISTORY = null, HISTORY_P = null;
+// En vivo: lo pide el Worker a Roblox al momento (no se guarda)
+const API = './api';
+const LIVE_TTL = 90e3;               // segundos que vale un dato en vivo antes de pedirlo otra vez
+let LIVE = {}, LIVE_TS = null, LIVE_STATE = 'loading', THUMBS = {}, INFO = {};
 let CAT = 'general';
 let SORT = { k: 'typical', asc: false };
 let FILTER = 'all', GENRE = '', QUERY = '', LIMIT = 50;
@@ -438,9 +456,10 @@ const fdate = iso => new Date(iso).toLocaleDateString('es', { day: '2-digit', mo
 
 function icon(g, cls = '') {
   const letter = ((g.title || '').match(/[A-Za-z0-9]/) || ['?'])[0].toUpperCase();
-  if (!g.icon) return `<div class="ico ico-ph ${cls}">${letter}</div>`;
-  return `<img class="ico ${cls}" src="${esc(g.icon)}" alt="" loading="lazy" referrerpolicy="no-referrer"
-    onerror="this.outerHTML='<div class=&quot;ico ico-ph ${cls}&quot;>${letter}</div>'">`;
+  const src = (INFO[g.id] || {}).icon || (LIVE[g.id] || {}).icon;
+  if (!src) return `<div class="ico ico-ph ${cls}">${letter}</div>`;
+  return `<img class="ico ${cls}" src="${esc(src)}" alt="" loading="lazy" referrerpolicy="no-referrer"
+    onerror="if(this.parentNode)this.outerHTML='<div class=&quot;ico ico-ph ${cls}&quot;>${letter}</div>'">`;
 }
 function statusChip(g) {
   const s = STATUS[g.status] || STATUS.flat;
@@ -496,7 +515,7 @@ function renderHeader() {
   const stale = RAW.last_sample && (Date.now() - new Date(RAW.last_sample).getTime()) > 8 * 3600e3;
   document.getElementById('dot').classList.toggle('stale', !!stale);
   document.getElementById('updated').textContent =
-    `Última muestra ${ago(RAW.last_sample)} · ${RAW.samples_24h} muestras en 24 h`;
+    `Histórico: última muestra ${ago(RAW.last_sample)} · ${RAW.samples_24h} en 24 h`;
   document.getElementById('hero-title').innerHTML = CAT === 'horror'
     ? 'Radar de <em>horror</em> en Roblox'
     : 'Lo que está <em>petando</em> en Roblox';
@@ -528,7 +547,7 @@ function renderEmerging() {
   el.innerHTML = list.map(g => `
     <button class="card" data-id="${g.id}">
       <div class="card-media">
-        ${g.thumb ? `<img class="shot" src="${esc(g.thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
+        ${THUMBS[g.id] ? `<img class="shot" src="${esc(THUMBS[g.id])}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
         <span class="card-score" title="Puntuación de emergente">★ ${g.emerging}</span>
         <div class="card-flags">${g.spike_now ? '<span class="chip dark">🎉 Pico</span>' : ''}${g.age_days != null && g.age_days <= 30 ? `<span class="chip dark">🆕 ${age(g.age_days)}</span>` : ''}</div>
         ${icon(g, 'card-icon')}
@@ -599,7 +618,8 @@ function filtered() {
   return list;
 }
 
-function renderTable() {
+function renderTable(live = true) {
+  if (live) scheduleLive();
   const list = filtered();
   document.getElementById('all-sub').textContent =
     `${list.length} juego${list.length === 1 ? '' : 's'} · haz clic en uno para ver su ficha`;
@@ -626,7 +646,7 @@ function renderTable() {
         </div>
       </td>
       <td><div class="flags">${flagChips(g)}</div></td>
-      <td class="num"><b>${num(g.typical)}</b><span class="sub-num">ahora ${num(g.players)}</span></td>
+      <td class="num"><b>${num(g.typical)}</b><span class="sub-num">${LIVE[g.id] ? '<span class="live-dot"></span>' : ''}ahora ${num(nowPlayers(g))}</span></td>
       <td class="num">${pct(g.growth_24h)}</td>
       <td class="num">${pct(g.growth_7d)}</td>
       <td class="num">${pct(g.trend)}</td>
@@ -651,10 +671,10 @@ async function openGame(id, push = true) {
   const stat = (l, v, s = '') => `<div class="stat"><div class="stat-l">${l}</div><div class="stat-v">${v}${s ? ` <small>${s}</small>` : ''}</div></div>`;
   dr.innerHTML = `
     <div class="d-banner">
-      ${g.thumb ? `<img src="${esc(g.thumb)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
+      ${THUMBS[g.id] ? `<img src="${esc(THUMBS[g.id])}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
       <button class="d-close" id="d-close" aria-label="Cerrar">✕</button>
     </div>
-    <div class="d-head">
+    <div class="d-head" id="d-head">
       ${icon(g)}
       <div>
         <div class="d-title">${esc(g.title)}</div>
@@ -670,7 +690,7 @@ async function openGame(id, push = true) {
       <a class="play-btn" href="https://www.roblox.com/games/${g.place_id}" target="_blank" rel="noopener">▶ Abrir en Roblox</a>
       <div class="stats">
         ${stat('Jugadores típicos (24h)', num(g.typical))}
-        ${stat('Ahora', num(g.players), ago(g.players_ts))}
+        <div class="stat" id="d-now"><div class="stat-l">Ahora</div><div class="stat-v">${nowHtml(g)}</div></div>
         ${stat('Media 7 días', num(g.avg_7d), 'sin eventos')}
         ${stat('24 h', pct(g.growth_24h))}
         ${stat('7 días', pct(g.growth_7d))}
@@ -711,10 +731,23 @@ async function openGame(id, push = true) {
   document.getElementById('scrim').classList.add('open');
   document.body.classList.add('drawer-open');
 
+  // Ficha en vivo (descripción, miniatura, jugadores) y gráfico en paralelo
+  fetch(`${API}/game/${id}`).then(r => r.ok ? r.json() : Promise.reject(r.status)).then(info => {
+    INFO[id] = info;
+    if (info.thumb) THUMBS[id] = info.thumb;
+    LIVE[id] = { ...(LIVE[id] || {}), playing: info.playing, icon: info.icon || (LIVE[id] || {}).icon, _t: Date.now() };
+    if (OPEN_ID !== id) return;
+    document.getElementById('desc').textContent = info.description || 'Sin descripción.';
+    const banner = dr.querySelector('.d-banner');
+    if (info.thumb && !banner.querySelector('img')) banner.insertAdjacentHTML('afterbegin', `<img src="${esc(info.thumb)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">`);
+    const head = document.getElementById('d-head');
+    head.firstElementChild.outerHTML = icon(g);
+    updateDrawerLive();
+  }).catch(() => {
+    if (OPEN_ID === id) document.getElementById('desc').textContent = 'No se pudo cargar la ficha en vivo.';
+  });
   await loadHistory();
   if (OPEN_ID !== id) return;
-  const h = HISTORY[String(id)] || {};
-  document.getElementById('desc').textContent = h.desc || 'Sin descripción.';
   drawChart(g);
 }
 
@@ -789,6 +822,93 @@ function drawChart(g) {
   });
 }
 
+// ─── En vivo ──────────────────────────────────────────────────────────────────
+function nowPlayers(g) { return (LIVE[g.id] || {}).playing ?? g.players; }
+
+function nowHtml(g) {
+  return LIVE[g.id]
+    ? `${num(nowPlayers(g))} <small>🟢 en vivo</small>`
+    : `${num(g.players)} <small>${ago(g.players_ts)}</small>`;
+}
+
+function updateDrawerLive() {
+  const g = OPEN_ID && G(OPEN_ID);
+  const el = document.querySelector('#d-now .stat-v');
+  if (g && el) el.innerHTML = nowHtml(g);
+}
+
+function setLive(state) {
+  LIVE_STATE = state;
+  renderLiveChip();
+}
+
+function renderLiveChip() {
+  const el = document.getElementById('live');
+  el.className = 'live-chip ' + LIVE_STATE;
+  if (LIVE_STATE === 'loading') el.textContent = '⏳ Pidiendo datos en vivo…';
+  else if (LIVE_STATE === 'error') el.textContent = '⚠️ En vivo no disponible';
+  else {
+    const s = Math.round((Date.now() - LIVE_TS) / 1000);
+    el.textContent = `🟢 En vivo · ${s < 60 ? `hace ${Math.max(s, 1)} s` : `hace ${Math.round(s / 60)} min`}`;
+  }
+}
+
+async function fetchLive(ids, force = false) {
+  const t0 = Date.now();
+  const need = [...new Set(ids.map(String))].filter(id => force || !LIVE[id] || t0 - LIVE[id]._t > LIVE_TTL);
+  if (!need.length) return false;
+  setLive('loading');
+  try {
+    const parts = [];
+    for (let i = 0; i < need.length; i += 200) parts.push(need.slice(i, i + 200));
+    const res = await Promise.all(parts.map(p =>
+      fetch(`${API}/live?ids=${p.join(',')}`).then(r => r.ok ? r.json() : Promise.reject(r.status))));
+    const t = Date.now();
+    for (const r of res) for (const [id, v] of Object.entries(r.games || {})) LIVE[id] = { ...v, _t: t };
+    LIVE_TS = t;
+    setLive('ok');
+    return true;
+  } catch (e) {
+    setLive(LIVE_TS ? 'ok' : 'error');
+    return false;
+  }
+}
+
+async function fetchThumbs(ids) {
+  const need = ids.map(String).filter(id => !(id in THUMBS)).slice(0, 50);
+  if (!need.length) return false;
+  try {
+    const r = await fetch(`${API}/thumbs?ids=${need.join(',')}`);
+    const d = r.ok ? await r.json() : {};
+    need.forEach(id => { THUMBS[id] = d[id] || null; });
+    return true;
+  } catch { return false; }
+}
+
+// Pide en vivo solo lo que se ve: emergentes, tendencia y las filas mostradas
+async function refreshLive(force = false) {
+  if (!RAW) return;
+  const c = catData();
+  const ids = [...c.emerging, ...c.trending, ...filtered().slice(0, LIMIT).map(g => g.id)];
+  const [a, b] = await Promise.all([fetchLive(ids, force), fetchThumbs(c.emerging)]);
+  if (a || b) { renderEmerging(); renderTrending(); renderTable(false); updateDrawerLive(); }
+}
+
+let LIVE_TIMER;
+function scheduleLive() {
+  clearTimeout(LIVE_TIMER);
+  LIVE_TIMER = setTimeout(() => refreshLive(), 250);
+}
+
+async function reloadData() {
+  // Si GitHub ha guardado una muestra nueva desde que se abrió la página
+  try {
+    const r = await fetch('./data/dashboard.json?_=' + Date.now(), { cache: 'no-store' });
+    const fresh = r.ok ? await r.json() : null;
+    if (fresh && fresh.updated_at !== RAW.updated_at) { RAW = fresh; HISTORY = HISTORY_P = null; renderAll(); }
+  } catch { /* se queda con lo que había */ }
+}
+
 // ─── Navegación ───────────────────────────────────────────────────────────────
 function setHash() {
   const p = new URLSearchParams();
@@ -836,6 +956,16 @@ function bind() {
     renderTable();
   });
   document.getElementById('more').onclick = () => { LIMIT += 100; renderTable(); };
+  document.getElementById('refresh').onclick = async e => {
+    const btn = e.currentTarget;
+    btn.classList.add('spin');
+    await Promise.all([reloadData(), refreshLive(true)]);
+    btn.classList.remove('spin');
+  };
+  // Se refresca solo cada ~2 min mientras la pestaña esté a la vista
+  setInterval(() => { if (document.visibilityState === 'visible') refreshLive(); }, 120e3);
+  setInterval(() => { if (LIVE_STATE === 'ok') renderLiveChip(); }, 15e3);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refreshLive(); });
 }
 
 async function init() {
@@ -846,7 +976,7 @@ async function init() {
     RAW = await r.json();
     if (!RAW.games) throw new Error('formato antiguo');
   } catch (e) {
-    document.querySelector('main').innerHTML = `<div class="empty" style="padding:80px 0"><b>No hay datos todavía</b>Ejecuta <code>python tracker.py</code> y <code>python export_dashboard.py</code>.</div>`;
+    document.querySelector('main').innerHTML = `<div class="empty" style="padding:80px 0"><b>No hay datos todavía</b>Se generan con la siguiente ejecución del tracker en GitHub Actions.</div>`;
     return;
   }
   const p = new URLSearchParams(location.hash.slice(1));

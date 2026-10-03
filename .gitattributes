@@ -1,3 +1,0 @@
-# Las muestras intradía solo se añaden al final: si dos ejecuciones chocan,
-# git conserva las líneas de ambas
-data/raw/*.csv merge=union

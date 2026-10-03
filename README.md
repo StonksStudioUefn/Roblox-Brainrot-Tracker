@@ -2,15 +2,28 @@
 
 Tracker de juegos de Roblox con dos vistas: **General** (todo Roblox) y **Horror**. Detecta qué está creciendo, qué juegos poco conocidos empiezan a despegar y separa los picos de evento del crecimiento real. Tiene un dashboard web con miniaturas, fichas de juego y avisos por Telegram.
 
-**Dashboard:** https://stonksstudiouefn.github.io/Roblox-Brainrot-Tracker/dashboard.html
+**Dashboard:** https://robloxtracker.stonksstudio.com (privado: entra con el login de Cloudflare Access del equipo)
 
 ## Cómo funciona
 
-Cada **3 horas** GitHub Actions ejecuta:
+```
+GitHub Actions (cada 3 h)            Cloudflare
+  remote.py pull  ◀──────────────▶  Worker roblox-tracker ──▶ R2 "roblox-tracker"
+  tracker.py                          ├─ web y datos (robloxtracker.stonksstudio.com)
+  export_dashboard.py                 └─ /api/live, /api/thumbs, /api/game → Roblox al momento
+  notifier.py → Telegram
+  remote.py push
+```
 
-1. **`tracker.py`**: descarga de Rolimons la lista de todos los juegos de Roblox y se queda con los que tienen **≥300 jugadores** (unos 2.000). Completa los datos con la API oficial de Roblox: nombre, descripción, creador, géneros, fechas de creación y actualización, visitas, favoritos, likes, icono y miniatura. Guarda una muestra en `data/raw/HOY.csv` y recalcula el día en `data/daily/MES.csv`.
-2. **`export_dashboard.py`**: clasifica los juegos (general / horror) y calcula las métricas, los eventos y los emergentes. Genera `data/dashboard.json` (resumen) y `data/history.json` (series para los gráficos, que se cargan al abrir una ficha).
-3. **`notifier.py`**: envía por Telegram las alertas de emergentes en cuanto aparecen, un resumen diario a partir de las 18:00 UTC y otro semanal los lunes.
+Cada **3 horas** GitHub Actions:
+
+1. **`remote.py pull`**: descarga los datos del bucket R2 de Cloudflare a `data/`.
+2. **`tracker.py`**: descarga de Rolimons la lista de todos los juegos y se queda con los que tienen **≥300 jugadores** (unos 2.000). Completa con la API oficial de Roblox: nombre, creador, géneros, fechas, visitas, favoritos y likes. Con la descripción calcula la clasificación de horror, pero no la guarda. Añade una muestra a `data/raw/HOY.csv` y recalcula el día en `data/daily/MES.csv`.
+3. **`export_dashboard.py`**: calcula métricas, eventos, emergentes y las listas de cada categoría, y genera `data/dashboard.json` y `data/history.json`.
+4. **`notifier.py`**: Telegram (alertas de emergentes, resumen diario y semanal).
+5. **`remote.py push`**: sube a R2 solo lo que ha cambiado, junto con la web (`dashboard.html`).
+
+El **Worker** (`worker/worker.js`) sirve la web y los datos desde R2. También pide a Roblox en el momento lo que no se guarda: **jugadores en vivo**, iconos, miniaturas y descripciones. La web los pide al abrirse, cada ~2 min y con el botón 🔄 Actualizar. Eso no se guarda en el histórico ni manda nada a Telegram.
 
 Toda la configuración está en **`config.py`**: umbrales, categorías, reglas de horror y criterios de emergentes.
 
@@ -57,26 +70,40 @@ Un juego es de horror si suma **≥5 puntos y tiene al menos una señal fuerte**
 
 ## Datos
 
+Todo vive en el bucket **R2 `roblox-tracker`** de Cloudflare, no en git. Se guarda solo lo básico:
+
 ```
-data/raw/AAAA-MM-DD.csv   muestras intradía (se guardan 35 días)
+data/raw/AAAA-MM-DD.csv   muestras de cada 3 h: hora, juego, jugadores, visitas (35 días)
 data/daily/AAAA-MM.csv    un registro por juego y día: n, mediana, media, mín, máx, visitas, favoritos, likes
-data/games.json           ficha de cada juego + caché place_id → universe_id
-data/dashboard.json       resumen para el dashboard
+data/games.json           ficha básica: nombre, creador, géneros, fechas y clasificación de horror
+data/dashboard.json       resumen para la web
 data/history.json         series para los gráficos
 data/state.json           qué avisos de Telegram ya se han enviado
+site/dashboard.html       la web (se sube en cada ejecución desde el repo)
 ```
 
-Son ficheros de texto para que git guarde solo los cambios. Las bases de datos SQLite antiguas (`data/tracker_*.db`) se importan solas en la primera ejecución y después se borran. Los días anteriores al cambio tienen una sola muestra.
+No se guardan descripciones, iconos ni miniaturas: el Worker los pide a Roblox cuando hacen falta. Se pueden ver y descargar en el panel de Cloudflare → R2 → `roblox-tracker`. Desde la web también, en `https://robloxtracker.stonksstudio.com/data/<fichero>`.
+
+El historial hasta el 03/10/2026 sigue en git (en commits antiguos).
 
 ## Uso local
 
 ```bash
 pip install -r requirements.txt
-python tracker.py              # ~3 min la primera vez, luego ~2 min
+export TRACKER_TOKEN=...       # el mismo secret que en GitHub
+python remote.py pull          # baja los datos de R2
+python tracker.py              # ~3 min
 python export_dashboard.py
-python -m http.server 8000     # → http://localhost:8000/dashboard.html
 python notifier.py --dry-run   # ver los mensajes de Telegram sin enviarlos
+python remote.py push          # solo si quieres guardar lo que has hecho
 ```
+
+## Cloudflare
+
+- **Worker `roblox-tracker`**, en `robloxtracker.stonksstudio.com`, protegido por la regla de Access de `*.stonksstudio.com`. Su URL `*.workers.dev` solo atiende el almacenamiento, con token, y la usa GitHub Actions.
+- **Bucket R2 `roblox-tracker`** con los datos.
+- **Secrets:** `INGEST_TOKEN` en el Worker y el mismo valor como `TRACKER_TOKEN` en GitHub (Settings → Secrets and variables → Actions).
+- Para cambiar el Worker: `cd worker && npx wrangler deploy`. Los cambios en `dashboard.html` no necesitan desplegar nada: se publican en la siguiente ejecución.
 
 ## Telegram
 
