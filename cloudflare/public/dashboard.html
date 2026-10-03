@@ -241,46 +241,100 @@
   .empty { padding: 40px 20px; text-align: center; color: var(--muted); }
   .empty b { display: block; color: var(--text-2); font-size: 15px; margin-bottom: 4px; }
 
-  /* ── Drawer de detalle ──────────────────────────────── */
-  .scrim { position: fixed; inset: 0; background: rgba(0,0,0,.55); backdrop-filter: blur(2px); z-index: 40; opacity: 0; pointer-events: none; transition: opacity .2s; }
+  /* ── Ficha del juego (tarjeta centrada) ─────────────── */
+  .scrim { position: fixed; inset: 0; background: rgba(0,0,0,.62); backdrop-filter: blur(3px); z-index: 40; opacity: 0; pointer-events: none; transition: opacity .2s; }
   .scrim.open { opacity: 1; pointer-events: auto; }
   .drawer {
-    position: fixed; top: 0; right: 0; bottom: 0; width: min(680px, 100%); z-index: 50;
-    background: var(--bg-2); border-left: 1px solid var(--border); overflow-y: auto;
-    transform: translateX(100%); transition: transform .25s ease;
+    position: fixed; top: 50%; left: 50%; z-index: 50;
+    width: min(1100px, calc(100% - 48px)); max-height: calc(100vh - 48px); max-height: calc(100dvh - 48px);
+    overflow-y: auto; overscroll-behavior: contain;
+    background: var(--bg-2); border: 1px solid var(--border-2); border-radius: 18px;
+    box-shadow: 0 30px 80px rgba(0,0,0,.55);
+    opacity: 0; pointer-events: none; transform: translate(-50%, -48%) scale(.98);
+    transition: opacity .2s ease, transform .2s ease;
   }
-  .drawer.open { transform: none; }
-  .d-banner { position: relative; aspect-ratio: 16/7; background: var(--panel-2); overflow: hidden; }
-  .d-banner img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .d-banner::after { content: ''; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(0,0,0,.1), var(--bg-2)); }
-  .d-close {
-    position: absolute; top: 12px; right: 12px; z-index: 3; width: 36px; height: 36px; border-radius: 50%;
-    border: 1px solid rgba(255,255,255,.15); background: rgba(10,10,14,.7); cursor: pointer; font-size: 18px; line-height: 1;
+  .drawer.open { opacity: 1; pointer-events: auto; transform: translate(-50%, -50%); }
+  @media (max-width: 640px) {
+    .drawer { width: calc(100% - 16px); max-height: calc(100vh - 16px); max-height: calc(100dvh - 16px); border-radius: 14px; }
   }
-  .d-head { display: flex; gap: 16px; padding: 0 24px; margin-top: -44px; position: relative; z-index: 2; align-items: flex-end; }
-  .d-head .ico { width: 88px; height: 88px; border-radius: 18px; border: 3px solid var(--bg-2); }
-  .d-title { font-size: 22px; font-weight: 800; letter-spacing: -.02em; line-height: 1.15; }
-  .d-sub { color: var(--text-2); font-size: 13px; margin-top: 3px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-  .d-body { padding: 18px 24px 40px; }
-  @media (max-width: 560px) { .d-head, .d-body { padding-left: 16px; padding-right: 16px; } .d-head .ico { width: 72px; height: 72px; } }
-  .d-flags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+
+  .m-head {
+    display: flex; align-items: flex-start; gap: 16px; padding: 20px 24px 18px;
+    background: radial-gradient(700px 160px at 0% 0%, var(--glow), transparent 70%);
+    border-bottom: 1px solid var(--border);
+  }
+  .m-head .ico { width: 56px; height: 56px; border-radius: 14px; flex: none; }
+  .m-name { flex: 1 1 0; min-width: 0; }
+  .m-kicker { font-size: 12px; font-weight: 800; color: var(--accent); text-transform: uppercase; letter-spacing: .06em; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .m-kicker span { color: var(--muted); font-weight: 600; }
+  .d-title { font-size: clamp(20px, 2.6vw, 28px); font-weight: 800; letter-spacing: -.02em; line-height: 1.12; margin-top: 2px; }
+  .d-flags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .m-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; flex: none; }
   .play-btn {
-    display: inline-flex; align-items: center; gap: 8px; text-decoration: none; font-weight: 700;
-    background: var(--accent); color: #0b0c10; padding: 9px 16px; border-radius: 10px; margin-bottom: 18px;
+    display: inline-flex; align-items: center; gap: 8px; text-decoration: none; font-weight: 700; font-size: 13px;
+    background: var(--accent); color: #0b0c10; padding: 9px 15px; border-radius: 10px; white-space: nowrap;
   }
   .play-btn:hover { filter: brightness(1.1); }
-  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin-bottom: 18px; }
-  @media (max-width: 560px) { .stats { grid-template-columns: repeat(2, 1fr); } }
-  .stat { background: var(--panel); padding: 11px 13px; }
-  .stat-l { font-size: 11px; color: var(--muted); font-weight: 600; }
-  .stat-v { font-family: var(--mono); font-size: 16px; font-weight: 700; margin-top: 2px; }
-  .stat-v small { font-size: 11px; color: var(--muted); font-weight: 400; }
-  .box { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 16px; }
+  .ghost-btn {
+    display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border-2); background: var(--panel);
+    padding: 8px 13px; border-radius: 10px; font-weight: 700; font-size: 13px; cursor: pointer; white-space: nowrap;
+  }
+  .ghost-btn:hover { border-color: var(--accent); }
+  .d-close { width: 38px; height: 38px; border-radius: 10px; border: 1px solid var(--border-2); background: var(--panel); cursor: pointer; font-size: 16px; line-height: 1; flex: none; }
+  .d-close:hover { border-color: var(--accent); }
+  @media (max-width: 760px) {
+    .m-head { flex-wrap: wrap; padding: 16px; }
+    .m-actions { margin-left: 0; width: 100%; order: 3; }
+    .m-actions .d-close { margin-left: auto; }
+    .m-head .ico { width: 46px; height: 46px; }
+  }
+
+  .m-body { padding: 18px 24px 28px; display: grid; gap: 16px; }
+  @media (max-width: 640px) { .m-body { padding: 14px 16px 22px; } }
+  .m-top { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 16px; }
+  @media (max-width: 860px) { .m-top { grid-template-columns: 1fr; } }
+  .d-banner { position: relative; aspect-ratio: 16/9; background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; display: grid; place-items: center; }
+  .d-banner img:not(.ico) { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+  .d-banner .ico { width: 72px; height: 72px; border-radius: 16px; opacity: .6; }
+  @media (max-width: 860px) { .d-banner { aspect-ratio: auto; height: 180px; } }
+  @media (max-width: 560px) { .d-banner { height: 150px; } }
+
+  .m-info { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .desc { color: var(--text-2); font-size: 13px; white-space: pre-line; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; }
+  .desc.full { display: block; -webkit-line-clamp: unset; max-height: 260px; overflow-y: auto; }
+  .more-link { border: 0; background: none; color: var(--text); font-weight: 700; font-size: 12px; cursor: pointer; padding: 0; align-self: flex-start; margin-top: -6px; }
+  .more-link:hover { color: var(--accent); }
+  .meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 18px; padding: 10px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); font-size: 12px; }
+  .meta div { display: flex; gap: 8px; min-width: 0; }
+  .meta dt { color: var(--muted); font-weight: 700; text-transform: uppercase; font-size: 10.5px; letter-spacing: .05em; width: 92px; flex: none; padding-top: 1px; }
+  .meta dd { color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  @media (max-width: 560px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .meta { grid-template-columns: 1fr; } }
+  .tile { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 8px; text-align: center; }
+  .tile-v { font-family: var(--mono); font-weight: 700; font-size: 16px; display: flex; align-items: center; justify-content: center; gap: 6px; flex-wrap: wrap; }
+  .tile-l { font-size: 11px; color: var(--text-2); font-weight: 600; margin-top: 2px; }
+  .rank { font-family: var(--mono); font-size: 10.5px; font-weight: 700; color: var(--event); background: var(--event-bg); border: 1px solid color-mix(in srgb, var(--event) 35%, transparent); border-radius: 6px; padding: 0 5px; line-height: 18px; }
+
+  .box { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
   .box h3 { font-size: 13px; font-weight: 700; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .chart-wrap { position: relative; height: 260px; }
+  .box h3.big { font-size: 18px; font-weight: 800; letter-spacing: -.01em; text-transform: uppercase; }
+  .big-nums { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 6px 0 14px; text-align: center; }
+  @media (max-width: 560px) { .big-nums { grid-template-columns: 1fr; gap: 8px; } }
+  .big-v { font-family: var(--mono); font-size: clamp(24px, 3.4vw, 34px); font-weight: 800; letter-spacing: -.02em; line-height: 1.1; display: flex; justify-content: center; align-items: center; gap: 8px; }
+  .big-l { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; color: var(--text); margin-top: 4px; }
+  .big-l small { display: block; font-weight: 600; color: var(--muted); text-transform: none; letter-spacing: 0; font-size: 11px; }
+  .c-now { color: var(--accent); } .c-peak24 { color: var(--new); } .c-peak { color: var(--accent-2); }
+  .stats { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin-bottom: 14px; }
+  @media (max-width: 860px) { .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  .stat { background: var(--panel-2); padding: 9px 11px; }
+  .stat-l { font-size: 11px; color: var(--muted); font-weight: 600; }
+  .stat-v { font-family: var(--mono); font-size: 15px; font-weight: 700; margin-top: 1px; }
+  .stat-v small { font-size: 11px; color: var(--muted); font-weight: 400; }
+  .chart-wrap { position: relative; height: 300px; }
+  @media (max-width: 560px) { .chart-wrap { height: 230px; } }
   .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--text-2); margin-top: 8px; }
   .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
-  .desc { color: var(--text-2); font-size: 13px; white-space: pre-line; max-height: 220px; overflow-y: auto; }
+  .m-bottom { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
   .reasons { display: flex; flex-wrap: wrap; gap: 6px; }
 
   /* ── Metodología ────────────────────────────────────── */
@@ -750,65 +804,115 @@ function renderTable(live = true) {
 }
 
 // ─── Ficha del juego ──────────────────────────────────────────────────────────
+/** Puesto de `g` por `key` (de mayor a menor) en `list`, o null si no tiene valor. */
+function rankIn(list, key, g) {
+  const v = g[key];
+  if (v == null) return null;
+  return list.filter(x => (x[key] ?? -Infinity) > v).length + 1;
+}
+const rankBadge = (r, of) => (r ? `<span class="rank" title="Puesto entre ${of}">#${r}</span>` : '');
+
 async function openGame(id, push = true) {
   const g = G(id);
   if (!g) return;
   OPEN_ID = id;
   if (push) setHash();
   const dr = document.getElementById('drawer');
+  const cat = catData();
+  const inCat = cat.ids.map(G).filter(Boolean);
+  const all = Object.values(RAW.games);
+  const ofCat = `los ${inCat.length} juegos de ${cat.label}`, ofAll = `los ${all.length} juegos seguidos`;
   const genre = [g.genre, g.subgenre].filter(Boolean).join(' › ') || 'Sin género';
-  const stat = (l, v, s = '') => `<div class="stat"><div class="stat-l">${l}</div><div class="stat-v">${v}${s ? ` <small>${s}</small>` : ''}</div></div>`;
+  const stat = (l, v, s = '', id = '') => `<div class="stat"${id ? ` id="${id}"` : ''}><div class="stat-l">${l}</div><div class="stat-v">${v}${s ? ` <small>${s}</small>` : ''}</div></div>`;
+  const tile = (l, v, r = '') => `<div class="tile"><div class="tile-v">${v}${r}</div><div class="tile-l">${l}</div></div>`;
+  const meta = (l, v) => `<div><dt>${l}</dt><dd title="${esc(String(v))}">${esc(String(v))}</dd></div>`;
   dr.innerHTML = `
-    <div class="d-banner">
-      ${THUMBS[g.id] ? `<img src="${esc(THUMBS[g.id])}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
-      <button class="d-close" id="d-close" aria-label="Cerrar">✕</button>
-    </div>
-    <div class="d-head" id="d-head">
+    <div class="m-head" id="d-head">
       ${icon(g)}
-      <div>
-        <div class="d-title">${esc(g.title)}</div>
-        <div class="d-sub">${esc(g.creator || '—')}${g.creator_verified ? ' ✔' : ''} · ${esc(genre)} ${g.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>
+      <div class="m-name">
+        <div class="m-kicker">${esc(g.creator || '—')}${g.creator_verified ? ' ✔' : ''} <span>· ${esc(genre)}</span></div>
+        <div class="d-title">${esc(g.title)} ${g.tags.map(t => `<span class="tag">${esc(t)}</span>`).join(' ')}</div>
+        <div class="d-flags">
+          ${flagChips(g)}
+          ${g.emerging ? `<span class="chip accent">🌱 Emergente ★ ${g.emerging}</span>` : ''}
+          ${g.horror ? '<span class="chip down2">👻 Horror</span>' : ''}
+        </div>
+      </div>
+      <div class="m-actions">
+        <a class="play-btn" href="https://www.roblox.com/games/${g.place_id}" target="_blank" rel="noopener">▶ Jugar</a>
+        <button class="ghost-btn" id="d-copy" title="Copiar el enlace a esta ficha">🔗 Copiar enlace</button>
+        <button class="d-close" id="d-close" aria-label="Cerrar">✕</button>
       </div>
     </div>
-    <div class="d-body">
-      <div class="d-flags">
-        ${flagChips(g)}
-        ${g.emerging ? `<span class="chip accent">🌱 Emergente ★ ${g.emerging}</span>` : ''}
-        ${g.horror ? '<span class="chip down2">👻 Horror</span>' : ''}
+    <div class="m-body">
+      <div class="m-top">
+        <div class="d-banner">
+          ${icon(g)}${THUMBS[g.id] ? `<img src="${esc(THUMBS[g.id])}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
+        </div>
+        <div class="m-info">
+          <div class="desc" id="desc">Cargando descripción…</div>
+          <button class="more-link" id="desc-more" hidden>…más</button>
+          <dl class="meta">
+            ${meta('Creado', g.created ? `${fdate(g.created)}${g.age_days != null ? ` · ${age(g.age_days)}` : ''}` : '—')}
+            ${meta('Actualizado', g.updated ? `${fdate(g.updated)} · ${ago(g.updated)}` : '—')}
+            ${meta('Género', genre)}
+            ${meta('Servidor', g.max_players != null ? `${g.max_players} jugadores` : '—')}
+          </dl>
+          <div class="tiles">
+            ${tile('Visitas', num(g.visits), rankBadge(rankIn(all, 'visits', g), ofAll))}
+            ${tile('Visitas/día', g.visits_day ? '+' + num(g.visits_day) : '—', rankBadge(rankIn(all, 'visits_day', g), ofAll))}
+            ${tile('Favoritos', num(g.favorites), rankBadge(rankIn(all, 'favorites', g), ofAll))}
+            ${tile(g.votes ? `Likes · ${num(g.votes)} votos` : 'Likes', g.like_ratio != null ? g.like_ratio.toFixed(1) + '%' : '—')}
+          </div>
+        </div>
       </div>
-      <a class="play-btn" href="https://www.roblox.com/games/${g.place_id}" target="_blank" rel="noopener">▶ Abrir en Roblox</a>
-      <div class="stats">
-        ${stat('Jugadores típicos (24h)', num(g.typical))}
-        <div class="stat" id="d-now"><div class="stat-l">Ahora</div><div class="stat-v">${nowHtml(g)}</div></div>
-        ${stat('Media 7 días', num(g.avg_7d), 'sin eventos')}
-        ${stat('24 h', pct(g.growth_24h))}
-        ${stat('7 días', pct(g.growth_7d))}
-        ${stat('Tendencia', pct(g.trend), '/día')}
-        ${stat('Pico registrado', num(g.peak), g.peak_date ? fdate(g.peak_date) : '')}
-        ${stat('Visitas', num(g.visits), g.visits_day ? `+${num(g.visits_day)}/día` : '')}
-        ${stat('Favoritos', num(g.favorites))}
-        ${stat('Likes', g.like_ratio != null ? g.like_ratio.toFixed(1) + '%' : '—', g.votes ? num(g.votes) + ' votos' : '')}
-        ${stat('Creado', g.created ? fdate(g.created) : '—', g.age_days != null ? age(g.age_days) : '')}
-        ${stat('Actualizado', g.updated ? ago(g.updated) : '—')}
-        ${stat('Máx. por servidor', g.max_players ?? '—')}
-        ${stat('En seguimiento', g.days_tracked, 'días')}
-        <div class="stat" id="d-ev"><div class="stat-l">Días con evento</div><div class="stat-v">${g.event_days} <small>últimos ${Math.min(30, (g.spark || []).length)}</small></div></div>
-      </div>
+
       <div class="box">
-        <h3>Jugadores
+        <h3 class="big">Jugadores
           <span class="seg" id="chart-mode">
             ${[['day', 'Día'], ['week', 'Semana'], ['month', 'Mes'], ['year', 'Año']].map(([m, l]) =>
               `<button data-m="${m}" class="${CHART_MODE === m ? 'active' : ''}">${l}</button>`).join('')}
           </span>
         </h3>
+        <div class="big-nums">
+          <div id="d-now"><div class="big-v c-now">${num(nowPlayers(g))}${rankBadge(rankIn(inCat, 'typical', g), ofCat)}</div><div class="big-l">Jugadores ahora<small>${LIVE[g.id] ? '🟢 en vivo' : ago(g.players_ts)}</small></div></div>
+          <div id="d-peak24"><div class="big-v c-peak24">—</div><div class="big-l">Pico 24 h<small>cargando…</small></div></div>
+          <div><div class="big-v c-peak">${num(g.peak)}</div><div class="big-l">Pico registrado<small>${g.peak_date ? `${fdate(g.peak_date)} · ${ago(g.peak_date)}` : '—'}</small></div></div>
+        </div>
+        <div class="stats">
+          ${stat('Típicos 24 h', num(g.typical))}
+          ${stat('Media 7 días', num(g.avg_7d), 'sin eventos')}
+          ${stat('24 h', pct(g.growth_24h))}
+          ${stat('7 días', pct(g.growth_7d))}
+          ${stat('Tendencia', pct(g.trend), '/día')}
+          ${stat('Días con evento', g.event_days, `de ${Math.min(30, (g.spark || []).length)}`, 'd-ev')}
+        </div>
         <div class="chart-wrap"><canvas id="chart"></canvas></div>
         <div class="legend" id="legend"></div>
       </div>
-      ${g.emerging ? `<div class="box"><h3>🌱 Por qué es emergente</h3><div class="reasons">${g.emerging_reasons.map(r => `<span class="chip accent">${esc(r)}</span>`).join('') || '<span class="chip">combinación de señales</span>'}</div></div>` : ''}
-      ${CAT === 'horror' || g.horror ? `<div class="box"><h3>👻 Clasificación horror <span class="tag">puntos ${g.horror_score}</span></h3><div class="reasons">${(g.horror_reasons || []).map(r => `<span class="chip">${esc(r)}</span>`).join('') || '<span class="chip">sin señales</span>'}</div></div>` : ''}
-      <div class="box"><h3>Descripción</h3><div class="desc" id="desc">Cargando…</div></div>
+
+      <div class="m-bottom">
+        ${g.emerging ? `<div class="box"><h3>🌱 Por qué es emergente <span class="tag">★ ${g.emerging}</span></h3><div class="reasons">${g.emerging_reasons.map(r => `<span class="chip accent">${esc(r)}</span>`).join('') || '<span class="chip">combinación de señales</span>'}</div></div>` : ''}
+        ${CAT === 'horror' || g.horror ? `<div class="box"><h3>👻 Clasificación horror <span class="tag">puntos ${g.horror_score}</span></h3><div class="reasons">${(g.horror_reasons || []).map(r => `<span class="chip">${esc(r)}</span>`).join('') || '<span class="chip">sin señales</span>'}</div></div>` : ''}
+        <div class="box"><h3>📋 Seguimiento</h3><div class="reasons">
+          <span class="chip">${g.days_tracked} días de historia</span>
+          ${g.first_seen_days != null ? `<span class="chip">descubierto hace ${age(g.first_seen_days)}</span>` : ''}
+          ${robloxChips(g)}
+        </div></div>
+      </div>
     </div>`;
   document.getElementById('d-close').onclick = closeGame;
+  document.getElementById('d-copy').onclick = async e => {
+    const b = e.currentTarget;
+    try { await navigator.clipboard.writeText(location.href); b.textContent = '✓ Copiado'; }
+    catch { b.textContent = location.href; }
+    setTimeout(() => { if (b.isConnected) b.textContent = '🔗 Copiar enlace'; }, 1800);
+  };
+  document.getElementById('desc-more').onclick = e => {
+    const d = document.getElementById('desc');
+    const full = d.classList.toggle('full');
+    e.currentTarget.textContent = full ? 'menos' : '…más';
+  };
   dr.querySelectorAll('#chart-mode button').forEach(b => b.onclick = () => {
     CHART_MODE = b.dataset.m;
     dr.querySelectorAll('#chart-mode button').forEach(x => x.classList.toggle('active', x === b));
@@ -826,9 +930,11 @@ async function openGame(id, push = true) {
     if (info.thumb) THUMBS[id] = info.thumb;
     LIVE[id] = { ...(LIVE[id] || {}), playing: info.playing, icon: info.icon || (LIVE[id] || {}).icon, _t: Date.now() };
     if (OPEN_ID !== id) return;
-    document.getElementById('desc').textContent = info.description || 'Sin descripción.';
+    const d = document.getElementById('desc');
+    d.textContent = info.description || 'Sin descripción.';
+    document.getElementById('desc-more').hidden = d.scrollHeight <= d.clientHeight + 2;
     const banner = dr.querySelector('.d-banner');
-    if (info.thumb && !banner.querySelector('img')) banner.insertAdjacentHTML('afterbegin', `<img src="${esc(info.thumb)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">`);
+    if (info.thumb && !banner.querySelector('img:not(.ico)')) banner.insertAdjacentHTML('beforeend', `<img src="${esc(info.thumb)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">`);
     const head = document.getElementById('d-head');
     head.firstElementChild.outerHTML = icon(g);
     updateDrawerLive();
@@ -840,8 +946,26 @@ async function openGame(id, push = true) {
   if (!h) { document.getElementById('legend').textContent = 'No se pudo cargar la historia del juego.'; return; }
   // Con la historia larga, los días de evento de los últimos 30 (como el tracker en Python)
   const ev = document.querySelector('#d-ev .stat-v');
-  if (ev) ev.innerHTML = `${h.d.slice(-30).reduce((a, r) => a + r[5], 0)} <small>últimos 30</small>`;
+  if (ev) ev.innerHTML = `${h.d.slice(-30).reduce((a, r) => a + r[5], 0)} <small>de 30</small>`;
+  updatePeak24(g, h);
   drawChart(g);
+}
+
+/** Pico de las últimas 24 h: la mayor muestra (o el dato en vivo, si es mayor). */
+function updatePeak24(g, h) {
+  const el = document.getElementById('d-peak24');
+  if (!el || !h) return;
+  const r = h.r || [];
+  const ms = t => Date.parse(t.replace('Z', ':00Z'));
+  const last = r.length ? ms(r[r.length - 1][0]) : Date.now();
+  let best = null;
+  for (const [t, p] of r) if (ms(t) > last - 24 * 3600e3 && (!best || p > best[1])) best = [t, p];
+  const live = (LIVE[g.id] || {}).playing;
+  if (live != null && (!best || live > best[1])) best = [null, live];
+  el.querySelector('.big-v').textContent = best ? num(best[1]) : '—';
+  el.querySelector('small').textContent = !best ? 'sin muestras' : best[0]
+    ? new Date(ms(best[0])).toLocaleString('es', { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+    : 'ahora, en vivo';
 }
 
 function closeGame() {
@@ -955,16 +1079,13 @@ function drawChart(g) {
 // ─── En vivo ──────────────────────────────────────────────────────────────────
 function nowPlayers(g) { return (LIVE[g.id] || {}).playing ?? g.players; }
 
-function nowHtml(g) {
-  return LIVE[g.id]
-    ? `${num(nowPlayers(g))} <small>🟢 en vivo</small>`
-    : `${num(g.players)} <small>${ago(g.players_ts)}</small>`;
-}
-
 function updateDrawerLive() {
   const g = OPEN_ID && G(OPEN_ID);
-  const el = document.querySelector('#d-now .stat-v');
-  if (g && el) el.innerHTML = nowHtml(g);
+  const el = document.getElementById('d-now');
+  if (!g || !el) return;
+  el.querySelector('.big-v').firstChild.textContent = num(nowPlayers(g));
+  el.querySelector('small').textContent = LIVE[g.id] ? '🟢 en vivo' : ago(g.players_ts);
+  if (HISTORY[g.id]) updatePeak24(g, HISTORY[g.id]);
 }
 
 function setLive(state) {
