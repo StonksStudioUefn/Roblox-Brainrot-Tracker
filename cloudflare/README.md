@@ -73,14 +73,13 @@ mete el código como string en el mismo bundle, así que el Worker y la web usan
 no hay ficheros aparte que subir. (Con `.sql` no vale: wrangler trata los `.sql` como módulo aparte, por eso
 el esquema no se incrusta y se aplica con `wrangler d1 execute`.)
 
-**50 peticiones externas: ¿por paso o por invocación?** La documentación de Workflows da la CPU "por paso"
-(10 ms en Free) pero las peticiones como "50/request" por invocación, sin decir si un paso es una
-invocación; en local no se aplica ningún límite, así que no se puede comprobar aquí. Solución: cada paso
-pide ≤ 45 (clase `Budget`, que corta antes del límite y cuenta reintentos), y **antes de cada paso con red
-hay un `step.sleep(…, "1 second")`** para que el motor reanude la instancia en otra invocación. Los pasos
-son idempotentes (`INSERT OR IGNORE`, UPSERT con `WHERE … IS NOT excluded…`), así que un reintento no
-duplica nada. Tras el primer despliegue hay que mirar en Workers Logs que no aparezca
-`Too many subrequests`.
+**50 peticiones externas por invocación.** Comprobado en producción: los pasos de una instancia del
+Workflow comparten invocación, y ni `step.sleep` ni los reintentos reinician la cuenta. Por eso el
+muestreo va en **ejecuciones encadenadas**: cada instancia gasta como mucho 46 peticiones (`Budget` de la
+invocación y un `SubBudget` por paso) y, cuando no le queda para la siguiente fase, crea la instancia
+`<base>-s<N>` con la fase y el cursor por los que seguir. Las listas intermedias van en R2 (`tmp/run/`) y
+se borran al terminar. Los pasos son idempotentes (`INSERT OR IGNORE`, UPSERT con
+`WHERE … IS NOT excluded…`), así que un reintento no duplica nada.
 
 **Trabajo en SQLite, no en el Worker.** Las filas viajan como un solo parámetro JSON (`json_each(?)`),
 los agregados (mediana con `ROW_NUMBER()`) y los JSON (`json_object`, `json_group_array`) los hace D1.
