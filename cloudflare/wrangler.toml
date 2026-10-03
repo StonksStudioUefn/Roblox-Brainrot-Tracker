@@ -9,7 +9,7 @@ routes = [
 ]
 
 [triggers]
-crons = ["17 */3 * * *"]
+crons = ["0 */3 * * *"]
 
 [[d1_databases]]
 binding = "DB"

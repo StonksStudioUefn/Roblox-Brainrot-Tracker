@@ -9,7 +9,7 @@ Tracker de juegos de Roblox con dos vistas: **General** (todo Roblox) y **Horror
 Todo vive en **Cloudflare** (plan gratuito). GitHub solo guarda el código.
 
 ```
-Cron cada 3 h (min 17) ──▶ Workflow roblox-sampler ──▶ D1 roblox-tracker (muestras, días, fichas)
+Cron 00:00, 03:00… UTC ──▶ Workflow roblox-sampler ──▶ D1 roblox-tracker (muestras, días, fichas)
                               │                     └─▶ R2 roblox-tracker (export.json, telegram.json, web)
                               └─▶ Telegram (alertas y resúmenes)
 

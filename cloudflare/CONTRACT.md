@@ -12,7 +12,7 @@ quien lo cambie, que lo actualice aquí.
 | Peticiones externas por invocación | **50** | Las de D1, R2 y KV son internas, con un límite de 1.000. |
 | Escrituras D1 | 100.000 filas/día | Objetivo: menos de 45.000 (ver "Presupuesto de escrituras"). |
 | Lecturas D1 | 5 M filas/día | |
-| Cron Triggers por cuenta | 5 | Ya hay 2 en uso. Este Worker usa **1** (`17 */3 * * *`). |
+| Cron Triggers por cuenta | 5 | Ya hay 2 en uso. Este Worker usa **1** (`0 */3 * * *`). |
 
 Roblox: la Games API acepta **50 ids como máximo** por llamada (con 100 da el error "Too many universe IDs").
 La Search API, si se le pide mucho seguido, devuelve 200 con resultados vacíos: hay que espaciar las búsquedas.
