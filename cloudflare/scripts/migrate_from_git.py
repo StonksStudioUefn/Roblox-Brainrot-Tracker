@@ -107,19 +107,31 @@ def build(src, now):
             samples.append([int(r["universe_id"]), ts, _int(r["playing"]), _int(r.get("visits"))])
     recent = {s[0] for s in samples}
 
-    # Serie diaria (sin el día en curso)
+    # Serie diaria (sin el día en curso). Los favoritos/votos que tracker.py ya
+    # guardó HOY pasan a la fila de AYER, que es donde los deja el Worker
+    # (así el export da los mismos "últimos conocidos" que Python).
     daily = []
     last_day = None
+    today_votes = {}
+    rows_csv = []
     for path in src.list("data/daily"):
         if not path.endswith(".csv"):
             continue
-        for r in csv.DictReader(io.StringIO(src.read(path) or "")):
-            if not r.get("date") or r["date"] >= today:
-                continue
-            daily.append([int(r["universe_id"]), r["date"], _int(r["n"]), _int(r["median"]), _int(r["mean"]),
-                          _int(r["min"]), _int(r["max"]), _int(r["visits"]), _int(r["favorites"]),
-                          _int(r["up"]), _int(r["down"])])
-            last_day = max(last_day or r["date"], r["date"])
+        rows_csv.extend(csv.DictReader(io.StringIO(src.read(path) or "")))
+    for r in rows_csv:
+        if r.get("date") == today:
+            today_votes[int(r["universe_id"])] = (_int(r["favorites"]), _int(r["up"]), _int(r["down"]))
+    for r in rows_csv:
+        if not r.get("date") or r["date"] >= today:
+            continue
+        if r["date"] == yesterday and int(r["universe_id"]) in today_votes:
+            fav, up, down = today_votes[int(r["universe_id"])]
+            r = {**r, "favorites": fav if fav else r["favorites"],
+                 "up": up if up is not None else r["up"], "down": down if down is not None else r["down"]}
+        daily.append([int(r["universe_id"]), r["date"], _int(r["n"]), _int(r["median"]), _int(r["mean"]),
+                      _int(r["min"]), _int(r["max"]), _int(r["visits"]), _int(r["favorites"]),
+                      _int(r["up"]), _int(r["down"])])
+        last_day = max(last_day or r["date"], r["date"])
 
     # Fichas
     raw_games = json.loads(src.read("data/games.json") or "{}")

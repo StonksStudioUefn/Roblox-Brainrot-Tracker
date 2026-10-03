@@ -35,12 +35,12 @@ import {
 import {
   DAY_MIN, addDays, applyVotesStmt, buildExportSlice, closeDayStmt, exportHeader, exportPlan, getState,
   getStates, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs, lowSinceStmts,
-  mergeHistStmt, minuteOf, pickTelegramCandidates, pruneOrphansStmt, pruneSamplesStmt, retrackPlacesStmt,
-  setState, setStateStmt, sortHitsStmt, sumTotals, trackedIds, unknownPlaces, untrackStmt, updateMetaStmt,
+  mergeHistStmt, minuteOf, pruneOrphansStmt, pruneSamplesStmt, retrackPlacesStmt,
+  setState, setStateStmt, sortHitsStmt, trackedIds, unknownPlaces, untrackStmt, updateMetaStmt,
   upsertDiscoveredStmt, written,
 } from "./db.js";
 import { classifyHorror } from "./horror.js";
-import { runTelegram } from "./telegram.js";
+import { pickCandidates, runTelegram, telegramScanText } from "./telegram.js";
 
 // Tamaños de trozo (CPU medida en frío: ver README "CPU por paso")
 export const SAMPLE_CHUNK = 400;       // 8 lotes de 50: parsear ~560 KB de la Games API ≈ 4,3 ms
@@ -49,6 +49,7 @@ export const RESOLVE_CHUNK = 40;       // place → universe por paso
 export const RESOLVE_PER_DAY = 200;
 export const EXPLORE_MAX_PAGES = 8;    // páginas de get-sorts (hoy son 5)
 export const EXPORT_SLICE = 500;       // juegos seguidos por trozo del export (≈ 250 exportados, ≈ 450 KB)
+export const TG_SCAN_GAMES = 50;       // juegos por paso de telegramScanText (en régimen y en frío: 50 ≈ 4 ms, 100 ≈ 9 ms)
 export const EXPORT_KEY = "data/export.json";
 export const TELEGRAM_KEY = "data/telegram.json";
 export const PART_PREFIX = "tmp/export/part-";
@@ -260,7 +261,7 @@ export class Sampler extends WorkflowEntrypoint {
     if (want("export")) exported = await runExport(env, step, ts * 60000, safe, summary);
 
     // ── telegram (lee data/telegram.json, el export reducido) ─────────────
-    if (want("telegram") && exported) {
+    if (want("telegram") && exported?.telegram) {
       await safe("telegram", async () => {
         const obj = await env.BUCKET.get(TELEGRAM_KEY);
         if (!obj) throw new Error("No hay data/telegram.json en R2");
@@ -408,10 +409,7 @@ export async function runExport(env, step, nowMs, safe, summary) {
       r = await step.do(name, STEP, async () => {
         const s = await buildExportSlice(db, { nowMs, lastTs: plan.lastTs, openDay: plan.openDay, lo, hi });
         const obj = await env.BUCKET.put(`${PART_PREFIX}${i}.json`, s.frag);
-        return {
-          n: s.n, bytes: obj?.size ?? 0, last_ts: s.last_ts, ts24: s.ts24, totals: s.totals, scores: s.scores,
-          rows_read: s.meta?.rows_read ?? null,
-        };
+        return { n: s.n, bytes: obj?.size ?? 0, last_ts: s.last_ts, ts24: s.ts24, rows_read: s.meta?.rows_read ?? null };
       });
     } catch (e) {
       // Sin todas las partes no se publica un export incompleto
@@ -420,24 +418,11 @@ export async function runExport(env, step, nowMs, safe, summary) {
     }
     slices.push(r);
   }
+  const lastTs = slices.reduce((m, s) => (s.last_ts != null && s.last_ts > (m ?? -1) ? s.last_ts : m), null) ?? plan.lastTs;
+  const header = exportHeader({ nowMs, lastTs, ts24: slices.flatMap(s => s.ts24) });
+  const total = slices.reduce((a, s) => a + s.n, 0);
+
   const join = await safe("export-join", async () => {
-    const lastTs = slices.reduce((m, s) => (s.last_ts != null && s.last_ts > (m ?? -1) ? s.last_ts : m), null) ?? plan.lastTs;
-    const header = exportHeader({ nowMs, lastTs, ts24: slices.flatMap(s => s.ts24) });
-    const total = slices.reduce((a, s) => a + s.n, 0);
-
-    // data/telegram.json: mismo formato, solo los candidatos, + totales
-    const ids = pickTelegramCandidates(slices.flatMap(s => s.scores));
-    const tg = ids.length
-      ? await buildExportSlice(db, { nowMs, lastTs: plan.lastTs, openDay: plan.openDay, ids })
-      : { frag: "", n: 0, meta: {} };
-    const totals = sumTotals(slices.map(s => s.totals));
-    const tgJson = `${JSON.stringify({
-      ...header, totals,
-      // Mismo dato con el nombre que usa telegram.js (exportData.telegram.counts)
-      telegram: { counts: totals, total, candidates: tg.n },
-    }).slice(0, -1)},"games":[${tg.frag}]}`;
-    await env.BUCKET.put(TELEGRAM_KEY, tgJson, { httpMetadata: { contentType: "application/json; charset=utf-8" } });
-
     // data/export.json: cabecera + partes + cierre, sin pasar las partes por JS
     const enc = new TextEncoder();
     const head = enc.encode(`${JSON.stringify(header).slice(0, -1)},"games":[`);
@@ -472,10 +457,46 @@ export async function runExport(env, step, nowMs, safe, summary) {
     ]);
     return {
       bytes: put?.size ?? size, games: total, slices: slices.length,
-      telegram: { games: tg.n, bytes: tgJson.length },
-      rows_read: slices.reduce((a, s) => a + (s.rows_read || 0), 0) + (tg.meta?.rows_read || 0),
+      rows_read: slices.reduce((a, s) => a + (s.rows_read || 0), 0),
     };
   });
+  if (!join) return null;
+
+  // data/telegram.json: prefiltro de telegram.js (telegramScanText) por trozos
+  // de ~TG_SCAN_GAMES juegos sobre cada parte, y al final pickCandidates.
+  const nowIso = new Date(nowMs).toISOString();
+  const rowParts = [];
+  let scanOk = true;
+  for (const [i, sl] of slices.entries()) {
+    const k = Math.max(1, Math.ceil(sl.n / TG_SCAN_GAMES));
+    for (let j = 0; sl.n && j < k; j++) {
+      const name = `tg-scan-${i}-${j}`;
+      try {
+        rowParts.push(await step.do(name, STEP, async () => {
+          const o = await env.BUCKET.get(`${PART_PREFIX}${i}.json`);
+          if (!o) throw new Error(`Falta la parte ${i} del export`);
+          return telegramScanText(`{"games":[${await o.text()}]}`, { now: nowIso, part: j, parts: k });
+        }));
+      } catch (e) {
+        summary?.errors.push(`${name}: ${String(e?.message || e).slice(0, 200)}`);
+        scanOk = false;
+      }
+    }
+  }
+  const tg = scanOk ? await safe("tg-reduce", async () => {
+    const { counts, ids } = pickCandidates(rowParts.flat());
+    const list = [...ids];
+    const red = list.length
+      ? await buildExportSlice(db, { nowMs, lastTs: plan.lastTs, openDay: plan.openDay, ids: list })
+      : { frag: "", n: 0, meta: {} };
+    // Mismo formato que el export + cabeceras exactas (telegram.counts, y totals = lo mismo)
+    const text = `${JSON.stringify({
+      ...header, totals: counts, telegram: { counts, total, candidates: red.n },
+    }).slice(0, -1)},"games":[${red.frag}]}`;
+    const obj = await env.BUCKET.put(TELEGRAM_KEY, text, { httpMetadata: { contentType: "application/json; charset=utf-8" } });
+    return { candidates: red.n, bytes: obj?.size ?? null, rows: rowParts.reduce((a, r) => a + r.length, 0), rows_read: red.meta?.rows_read ?? null };
+  }) : null;
+  join.telegram = tg;
   if (summary && join) summary.steps.export = join;
   return join;
 }

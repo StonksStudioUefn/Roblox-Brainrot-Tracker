@@ -3,6 +3,7 @@
 # con test/stubs/ los módulos de otros equipos que aún no existan.
 # Uso: test/dev.sh [--port 8787]      (estado local persistente en test/.state)
 set -euo pipefail
+shopt -s nullglob
 cd "$(dirname "$0")/.."
 rm -rf test/.build && mkdir -p test/.build/src
 cp -r src/. test/.build/src/

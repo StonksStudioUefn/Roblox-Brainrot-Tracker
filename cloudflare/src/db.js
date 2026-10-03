@@ -29,6 +29,21 @@ export const isoDate = ts => new Date(ts * 60000).toISOString().slice(0, 10);
 export const dayStart = date => Date.parse(`${date}T00:00:00Z`) / 60000;
 export const addDays = (date, n) => isoDate(dayStart(date) + n * DAY_MIN);
 
+// ─── Mediana y media con el redondeo de Python ───────────────────────────────
+// round() de Python redondea los .5 al par (8688,5 → 8688) y ROUND de SQLite
+// hacia arriba: con ROUND salía distinto el 30 % de las medianas de 2 muestras.
+// Se trabaja con enteros: la suma de los dos valores centrales (o el central)
+// y la suma total / n, redondeando al par a mano.
+const MID = "SUM(CASE WHEN rn IN ((cnt + 1) / 2, (cnt + 2) / 2) THEN p END)";
+/** Mediana (window: rn = ROW_NUMBER por p, cnt = COUNT) redondeada como Python. */
+export const MEDIAN_SQL = `(CASE WHEN MAX(cnt) % 2 = 1 THEN ${MID}
+  ELSE ${MID} / 2 + (${MID} % 2) * ((${MID} / 2) % 2) END)`;
+/** round(fmean(p)) de Python, con enteros. */
+export const MEAN_SQL = `(CASE
+  WHEN 2 * (SUM(p) % COUNT(*)) > COUNT(*) THEN SUM(p) / COUNT(*) + 1
+  WHEN 2 * (SUM(p) % COUNT(*)) < COUNT(*) THEN SUM(p) / COUNT(*)
+  ELSE SUM(p) / COUNT(*) + (SUM(p) / COUNT(*)) % 2 END)`;
+
 // ─── Estado (tabla state, valores JSON) ──────────────────────────────────────
 export async function getState(db, key, fallback = null) {
   const row = await db.prepare("SELECT value FROM state WHERE key = ?1").bind(key).first();
@@ -210,8 +225,8 @@ export function closeDayStmt(db, date, votes) {
      ),
      a AS (
        SELECT id, MAX(cnt) AS n,
-              CAST(ROUND(AVG(CASE WHEN rn IN ((cnt + 1) / 2, (cnt + 2) / 2) THEN p END)) AS INTEGER) AS median,
-              CAST(ROUND(AVG(p)) AS INTEGER) AS mean, MIN(p) AS mn, MAX(p) AS mx, MAX(v) AS v
+              ${MEDIAN_SQL} AS median,
+              ${MEAN_SQL} AS mean, MIN(p) AS mn, MAX(p) AS mx, MAX(v) AS v
        FROM s GROUP BY id
      ),
      vt AS MATERIALIZED (
@@ -367,9 +382,9 @@ export function untrackStmt(db, today) {
  * serializados (texto separado por comas) y se guarda en R2; el paso final los
  * une en `data/export.json` con un stream (sin pasar el contenido por JS).
  *
- * Cada trozo devuelve además, por juego, unas cifras baratas (típico, cambio
- * de 24 h y de 7 días, crecimiento de visitas…) para elegir en JS los
- * candidatos de Telegram, y los totales por categoría (que se suman).
+ * data/telegram.json (candidatos de Telegram) lo calcula sampler.js con
+ * telegramScanText/pickCandidates de telegram.js sobre las partes, y luego
+ * pide aquí solo esos juegos (`ids`).
  */
 
 /** Rangos de universe_id con ~`size` juegos seguidos cada uno. → [[lo, hi], …] */
@@ -397,8 +412,7 @@ export async function lastSampleTs(db) {
 /**
  * Un trozo del export: los juegos con universe_id en [lo, hi] (o solo `ids`)
  * que cumplen el filtro del contrato (con `ids`, sin filtro).
- * → { frag: '{…},{…}', n, last_ts, ts24: [...], totals: {cat: {games, players, rising, falling}},
- *     scores: [[id, horror, typical, g24, visits, visits_growth, up_and_coming, g7], …], meta }
+ * → { frag: '{…},{…}', n, last_ts, ts24: [ts…], meta }
  */
 export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi = Number.MAX_SAFE_INTEGER, ids = null }) {
   const now = minuteOf(nowMs);
@@ -408,12 +422,6 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
   const sFrom = lastTs - EXPORT_SAMPLE_HOURS * 60;      // muestras: última − 48 h (incluida)
   const cut24 = lastTs - 24 * 60;                        // máximo de 24 h para el filtro
   const openTs = Math.max(dayStart(openDay), sFrom);
-  const totals = Object.entries(CATEGORIES).map(([key, c]) => {
-    const cond = `${c.classifier === "horror" ? "h = 1 AND " : ""}typ >= ${Number(c.min_players)}`;
-    return `'${key}', json_object('games', SUM(${cond}), 'players', COALESCE(SUM(CASE WHEN ${cond} THEN typ END), 0),
-      'rising', SUM(${cond} AND g24 >= 10), 'falling', SUM(${cond} AND g24 <= -7))`;
-  }).join(",\n      ");
-
   const sql = `
     WITH
     s48 AS MATERIALIZED (
@@ -424,19 +432,18 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
     ),
     st AS MATERIALIZED (
       SELECT id, MAX(CASE WHEN ts >= ?2 THEN p END) AS max24,
-             MAX(v) AS visits, MIN(v) AS vmin,     -- las visitas solo crecen
-             MAX(CASE WHEN v IS NOT NULL THEN ts END) AS t1,
-             MIN(CASE WHEN v IS NOT NULL THEN ts END) AS tv0,
-             MAX(ts) AS ref
+             MAX(v) AS visits,     -- las visitas solo crecen: el máximo es el último valor
+             MAX(CASE WHEN v IS NOT NULL THEN ts END) AS t1
       FROM s48 GROUP BY id
     ),
     sel AS MATERIALIZED (
-      SELECT g.*, st.max24, st.visits AS lvis, st.vmin, st.t1, st.tv0, st.ref
+      SELECT g.*, st.max24, st.t1
       FROM st CROSS JOIN games g ON g.universe_id = st.id
       WHERE ?13 IS NOT NULL
          OR st.max24 >= ?3
          OR (g.horror = 1 AND st.max24 >= ?4)
-         OR (COALESCE(st.visits, 0) < ?5 AND st.max24 >= ?6)
+         OR (st.max24 >= ?6 AND COALESCE(st.visits, (SELECT d.visits FROM daily d WHERE d.universe_id = g.universe_id
+               AND d.visits IS NOT NULL ORDER BY d.date DESC LIMIT 1)) < ?5)   -- sin visitas conocidas, no
     ),
     -- Días sin cerrar en daily: se calculan desde las muestras
     pr AS (
@@ -447,7 +454,7 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
     ),
     part AS MATERIALIZED (
       SELECT id, day, MAX(cnt) AS n,
-             CAST(ROUND(AVG(CASE WHEN rn IN ((cnt + 1) / 2, (cnt + 2) / 2) THEN p END)) AS INTEGER) AS median,
+             ${MEDIAN_SQL} AS median,
              MIN(p) AS mn, MAX(p) AS mx, MAX(v) AS v
       FROM pr GROUP BY id, day
     ),
@@ -456,23 +463,6 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
              MAX(CASE WHEN rk = 1 THEN day END) AS pday
       FROM (SELECT id, day, mx, ROW_NUMBER() OVER (PARTITION BY id ORDER BY mx DESC, day) AS rk FROM part)
       GROUP BY id
-    ),
-    -- Típico (mediana de las 24 h hasta la última muestra del juego) y las 24 h anteriores
-    tw AS (
-      SELECT x.id, x.p, CASE WHEN x.ts >= sel.ref - 1440 THEN 1 WHEN x.ts >= sel.ref - 2880 THEN 2 END AS w
-      FROM s48 x JOIN sel ON sel.universe_id = x.id
-    ),
-    tr AS (
-      SELECT id, w, p, ROW_NUMBER() OVER (PARTITION BY id, w ORDER BY p) AS rn,
-             COUNT(*) OVER (PARTITION BY id, w) AS cnt
-      FROM tw WHERE w IS NOT NULL
-    ),
-    tm AS MATERIALIZED (
-      SELECT id,
-             AVG(CASE WHEN w = 1 AND rn IN ((cnt + 1) / 2, (cnt + 2) / 2) THEN p END) AS m1,
-             AVG(CASE WHEN w = 2 AND rn IN ((cnt + 1) / 2, (cnt + 2) / 2) THEN p END) AS m2,
-             MAX(CASE WHEN w = 2 THEN cnt END) AS c2
-      FROM tr GROUP BY id
     ),
     -- Agregados de toda la historia (state.hist_agg): un solo valor JSON que se
     -- consulta con json_extract por juego (un JOIN con json_each recorría el
@@ -520,29 +510,12 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
       ) AS gj
       FROM sel2 s2 LEFT JOIN pa ON pa.id = s2.universe_id
     ),
-    sc AS MATERIALIZED (
-      SELECT s2.universe_id AS id, s2.horror = 1 AS h, CAST(ROUND(tm.m1) AS INTEGER) AS typ,
-             CASE WHEN tm.c2 >= 2 AND tm.m2 > 0 THEN ROUND((tm.m1 / tm.m2 - 1) * 100, 1) END AS g24,
-             s2.lvis AS vis,
-             CASE WHEN s2.t1 > s2.tv0 AND s2.lvis > 0
-                  THEN ROUND((s2.lvis - s2.vmin) * 1440.0 / (s2.t1 - s2.tv0) * 100.0 / s2.lvis, 2) END AS vg,
-             EXISTS (SELECT 1 FROM sort_hits k WHERE k.universe_id = s2.universe_id AND k.date = ?8
-                     AND k.sort_id = 'up-and-coming') AS upc,
-             (SELECT CASE WHEN COUNT(*) >= 7 THEN ROUND((AVG(CASE WHEN rn <= 3 THEN median END)
-                       / NULLIF(AVG(CASE WHEN rn BETWEEN 7 AND 10 THEN median END), 0) - 1) * 100, 1) END
-              FROM (SELECT median, ROW_NUMBER() OVER (ORDER BY date DESC) AS rn FROM daily
-                    WHERE universe_id = s2.universe_id AND date < ?10 ORDER BY date DESC LIMIT 10)) AS g7
-      FROM sel s2 LEFT JOIN tm ON tm.id = s2.universe_id
-    ),
     gm AS MATERIALIZED (SELECT MAX(ts) AS last_ts FROM s48)
     SELECT
       (SELECT group_concat(gj, ',') FROM (SELECT gj FROM games_json ORDER BY id)) AS frag,
       (SELECT COUNT(*) FROM sel) AS n,
       (SELECT last_ts FROM gm) AS last_ts,
-      (SELECT json_group_array(ts) FROM (SELECT DISTINCT ts FROM s48 WHERE ts >= ?14)) AS ts24,
-      (SELECT json_object(
-      ${totals}) FROM sc) AS totals,
-      (SELECT json_group_array(json_array(id, h, typ, g24, vis, vg, upc, g7)) FROM sc) AS scores`;
+      (SELECT json_group_array(ts) FROM (SELECT DISTINCT ts FROM s48 WHERE ts >= ?14)) AS ts24`;
 
   const res = await db.prepare(sql).bind(
     sFrom, cut24,
@@ -557,53 +530,8 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
     n: row.n || 0,
     last_ts: row.last_ts ?? null,
     ts24: JSON.parse(row.ts24 || "[]"),
-    totals: JSON.parse(row.totals || "{}"),
-    scores: JSON.parse(row.scores || "[]"),
     meta: res.meta,
   };
-}
-
-/** Suma los totales por categoría de varios trozos. */
-export function sumTotals(list) {
-  const out = {};
-  for (const t of list) {
-    for (const [k, v] of Object.entries(t || {})) {
-      const o = (out[k] ||= { games: 0, players: 0, rising: 0, falling: 0 });
-      for (const f of Object.keys(o)) o[f] += Number(v?.[f]) || 0;
-    }
-  }
-  return out;
-}
-
-const clip01 = x => Math.max(0, Math.min(1, x));
-/**
- * Candidatos de Telegram (≈ 60–80) a partir de las cifras de los trozos:
- * scores = [[id, horror, typical, g24, visits, visits_growth, up_and_coming, g7], …]
- *  · posibles emergentes (visits < max_visits y típico ≥ min o en up-and-coming),
- *    por una aproximación de la puntuación de emergente;
- *  · por categoría: los que más crecen en 24 h, los de más jugadores y los
- *    que más suben y más caen en 7 días (resumen semanal).
- */
-export const TELEGRAM_PICK = { emerging: 30, growth: 10, typical: 8, week_up: 6, week_down: 6 };
-export function pickTelegramCandidates(scores, pick = TELEGRAM_PICK) {
-  const out = new Set();
-  const top = (list, key, n, dir = -1) =>
-    list.filter(s => key(s) != null).sort((a, b) => dir * (key(a) - key(b)) || a[0] - b[0]).slice(0, n)
-      .forEach(s => out.add(s[0]));
-  const logSpan = Math.log10(30);
-  const em = s => 30 * clip01((s[5] || 0) / 12)
-    + 25 * clip01(Math.max(0, (s[3] || 0) / 2, (s[7] || 0) / 5) / 20)
-    + 15 * clip01(Math.log10(Math.max(s[2] || 1, 1) / EMERGING.min_players) / logSpan);
-  top(scores.filter(s => s[4] != null && s[4] < EMERGING.max_visits && ((s[2] || 0) >= EMERGING.min_players || s[6])),
-    em, pick.emerging);
-  for (const c of Object.values(CATEGORIES)) {
-    const m = scores.filter(s => (c.classifier !== "horror" || s[1]) && (s[2] || 0) >= c.min_players);
-    top(m, s => s[3], pick.growth);
-    top(m, s => s[2], pick.typical);
-    top(m, s => s[7], pick.week_up);
-    top(m.filter(s => s[7] < 0), s => s[7], pick.week_down, 1);
-  }
-  return [...out].sort((a, b) => a - b);
 }
 
 /** Cabecera común de export.json y telegram.json. */
@@ -632,7 +560,7 @@ export async function history(db, id, { nowMs = Date.now(), openDay } = {}) {
     ),
     part AS (
       SELECT day, MAX(cnt) AS n,
-             CAST(ROUND(AVG(CASE WHEN rn IN ((cnt + 1) / 2, (cnt + 2) / 2) THEN p END)) AS INTEGER) AS median,
+             ${MEDIAN_SQL} AS median,
              MIN(p) AS mn, MAX(p) AS mx
       FROM pr GROUP BY day
     )

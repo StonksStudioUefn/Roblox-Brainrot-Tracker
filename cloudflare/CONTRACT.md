@@ -62,14 +62,14 @@ CREATE TABLE IF NOT EXISTS samples (
   playing INTEGER, visits INTEGER,
   PRIMARY KEY (universe_id, ts)
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS samples_ts ON samples(ts);
+-- (sin índice por ts: ver la nota 1 al final)
 CREATE TABLE IF NOT EXISTS daily (
   universe_id INTEGER, date TEXT,    -- "AAAA-MM-DD" UTC
   n INTEGER, median INTEGER, mean INTEGER, min INTEGER, max INTEGER,
   visits INTEGER, favorites INTEGER, up INTEGER, down INTEGER,
   PRIMARY KEY (universe_id, date)
 ) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS sort_hits (    -- en qué listas oficiales de Roblox sale cada juego
+CREATE TABLE IF NOT EXISTS sort_hits (    -- listas de Roblox (sort_id) y búsquedas ("search:<query>")
   universe_id INTEGER, date TEXT, sort_id TEXT, rank INTEGER,
   PRIMARY KEY (universe_id, date, sort_id)
 ) WITHOUT ROWID;
@@ -80,46 +80,72 @@ CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);  -- Telegra
   export. El día anterior se cierra (INSERT … ON CONFLICT DO UPDATE) en el primer muestreo del día siguiente.
   La mediana se calcula en SQL con funciones de ventana (`ROW_NUMBER() OVER (PARTITION BY …)`).
 - `favorites`, `up` y `down` se guardan una vez al día, en el paso "meta diario".
+- `state` (claves): `telegram`, `search_cursor`, `day` (último día con la 1ª pasada hecha), `closed_day`
+  (último día cerrado en `daily`), `last_sample_ts`, `hist_agg` (agregados de toda la historia por juego:
+  `{id: [peak, peak_date, days, first_day, favorites, up, down, last_date]}`, se actualiza al cerrar cada día),
+  `last_run` y `last_partial_run` (resumen de la última pasada).
 
 ## Presupuesto de escrituras D1 (por día)
 
 | Qué | Filas |
 |---|---|
-| Muestras: ~2.100 juegos × 8 | ~17.000 |
-| Borrado de muestras de más de `SAMPLE_RETENTION_DAYS` | ~17.000 |
-| Cierre de `daily` | ~2.100 |
-| Meta, horror y votos diarios | ~2.100 |
-| `sort_hits` y juegos nuevos | ~1.500 |
-| **Total** | **~40.000** |
+| Muestras: ~2.300 juegos con ≥ 300 jugadores × 8 (los de menos no se guardan, como en tracker.py) | ~18.500 |
+| Borrado de muestras de más de `SAMPLE_RETENTION_DAYS` | ~18.500 |
+| Cierre de `daily` (con favoritos y votos en la misma fila) | ~2.300 |
+| Meta y horror (solo las fichas que cambian) | ~1.200 |
+| `sort_hits` (explore + search) y juegos nuevos | ~2.500 |
+| `low_since`, `state` | ~500 |
+| **Total** | **~45.000–48.000** (medido en local: ~2.770 por pasada normal; el objetivo de 45.000 queda justo) |
+
+Sin el índice `samples_ts` (D1 cuenta una fila más por índice): con él serían ~80.000.
 
 ## El muestreo (Workflow `Sampler`, lanzado por el cron cada 3 h)
 
-Cada `step.do` tiene que caber en **10 ms de CPU y 50 peticiones externas**. Si en el plan gratis el límite de
-50 resulta ser por invocación y no por paso, hay que separar los pasos pesados con
-`step.sleep("…", "1 second")`. Hay que verificarlo en local o en la documentación.
+Cada `step.do` tiene que caber en **10 ms de CPU y 50 peticiones externas**. La documentación da la CPU
+"por paso" pero las peticiones "50/request" (por invocación) sin aclarar si cada paso es una invocación, y en
+local no se aplican los límites. Por eso cada paso pide como mucho 45 (clase `Budget` de `sources.js`) y
+**antes de cada paso con red hay un `step.sleep("…", "1 second")`** (no cuenta como paso). Tamaños y CPU
+medida: ver `README.md` ("CPU por paso").
+
+Nombres reales de los pasos: `init` → `explore-0..P` (una página de get-sorts por paso) → `explore-more`
+(get-sort-content) → `search-0..2` → `search-cursor` → [`rolimons` → `resolve-0..4`] → `sample-list` →
+`sample-0..M` (400 juegos; en la 1ª pasada del día 50 juegos con meta, horror y votos) → [`close`] → `maint` →
+`export-plan` → `export-0..E` → `export-join` → `tg-scan-i-j` → `tg-reduce` → `telegram` → `finish`.
 
 1. **explore**: `apis.roblox.com/explore-api/v1/get-sorts` (con paginación `sortsPageToken`) y
    `get-sort-content` para las listas con `nextPageToken` (~9 llamadas). Se insertan los juegos nuevos
-   (`universeId`, `rootPlaceId`, `name`) y se guarda `sort_hits` del día.
+   (`universeId`, `rootPlaceId`, `name`) **con ≥ TRACK_MIN_PLAYERS** y se guarda `sort_hits` del día (mejor
+   puesto del día) de los juegos que ya están en `games`.
 2. **search**: `SEARCH_QUERIES_PER_RUN` búsquedas, por turnos (cursor en `state.search_cursor`), en
    `apis.roblox.com/search-api/omni-search?searchQuery=…&sessionId=<uuid>&pageType=all`, hasta
-   `SEARCH_PAGES_PER_QUERY` páginas. Se insertan los juegos nuevos con ≥ TRACK_MIN_PLAYERS.
+   `SEARCH_PAGES_PER_QUERY` páginas. Se insertan los juegos nuevos con ≥ TRACK_MIN_PLAYERS y su puesto va a
+   `sort_hits` con `sort_id = "search:<query>"` (sirve para la excepción del untrack; el export no los muestra).
 3. **rolimons** (solo en el primer muestreo de cada día UTC): se descarga
    `api.rolimons.com/games/v1/gamelist` y se filtra por ≥ TRACK_MIN_PLAYERS. Luego se resuelven los place_id
    desconocidos con `apis.roblox.com/universes/v1/places/{id}/universe`: máximo 40 por paso, varios pasos y
    tope de 200 al día. Los juegos nuevos entran como `tracked=1`.
-4. **sample-N**: `SELECT universe_id FROM games WHERE tracked=1`, en trozos de **≤ 20 lotes de 50**
-   (1.000 juegos) por paso. Se llama a `games.roblox.com/v1/games?universeIds=…` y se insertan `samples`
-   (playing, visits).
-5. **meta diario** (primer muestreo del día): por trozos, se refrescan nombre, creador, géneros, fechas y
+4. **sample-N**: `SELECT universe_id FROM games WHERE tracked=1`, en trozos de **8 lotes de 50**
+   (400 juegos) por paso (con 1.000, parsear 1,4 MB de la Games API ya cuesta ~12 ms). Se llama a
+   `games.roblox.com/v1/games?universeIds=…` y se insertan `samples` (playing, visits) **solo con ≥
+   TRACK_MIN_PLAYERS**; `low_since` se actualiza con todos.
+5. **meta diario** (primer muestreo del día, dentro de los mismos pasos sample-N con trozos de 50): se refrescan nombre, creador, géneros, fechas y
    max_players; se calcula el horror con la descripción (`horror.js`) **sin guardarla**; se piden los votos
    (`games.roblox.com/v1/games/votes`) y los favoritos, que van a `daily` del día anterior.
 6. **cierre**: se cierra `daily` del día anterior si hace falta, se borran las muestras viejas y se aplica
    `tracked=0` a los juegos que llevan `UNTRACK_AFTER_DAYS` por debajo del mínimo (salvo que hayan salido en
    explore o search en las últimas 24 h).
-7. **export**: SQL → JSON (formato abajo) → R2 `data/export.json`.
-8. **telegram**: `telegram.js` lee el export de R2, calcula con `metrics.js` solo los candidatos
-   (prefiltro descrito abajo) y envía lo que toque.
+7. **export** (por trozos: recibir de D1 un JSON de ~2 MB costaría ~13 ms solo en decodificarlo):
+   `export-plan` reparte los juegos en rangos de universe_id (500 seguidos por rango); cada `export-i` genera
+   en SQLite los objetos de su rango y los guarda en R2 `tmp/export/part-<i>.json`; `export-join` escribe
+   `data/export.json` = cabecera + partes + cierre con un `FixedLengthStream` (las partes no pasan por JS).
+   Los juegos van en orden de universe_id.
+8. **telegram.json**: `tg-scan-i-j` aplica `telegramScanText` (de `telegram.js`) a la parte i en trozos de
+   50 juegos; `tg-reduce` junta las filas, elige los candidatos con `pickCandidates`, pide a D1 solo esos
+   juegos y escribe R2 **`data/telegram.json`**: mismo formato que el export, solo los candidatos (~60–90),
+   más `totals` y `telegram: {counts, total, candidates}` (cabeceras exactas: games, players, rising, falling
+   por categoría).
+9. **telegram**: lee `data/telegram.json` y llama a `runTelegram({ env, exportData, now, getState, setState,
+   force })`.
 
 ## Formato de `/api/export` (= R2 `data/export.json`)
 
@@ -142,9 +168,12 @@ Lo genera `db.js` (backend) y lo consume `buildDashboard()` (métricas).
       "peak": 3475462, "peak_date": "2026-09-19",            // de toda la historia (max de daily.max)
       "days_tracked": 51,                                    // nº total de filas en daily (+ hoy)
       "first_day": "2026-08-14",                             // primera fecha en daily
-      // Últimos EXPORT_DAILY_DAYS días, en orden ascendente. El último puede ser HOY (parcial, desde samples).
+      // Últimas EXPORT_DAILY_DAYS FILAS del juego (no días de calendario), ascendente. Las de días sin
+      // cerrar (hoy, parcial) salen de samples. visits solo en las 2 últimas filas que la tienen (null en
+      // el resto: es lo único que usa metrics.js).
       "d": [["2026-10-02", 1437176, 1178609, 1695743, 2, 6312556551]],  // [date, median, min, max, n, visits]
-      // Muestras de las últimas EXPORT_SAMPLE_HOURS h, ascendente: [ts_minutos_epoch, playing, visits|null]
+      // Muestras desde (última muestra − EXPORT_SAMPLE_HOURS h), incluida, ascendente: [ts_minutos_epoch,
+      // playing, visits|null]. visits solo en la última muestra que la tiene y en la última ≥ 20 h anterior.
       "s": [[29324857, 1695743, 6312556551]]
     }
   ]
@@ -156,7 +185,9 @@ Lo genera `db.js` (backend) y lo consume `buildDashboard()` (métricas).
 - `horror=1` y máximo de 24 h ≥ `CATEGORIES.horror.min_players`;
 - visits < `EMERGING.max_visits` y máximo de 24 h ≥ `EMERGING.min_players`.
 
-Objetivo: menos de 1 MB.
+Objetivo inicial: menos de 1 MB. **No se cumple en régimen**: ~1.400 juegos × ~1,7 KB ≈ 2,3 MB
+(~0,4 MB comprimido, que es lo que viaja). Por eso el export se genera por trozos y Telegram usa
+`data/telegram.json`. El "máximo de 24 h" del filtro se mide desde la última muestra.
 
 ## `buildDashboard(exportData, { now })` (`metrics.js`)
 
@@ -193,6 +224,11 @@ El dashboard calcula los días de evento con `flagEvents`.
 
 ## Rutas del Worker
 
+(Admin: `POST /api/admin/run` `{daily?, skip?, only?, telegram_force?, now?}`, `GET /api/admin/status?id=&counts=1`,
+`POST /api/admin/import` `{table, columns, rows}`, `POST /api/admin/rebuild` (recalcula `hist_agg` y lanza un
+export), `POST /api/admin/export` (lanza un Workflow solo de export). El esquema se aplica con
+`wrangler d1 execute`, no por la API.)
+
 - `GET /` → `public/dashboard.html` (R2 `site/dashboard.html`); `/favicon.svg`.
 - `GET /config.js`, `/metrics.js` y `/horror.js` → los módulos de `src/` (los importa el navegador).
 - `GET /api/export` → R2 `data/export.json` (`cache-control: max-age=60`).
@@ -205,6 +241,9 @@ El dashboard calcula los días de evento con `flagEvents`.
 
 ## Telegram: prefiltro de candidatos
 
+(Backend: este prefiltro se hace en los pasos `tg-scan-*`/`tg-reduce` con `telegramScanText` y
+`pickCandidates` de `telegram.js`, y el resultado es R2 `data/telegram.json`; ver el paso 8 del muestreo.)
+
 `telegram.js` pasa a `buildDashboard()` un export reducido. Tiene solo los juegos que pueden salir en los
 mensajes:
 - emergentes posibles: visits < max_visits y típico ≥ 300 (o en `up-and-coming`);
@@ -212,3 +251,18 @@ mensajes:
 
 Son unos 150 juegos y el cálculo cuesta ~4 ms. El estado (`alerted`, `last_daily`, `last_weekly`) se guarda
 en D1 `state`, clave `telegram`. Los secrets son `TELEGRAM_TOKEN` y `TELEGRAM_CHAT_ID`.
+
+## Notas del backend (cambios respecto a la primera versión)
+
+1. **Sin índice `samples_ts`.** D1 cuenta una fila escrita más por cada índice: con él, las muestras (insertar
+   + borrar) pasaban de ~37.000 a ~74.000 filas/día. Las consultas por tiempo recorren `games` y buscan en
+   `samples` por la clave primaria (`CROSS JOIN`), así que leen solo las filas necesarias.
+2. **`state.hist_agg`**: pico, fecha del pico, días, primer día y últimos favoritos/votos de toda la historia,
+   mantenidos al cerrar cada día (1 fila escrita al día). Sin esto, cada export leería `daily` entera.
+3. **Lecturas D1** (medidas en local con `meta.rows_read`, que cuenta también las tablas temporales de las
+   CTE): ~300.000 por export en régimen (~2,4 M/día con 8 pasadas, límite 5 M).
+4. **Muestras < TRACK_MIN_PLAYERS no se guardan** (como en tracker.py): ahorra ~5.000 escrituras al día.
+5. **`EXPORT_DAILY_DAYS = 24`** y `d` = últimas N filas por juego (paridad con Python, pedido por métricas).
+   El filtro de emergentes exige visitas conocidas (de samples o, si no, la última de `daily`), como
+   make_export.py. Mediana y media de `daily` redondean los .5 al par, como `round()` de Python.
+6. **`data/telegram.json`** (nuevo, ver el paso 8 del muestreo).
