@@ -19,7 +19,10 @@ export default {
     if (!url.pathname.startsWith("/file/") || !/^(site|deploy)\/[\w.\-\/]+$/.test(key) || key.includes("..")) return new Response("Clave no válida", { status: 400 });
     if (req.method === "PUT") {
       const ct = req.headers.get("content-type");
-      const o = await env.BUCKET.put(PREFIX + key, req.body, ct ? { httpMetadata: { contentType: ct } } : undefined);
+      const o = await env.BUCKET.put(PREFIX + key, req.body, {
+        ...(ct ? { httpMetadata: { contentType: ct } } : {}),
+        customMetadata: { app: "roblox-tracker", fecha: new Date().toISOString(), nombre: key.split("/").pop() },
+      });
       return Response.json({ key: PREFIX + key, etag: o.etag, size: o.size });
     }
     if (req.method === "DELETE") { await env.BUCKET.delete(PREFIX + key); return Response.json({ key: PREFIX + key, deleted: true }); }
