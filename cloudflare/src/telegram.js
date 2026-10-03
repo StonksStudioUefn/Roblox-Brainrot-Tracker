@@ -791,12 +791,12 @@ function makeClient({ env, fetchImpl, log, maxFetch }) {
  *   now: Date | ISO | ms
  *   getState(key) / setState(key, value) o setState(value): estado en D1 (clave "telegram")
  *   force: undefined | 'daily' | 'weekly'  (como --daily / --weekly)
- * Opcionales (pruebas): fetch, buildDashboard, log, maxFetch.
+ * Opcionales (pruebas): fetch, buildDashboard, log, maxFetch, quickExit (false = calcular siempre).
  */
 export async function runTelegram({
   env, exportData, now, getState, setState, force,
   fetch: fetchImpl = globalThis.fetch, buildDashboard = metricsBuildDashboard,
-  log = (...a) => console.log(...a), maxFetch = TELEGRAM_MAX_FETCH,
+  log = (...a) => console.log(...a), maxFetch = TELEGRAM_MAX_FETCH, quickExit = true,
 }) {
   const nowD = toDate(now);
   const today = isoDay(nowD), week = isoWeek(nowD), hour = nowD.getUTCHours();
@@ -806,9 +806,6 @@ export async function runTelegram({
   // telegramCandidates/telegramReduce, con `telegram`) tal cual; el completo
   // se reduce aquí (respaldo: cuesta más CPU).
   const reduced = exportData?.telegram || exportData?.totals ? exportData : telegramCandidates(exportData, { now: nowD });
-  const dash = buildDashboard(reduced, { now: nowD });
-  applyCounts(dash, headerCounts(reduced));
-  const games = dash.games, cats = dash.categories;
 
   const loaded = getState ? await getState(STATE_KEY) : null;
   const state = loaded && typeof loaded === "object" ? structuredClone(loaded) : {};
@@ -819,6 +816,24 @@ export async function runTelegram({
     candidates: reduced.games?.length ?? null, total: reduced.telegram?.total ?? null,
     header: headerCounts(reduced) ? (reduced.telegram ? "exacta" : "totals") : "candidatos",
   };
+  const dueDaily = force === "daily" || (hour >= TELEGRAM.report_hour_utc && state.last_daily !== today);
+  const dueWeekly = force === "weekly"
+    || (weekday === 0 && hour >= TELEGRAM.report_hour_utc && state.last_weekly !== week);
+
+  // Atajo (6 de cada 8 pasadas): sin diario ni semanal, solo hace falta
+  // buildDashboard si algún juego aún sin avisar puede llegar a alerta. El
+  // cálculo reducido da el mismo score que metrics.js (test/telegram.test.mjs);
+  // se deja un margen de 5 puntos.
+  if (quickExit && !dueDaily && !dueWeekly) {
+    const alerted = state.alerted || {};
+    const maybe = quickRows(reduced.games || [], { now: nowD })
+      .some(r => r.em !== null && r.em >= TELEGRAM.alert_min_score - 5 && !(String(r.id) in alerted));
+    if (!maybe) return { ...result, skipped: "sin alertas posibles", fetches: 0 };
+  }
+
+  const dash = buildDashboard(reduced, { now: nowD });
+  applyCounts(dash, headerCounts(reduced));
+  const games = dash.games, cats = dash.categories;
 
   const save = async () => {
     if (!setState || JSON.stringify(state) === before) return;
@@ -844,7 +859,7 @@ export async function runTelegram({
       }
     }
 
-    if (force === "daily" || (hour >= TELEGRAM.report_hour_utc && state.last_daily !== today)) {
+    if (dueDaily) {
       const ok = [];
       for (const [key, cat] of Object.entries(cats)) {
         result.messages++;
@@ -854,7 +869,7 @@ export async function runTelegram({
       if (result.daily) state.last_daily = today;
     }
 
-    if (force === "weekly" || (weekday === 0 && hour >= TELEGRAM.report_hour_utc && state.last_weekly !== week)) {
+    if (dueWeekly) {
       const ok = [];
       for (const [key, cat] of Object.entries(cats)) {
         result.messages++;

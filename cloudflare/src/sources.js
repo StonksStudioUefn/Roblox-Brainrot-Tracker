@@ -170,40 +170,50 @@ function exploreParams(sessionId) {
   return `sessionId=${sessionId}&device=computer&country=all`;
 }
 
-/**
- * Recorre get-sorts (sortsPageToken) y, para las listas con nextPageToken,
- * get-sort-content (pageToken). Devuelve { sorts: {sortId: [[uid, placeId, name, players], …]}, calls }.
- * Solo listas de juegos (contentType "Games").
- */
+/** Una página de get-sorts. → { sorts: {sortId: [[uid, placeId, name, players], …]}, pending: [[sortId, token, nº filas]], next } */
+export async function fetchSortsPage(budget, sessionId, token = null) {
+  const url = `${URLS.sorts}?${exploreParams(sessionId)}${token ? `&sortsPageToken=${encodeURIComponent(token)}` : ""}`;
+  const d = await getJson(url, { budget });
+  if (!d) return null;
+  const sorts = {}, pending = [];
+  for (const s of d.sorts || []) {
+    if (s.contentType !== "Games" || !s.sortId || !Array.isArray(s.games)) continue;
+    sorts[s.sortId] = s.games.map(gameTuple);
+    if (s.nextPageToken) pending.push([s.sortId, s.nextPageToken, s.games.length]);
+  }
+  return { sorts, pending, next: d.nextSortsPageToken || null };
+}
+
+/** Páginas siguientes de una lista (get-sort-content con pageToken). → [[uid, placeId, name, players], …] */
+export async function fetchSortContent(budget, sessionId, sortId, token, maxPages = 6) {
+  const out = [];
+  let pt = token, n = 0;
+  while (pt && n < maxPages && budget.left > 0) {
+    const url = `${URLS.sortContent}?${exploreParams(sessionId)}&sortId=${encodeURIComponent(sortId)}&pageToken=${encodeURIComponent(pt)}`;
+    const d = await getJson(url, { budget });
+    if (!d) break;
+    n++;
+    for (const g of d.games || []) out.push(gameTuple(g));
+    pt = d.nextPageToken || null;
+  }
+  return out;
+}
+
+/** Todas las listas de una vez (para pruebas; el Workflow va página a página). */
 export async function fetchExplore(budget, { maxSortPages = 8, maxContentPages = 6 } = {}) {
   const sid = crypto.randomUUID();
   const sorts = {};
   const pending = [];
   let token = null, pages = 0;
   do {
-    const url = `${URLS.sorts}?${exploreParams(sid)}${token ? `&sortsPageToken=${encodeURIComponent(token)}` : ""}`;
-    const d = await getJson(url, { budget });
-    if (!d) break;
+    const r = await fetchSortsPage(budget, sid, token);
+    if (!r) break;
     pages++;
-    for (const s of d.sorts || []) {
-      if (s.contentType !== "Games" || !s.sortId || !Array.isArray(s.games)) continue;
-      sorts[s.sortId] = s.games.map(gameTuple);
-      if (s.nextPageToken) pending.push([s.sortId, s.nextPageToken]);
-    }
-    token = d.nextSortsPageToken || null;
+    Object.assign(sorts, r.sorts);
+    pending.push(...r.pending);
+    token = r.next;
   } while (token && pages < maxSortPages && budget.left > 2);
-
-  for (const [sortId, first] of pending) {
-    let pt = first, n = 0;
-    while (pt && n < maxContentPages && budget.left > 1) {
-      const url = `${URLS.sortContent}?${exploreParams(sid)}&sortId=${encodeURIComponent(sortId)}&pageToken=${encodeURIComponent(pt)}`;
-      const d = await getJson(url, { budget });
-      if (!d) break;
-      n++;
-      for (const g of d.games || []) sorts[sortId].push(gameTuple(g));
-      pt = d.nextPageToken || null;
-    }
-  }
+  for (const [sortId, t] of pending) sorts[sortId].push(...await fetchSortContent(budget, sid, sortId, t, maxContentPages));
   return sorts;
 }
 

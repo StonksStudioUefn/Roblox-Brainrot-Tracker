@@ -2,19 +2,25 @@
  * sampler.js — Workflow `Sampler`: un muestreo completo, por pasos.
  *
  * Lo lanza el cron cada 3 h (index.js → scheduled) o /api/admin/run.
- * Cada `step.do` cabe en 10 ms de CPU y ≤ 45 peticiones externas (Budget),
- * y es idempotente: Workflows lo reintenta si falla y los resultados de los
- * pasos ya hechos se guardan, así que al reanudar no se repiten.
+ * Cada `step.do` cabe en 10 ms de CPU (medido: README "CPU por paso") y en
+ * ≤ 45 peticiones externas (Budget), y es idempotente: Workflows lo reintenta
+ * si falla, y los pasos ya hechos no se repiten al reanudar.
  *
  * Límite de 50 peticiones externas: en el plan gratis la documentación lo da
- * "por invocación" (tabla de Workflows: "50/request") sin aclarar si cada paso
- * es una invocación. Para no depender de ello, entre pasos con red hay un
- * `step.sleep` (no cuenta como paso), que obliga al motor a reanudar la
- * instancia en otra invocación. Ver README / CONTRACT.md.
+ * "por invocación" ("50/request" en la tabla de límites de Workflows) sin
+ * aclarar si cada paso es una invocación (la CPU sí es "por paso"). Para no
+ * depender de ello, antes de cada paso con red hay un `step.sleep` (no cuenta
+ * en el límite de pasos), para que el motor reanude la instancia en otra
+ * invocación. Ver README / CONTRACT.md.
  *
- * Pasos:  init → explore → search-0..N → [rolimons → resolve-0..K] →
- *         sample-list → sample-0..M (con meta diario en la 1ª pasada del día) →
- *         [close] → maint → export → telegram → finish
+ * Pasos:  init → explore-0..P (una página de get-sorts por paso) → explore-more →
+ *         search-0..N → search-cursor → [rolimons → resolve-0..K] →
+ *         sample-list → sample-0..M (en la 1ª pasada del día: meta, horror y votos) →
+ *         [close] → maint → export-plan → export-0..E → export-join → telegram → finish
+ *
+ * Parámetros (event.payload): now (ISO), daily (forzar 1ª pasada del día),
+ * skip: [nombres], only: [nombres] (explore, search, rolimons, sample, close,
+ * maint, export, telegram), telegram_force ('daily' | 'weekly').
  */
 
 import { WorkflowEntrypoint } from "cloudflare:workers";
@@ -23,23 +29,29 @@ import {
   TRACK_MIN_PLAYERS,
 } from "./config.js";
 import {
-  Budget, chunks, fetchExplore, fetchGames, fetchRolimons, fetchSearch, fetchVotes, resolvePlaces,
+  Budget, chunks, fetchGames, fetchRolimons, fetchSearch, fetchSortContent, fetchSortsPage, fetchVotes,
+  resolvePlaces,
 } from "./sources.js";
 import {
-  DAY_MIN, addDays, applyVotesStmt, buildExport, closeDayStmt, getState, getStates, insertPlacesStmt,
-  insertSamplesStmt, isoDate, isoMinute, lowSinceStmts, mergeHistStmt, minuteOf, pruneOrphansStmt,
-  pruneSamplesStmt, retrackPlacesStmt, setState, setStateStmt, sortHitsStmt, trackedIds, unknownPlaces,
-  untrackStmt, updateMetaStmt, upsertDiscoveredStmt, written,
+  DAY_MIN, addDays, applyVotesStmt, buildExportSlice, closeDayStmt, exportHeader, exportPlan, getState,
+  getStates, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs, lowSinceStmts,
+  mergeHistStmt, minuteOf, pickTelegramCandidates, pruneOrphansStmt, pruneSamplesStmt, retrackPlacesStmt,
+  setState, setStateStmt, sortHitsStmt, sumTotals, trackedIds, unknownPlaces, untrackStmt, updateMetaStmt,
+  upsertDiscoveredStmt, written,
 } from "./db.js";
 import { classifyHorror } from "./horror.js";
 import { runTelegram } from "./telegram.js";
 
-// Tamaños de trozo (medidos: ver README "CPU por paso")
-export const SAMPLE_CHUNK = 1000;      // 20 lotes de 50 → 20 peticiones
-export const META_CHUNK = 500;         // 10 lotes de juegos + 10 de votos + horror de 500
+// Tamaños de trozo (CPU medida en frío: ver README "CPU por paso")
+export const SAMPLE_CHUNK = 400;       // 8 lotes de 50: parsear ~560 KB de la Games API ≈ 4,3 ms
+export const META_CHUNK = 50;          // 1 lote + votos + horror de 50 (horror en frío ≈ 4,2 ms)
 export const RESOLVE_CHUNK = 40;       // place → universe por paso
 export const RESOLVE_PER_DAY = 200;
+export const EXPLORE_MAX_PAGES = 8;    // páginas de get-sorts (hoy son 5)
+export const EXPORT_SLICE = 500;       // juegos seguidos por trozo del export (≈ 250 exportados, ≈ 450 KB)
 export const EXPORT_KEY = "data/export.json";
+export const TELEGRAM_KEY = "data/telegram.json";
+export const PART_PREFIX = "tmp/export/part-";
 
 const STEP = { retries: { limit: 3, delay: "20 seconds", backoff: "exponential" }, timeout: "10 minutes" };
 const STEP_ONCE = { retries: { limit: 1, delay: "30 seconds", backoff: "constant" }, timeout: "5 minutes" };
@@ -50,6 +62,8 @@ export class Sampler extends WorkflowEntrypoint {
     const db = env.DB;
     const p = event.payload || {};
     const skip = new Set(p.skip || []);
+    const only = p.only ? new Set(p.only) : null;
+    const want = name => !skip.has(name) && (!only || only.has(name));
     const summary = { steps: {}, errors: [] };
 
     // Un paso que falla tras sus reintentos no tumba la pasada entera
@@ -76,6 +90,7 @@ export class Sampler extends WorkflowEntrypoint {
         firstOfDay: !!p.daily || st.day !== today,
         closedDay: st.closed_day || null,
         cursor: Number(st.search_cursor) || 0,
+        session: crypto.randomUUID(),
       };
     });
     const { ts, today } = init;
@@ -83,41 +98,47 @@ export class Sampler extends WorkflowEntrypoint {
     summary.ts = firstSeen;
     summary.first_of_day = init.firstOfDay;
 
-    // ── explore ───────────────────────────────────────────────────────────
-    if (!skip.has("explore")) {
-      await safe("explore", async () => {
-        const budget = new Budget(45);
-        const sorts = await fetchExplore(budget);
-        const nSorts = Object.keys(sorts).length;
-        if (!nSorts) throw new Error("Explore API sin listas");
-        // Juegos nuevos solo con ≥ TRACK_MIN_PLAYERS (las listas temáticas traen
-        // muchos pequeños y cada juego seguido son 8 muestras + 8 borrados al día);
-        // los puestos se guardan para todos los juegos que ya conocemos.
-        const games = new Map();
-        const hits = new Map();
-        for (const [sortId, list] of Object.entries(sorts)) {
-          list.forEach(([uid, place, name, players], i) => {
-            if (!uid) return;
-            if (!games.has(uid) && (players ?? 0) >= TRACK_MIN_PLAYERS) games.set(uid, [uid, place, name]);
-            const k = `${uid}|${sortId}`;
-            if (!hits.has(k)) hits.set(k, [uid, sortId, i + 1]);
-          });
-        }
-        const res = await db.batch([
-          upsertDiscoveredStmt(db, [...games.values()], "explore", firstSeen),
-          sortHitsStmt(db, [...hits.values()], today),
-        ]);
-        return { sorts: nSorts, games: games.size, hits: hits.size, calls: budget.used, written: written(res) };
-      });
-      await pause("explore");
+    // ── explore: una página de get-sorts por paso, luego get-sort-content ──
+    if (want("explore")) {
+      let token = null;
+      const pending = [];
+      for (let i = 0; i < EXPLORE_MAX_PAGES; i++) {
+        await pause(`explore-${i}`);
+        const r = await safe(`explore-${i}`, async () => {
+          const budget = new Budget(6);
+          const page = await fetchSortsPage(budget, init.session, token);
+          if (!page) throw new Error("Explore API sin respuesta");
+          const res = await saveExplore(db, page.sorts, today, firstSeen);
+          return { stats: { ...res, calls: budget.used }, pending: page.pending, next: page.next };
+        });
+        if (!r) break;
+        pending.push(...r.pending);
+        token = r.next;
+        if (!token) break;
+      }
+      if (pending.length) {
+        await pause("explore-more");
+        await safe("explore-more", async () => {
+          const budget = new Budget(30);
+          const sorts = {}, offsets = {};
+          for (const [sortId, t, firstLen] of pending) {
+            sorts[sortId] = await fetchSortContent(budget, init.session, sortId, t, 6);
+            offsets[sortId] = firstLen;   // el puesto sigue al de la primera página
+          }
+          const res = await saveExplore(db, sorts, today, firstSeen, offsets);
+          return { ...res, lists: pending.length, calls: budget.used };
+        });
+      }
     }
 
     // ── search (por turnos) ───────────────────────────────────────────────
-    if (!skip.has("search")) {
+    if (want("search")) {
       const n = Math.min(SEARCH_QUERIES_PER_RUN, SEARCH_QUERIES.length);
       for (let k = 0; k < n; k++) {
         const query = SEARCH_QUERIES[(init.cursor + k) % SEARCH_QUERIES.length];
         const source = `search:${query}`;
+        // La Search API castiga las ráfagas: pausa más larga entre búsquedas
+        await step.sleep(`pausa search-${k}`, k ? "3 seconds" : "1 second");
         await safe(`search-${k}`, async () => {
           const budget = new Budget(12);
           const found = await fetchSearch(budget, query, { pages: SEARCH_PAGES_PER_QUERY });
@@ -135,7 +156,6 @@ export class Sampler extends WorkflowEntrypoint {
             : [];
           return { query, results: found.length, kept: rows.length, calls: budget.used, written: written(res) };
         });
-        await step.sleep(`pausa search-${k}`, "3 seconds");   // la Search API castiga las ráfagas
       }
       await safe("search-cursor", async () => {
         const next = (init.cursor + n) % SEARCH_QUERIES.length;
@@ -145,7 +165,8 @@ export class Sampler extends WorkflowEntrypoint {
     }
 
     // ── rolimons (1ª pasada del día) ──────────────────────────────────────
-    if (init.firstOfDay && !skip.has("rolimons")) {
+    if (init.firstOfDay && want("rolimons")) {
+      await pause("rolimons");
       const rol = await safe("rolimons", async () => {
         const budget = new Budget(4);
         const list = await fetchRolimons(budget, TRACK_MIN_PLAYERS);
@@ -155,14 +176,13 @@ export class Sampler extends WorkflowEntrypoint {
           unknownPlaces(db, pids),
           retrackPlacesStmt(db, pids).run(),
         ]);
-        const names = new Map(list.map(r => [r[0], r]));
+        const byPid = new Map(list.map(r => [r[0], r]));
         // Primero los que más jugadores tienen; tope diario
-        const todo = unknown.map(pid => names.get(pid)).sort((a, b) => b[2] - a[2])
+        const todo = unknown.map(pid => byPid.get(pid)).sort((a, b) => b[2] - a[2])
           .slice(0, RESOLVE_PER_DAY).map(([pid, name]) => [pid, name]);
         return { stats: { games: list.length, unknown: unknown.length, calls: budget.used, written: written(res) }, todo };
       });
-      const todo = rol?.todo || [];
-      for (const [i, part] of chunks(todo, RESOLVE_CHUNK).entries()) {
+      for (const [i, part] of chunks(rol?.todo || [], RESOLVE_CHUNK).entries()) {
         await pause(`resolve-${i}`);
         await safe(`resolve-${i}`, async () => {
           const budget = new Budget(45);
@@ -180,20 +200,29 @@ export class Sampler extends WorkflowEntrypoint {
 
     // ── sample-N (+ meta diario) ──────────────────────────────────────────
     const votes = {};
-    if (!skip.has("sample")) {
+    if (want("sample")) {
       const ids = await step.do("sample-list", STEP, () => trackedIds(db));
       const meta = init.firstOfDay;
-      const size = meta ? META_CHUNK : SAMPLE_CHUNK;
-      for (const [i, part] of chunks(ids, size).entries()) {
+      const parts = chunks(ids, meta ? META_CHUNK : SAMPLE_CHUNK);
+      const agg = { games: 0, samples: 0, failed: 0, meta: 0, calls: 0, written: 0, steps: parts.length };
+      for (const [i, part] of parts.entries()) {
         await pause(`sample-${i}`);
-        const r = await safe(`sample-${i}`, () => sampleChunk(db, part, { ts, today, meta }));
+        const name = `sample-${i}`;
+        let r = null;
+        try {
+          r = await step.do(name, STEP, () => sampleChunk(db, part, { ts, today, meta }));
+        } catch (e) {
+          summary.errors.push(`${name}: ${String(e?.message || e).slice(0, 200)}`);
+        }
         if (r?.votes) Object.assign(votes, r.votes);
+        for (const k of Object.keys(agg)) if (k !== "steps") agg[k] += r?.stats?.[k] || 0;
       }
+      summary.steps.sample = agg;   // un resumen (con meta son ~55 pasos)
     }
 
     // ── close (cierre de daily de los días anteriores) ───────────────────
     const yesterday = addDays(today, -1);
-    if (!skip.has("close") && (init.firstOfDay || !init.closedDay || init.closedDay < yesterday)) {
+    if (want("close") && (init.firstOfDay || !init.closedDay || init.closedDay < yesterday)) {
       await safe("close", async () => {
         const oldest = addDays(today, -SAMPLE_RETENTION_DAYS);
         let from = init.closedDay ? addDays(init.closedDay, 1) : yesterday;
@@ -216,37 +245,31 @@ export class Sampler extends WorkflowEntrypoint {
     }
 
     // ── maint: poda de muestras y untrack ─────────────────────────────────
-    if (!skip.has("maint")) {
+    if (want("maint")) {
       await safe("maint", async () => {
         const cutoff = ts - SAMPLE_RETENTION_DAYS * DAY_MIN;
         const stmts = [pruneSamplesStmt(db, cutoff), untrackStmt(db, today)];
         if (init.firstOfDay) stmts.push(pruneOrphansStmt(db, cutoff));
         const res = await db.batch(stmts);
-        return {
-          pruned: res[0]?.meta?.changes ?? 0,
-          untracked: res[1]?.meta?.changes ?? 0,
-          written: written(res),
-        };
+        return { pruned: res[0]?.meta?.changes ?? 0, untracked: res[1]?.meta?.changes ?? 0, written: written(res) };
       });
     }
 
-    // ── export → R2 ───────────────────────────────────────────────────────
+    // ── export → R2 (por trozos) ──────────────────────────────────────────
     let exported = null;
-    if (!skip.has("export")) {
-      exported = await safe("export", () => writeExport(env, ts * 60000));
-    }
+    if (want("export")) exported = await runExport(env, step, ts * 60000, safe, summary);
 
-    // ── telegram ──────────────────────────────────────────────────────────
-    if (!skip.has("telegram") && exported) {
+    // ── telegram (lee data/telegram.json, el export reducido) ─────────────
+    if (want("telegram") && exported) {
       await safe("telegram", async () => {
-        const obj = await env.BUCKET.get(EXPORT_KEY);
-        if (!obj) throw new Error("No hay export en R2");
+        const obj = await env.BUCKET.get(TELEGRAM_KEY);
+        if (!obj) throw new Error("No hay data/telegram.json en R2");
         const exportData = await obj.json();
         const r = await runTelegram({
           env, exportData, now: new Date(ts * 60000),
           getState: key => getState(db, key),
           setState: (key, value) => setState(db, key, value),
-          force: p.telegram_force || null,
+          force: p.telegram_force || undefined,
         });
         return r ?? { ok: true };
       }, STEP_ONCE);
@@ -256,11 +279,37 @@ export class Sampler extends WorkflowEntrypoint {
     await step.do("finish", STEP, async () => {
       summary.finished_at = new Date().toISOString().slice(0, 19) + "Z";
       summary.instance = event.instanceId || null;
-      await setState(db, "last_run", summary);
+      // Las pasadas parciales (only: […], p. ej. un export manual) no tapan la última completa
+      await setState(db, only ? "last_partial_run" : "last_run", summary);
       return { errors: summary.errors.length };
     });
     return summary;
   }
+}
+
+/** Guarda una tanda de listas de Explore. `offsets[sortId]`: filas ya vistas de esa lista. */
+async function saveExplore(db, sorts, today, firstSeen, offsets = {}) {
+  // Juegos nuevos solo con ≥ TRACK_MIN_PLAYERS (las listas temáticas traen
+  // muchos pequeños y cada juego seguido son 8 muestras + 8 borrados al día);
+  // los puestos se guardan para todos los juegos que ya conocemos.
+  const games = new Map();
+  const hits = new Map();
+  let n = 0;
+  for (const [sortId, list] of Object.entries(sorts)) {
+    n++;
+    const offset = offsets[sortId] || 0;
+    list.forEach(([uid, place, name, players], i) => {
+      if (!uid) return;
+      if (!games.has(uid) && (players ?? 0) >= TRACK_MIN_PLAYERS) games.set(uid, [uid, place, name]);
+      const k = `${uid}|${sortId}`;
+      if (!hits.has(k)) hits.set(k, [uid, sortId, offset + i + 1]);
+    });
+  }
+  const stmts = [];
+  if (games.size) stmts.push(upsertDiscoveredStmt(db, [...games.values()], "explore", firstSeen));
+  if (hits.size) stmts.push(sortHitsStmt(db, [...hits.values()], today));
+  const res = stmts.length ? await db.batch(stmts) : [];
+  return { sorts: n, games: games.size, hits: hits.size, written: written(res) };
 }
 
 /** Un trozo de juegos: muestras (+ meta, horror y votos si `meta`). */
@@ -271,12 +320,20 @@ export async function sampleChunk(db, ids, { ts, today, meta }) {
     meta ? fetchVotes(budget, ids) : null,
   ]);
   const batches = Math.ceil(ids.length / 50);
-  if (games.failed * 2 > batches) {
+  if (games.failed * 2 > batches || (batches === 1 && games.failed)) {
     throw new Error(`Games API: ${games.failed}/${batches} lotes sin respuesta`);
   }
   const { samples, low, metaRows, votes } = processGames(ids, games, vts, meta);
   const stmts = [];
-  if (samples.length) stmts.push(insertSamplesStmt(db, samples, ts));
+  if (samples.length) {
+    stmts.push(insertSamplesStmt(db, samples, ts));
+    // Última muestra (para el export): solo escribe la primera vez en cada pasada
+    stmts.push(db.prepare(
+      `INSERT INTO state (key, value) VALUES ('last_sample_ts', ?1)
+       ON CONFLICT (key) DO UPDATE SET value = excluded.value
+       WHERE CAST(state.value AS INTEGER) < CAST(excluded.value AS INTEGER)`,
+    ).bind(String(ts)));
+  }
   stmts.push(...lowSinceStmts(db, low, today));
   if (metaRows.length) stmts.push(updateMetaStmt(db, metaRows, today));
   const res = stmts.length ? await db.batch(stmts) : [];
@@ -326,19 +383,99 @@ export function processGames(ids, games, vts, meta) {
   return { samples, low, metaRows, votes };
 }
 
-/** Genera el export y lo sube a R2. */
-export async function writeExport(env, nowMs) {
-  const closed = await getState(env.DB, "closed_day");
-  const today = isoDate(minuteOf(nowMs));
-  const openDay = closed ? addDays(closed, 1) : today;
-  const out = await buildExport(env.DB, { nowMs, openDay });
-  if (!out) throw new Error("El export salió vacío");
-  const obj = await env.BUCKET.put(EXPORT_KEY, out.json, {
-    httpMetadata: { contentType: "application/json; charset=utf-8" },
-    customMetadata: { generated_at: new Date(nowMs).toISOString(), games: String(out.games) },
+/**
+ * Export por trozos: export-plan (rangos) → export-i (SQL de un rango → R2
+ * tmp/export/part-i) → export-join (telegram.json con los candidatos y
+ * export.json uniendo las partes con un stream).
+ * `step`/`safe` del Workflow; fuera de él (pruebas) se puede pasar un `step`
+ * que ejecute directamente.
+ */
+export async function runExport(env, step, nowMs, safe, summary) {
+  const db = env.DB;
+  const plan = await safe("export-plan", async () => {
+    const [lastTs, closed, ranges] = await Promise.all([
+      lastSampleTs(db), getState(db, "closed_day"), exportPlan(db, EXPORT_SLICE),
+    ]);
+    const today = isoDate(minuteOf(nowMs));
+    return { lastTs, openDay: closed ? addDays(closed, 1) : today, ranges };
   });
-  return {
-    bytes: obj?.size ?? null, games: out.games,
-    rows_read: out.meta?.rows_read ?? null, d1_ms: out.meta?.duration ?? null,
-  };
+  if (!plan) return null;
+  const slices = [];
+  for (const [i, [lo, hi]] of plan.ranges.entries()) {
+    const name = `export-${i}`;
+    let r = null;
+    try {
+      r = await step.do(name, STEP, async () => {
+        const s = await buildExportSlice(db, { nowMs, lastTs: plan.lastTs, openDay: plan.openDay, lo, hi });
+        const obj = await env.BUCKET.put(`${PART_PREFIX}${i}.json`, s.frag);
+        return {
+          n: s.n, bytes: obj?.size ?? 0, last_ts: s.last_ts, ts24: s.ts24, totals: s.totals, scores: s.scores,
+          rows_read: s.meta?.rows_read ?? null,
+        };
+      });
+    } catch (e) {
+      // Sin todas las partes no se publica un export incompleto
+      summary?.errors.push(`${name}: ${String(e?.message || e).slice(0, 200)}`);
+      return null;
+    }
+    slices.push(r);
+  }
+  const join = await safe("export-join", async () => {
+    const lastTs = slices.reduce((m, s) => (s.last_ts != null && s.last_ts > (m ?? -1) ? s.last_ts : m), null) ?? plan.lastTs;
+    const header = exportHeader({ nowMs, lastTs, ts24: slices.flatMap(s => s.ts24) });
+    const total = slices.reduce((a, s) => a + s.n, 0);
+
+    // data/telegram.json: mismo formato, solo los candidatos, + totales
+    const ids = pickTelegramCandidates(slices.flatMap(s => s.scores));
+    const tg = ids.length
+      ? await buildExportSlice(db, { nowMs, lastTs: plan.lastTs, openDay: plan.openDay, ids })
+      : { frag: "", n: 0, meta: {} };
+    const totals = sumTotals(slices.map(s => s.totals));
+    const tgJson = `${JSON.stringify({
+      ...header, totals,
+      // Mismo dato con el nombre que usa telegram.js (exportData.telegram.counts)
+      telegram: { counts: totals, total, candidates: tg.n },
+    }).slice(0, -1)},"games":[${tg.frag}]}`;
+    await env.BUCKET.put(TELEGRAM_KEY, tgJson, { httpMetadata: { contentType: "application/json; charset=utf-8" } });
+
+    // data/export.json: cabecera + partes + cierre, sin pasar las partes por JS
+    const enc = new TextEncoder();
+    const head = enc.encode(`${JSON.stringify(header).slice(0, -1)},"games":[`);
+    const comma = enc.encode(","), tail = enc.encode("]}");
+    const objs = [];
+    for (let i = 0; i < slices.length; i++) {
+      if (!slices[i].bytes) continue;
+      const o = await env.BUCKET.get(`${PART_PREFIX}${i}.json`);
+      if (!o) throw new Error(`Falta la parte ${i} del export`);
+      objs.push(o);
+    }
+    const size = head.length + tail.length + objs.reduce((a, o) => a + o.size, 0) + Math.max(0, objs.length - 1);
+    const { readable, writable } = new FixedLengthStream(size);
+    const pump = (async () => {
+      let w = writable.getWriter();
+      await w.write(head);
+      w.releaseLock();
+      for (let i = 0; i < objs.length; i++) {
+        if (i) { w = writable.getWriter(); await w.write(comma); w.releaseLock(); }
+        await objs[i].body.pipeTo(writable, { preventClose: true });
+      }
+      w = writable.getWriter();
+      await w.write(tail);
+      await w.close();
+    })();
+    const [put] = await Promise.all([
+      env.BUCKET.put(EXPORT_KEY, readable, {
+        httpMetadata: { contentType: "application/json; charset=utf-8" },
+        customMetadata: { generated_at: header.generated_at, games: String(total) },
+      }),
+      pump,
+    ]);
+    return {
+      bytes: put?.size ?? size, games: total, slices: slices.length,
+      telegram: { games: tg.n, bytes: tgJson.length },
+      rows_read: slices.reduce((a, s) => a + (s.rows_read || 0), 0) + (tg.meta?.rows_read || 0),
+    };
+  });
+  if (summary && join) summary.steps.export = join;
+  return join;
 }

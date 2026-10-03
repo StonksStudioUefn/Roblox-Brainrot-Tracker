@@ -10,7 +10,7 @@
 export const TRACK_MIN_PLAYERS = 300;     // por debajo de esto no se toman muestras
 export const UNTRACK_AFTER_DAYS = 3;      // días seguidos por debajo → deja de seguirse
 export const SAMPLE_RETENTION_DAYS = 8;   // muestras intradía en D1 (el resto vive en `daily`)
-export const EXPORT_DAILY_DAYS = 21;      // días de serie diaria en /api/export
+export const EXPORT_DAILY_DAYS = 24;      // filas de serie diaria por juego en /api/export (últimas N filas; 24 = paridad con Python)
 export const EXPORT_SAMPLE_HOURS = 48;    // horas de muestras intradía en /api/export
 export const HISTORY_DAYS = 120;          // días de serie en /api/history/:id
 export const HISTORY_SAMPLE_DAYS = 7;     // días de muestras en /api/history/:id

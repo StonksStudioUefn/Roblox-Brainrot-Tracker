@@ -105,10 +105,16 @@ function kwList(words) {
   return words.map(w => ({ w, rx: new RegExp("(?<![a-z0-9])" + escapeRe(w)) }));
 }
 
-const H = {};
-for (const k of ["name_strong", "name_weak", "name_negative", "desc_strong", "desc_weak"]) {
-  H[k] = kwList(HORROR[k]);
-}
+// Las ~100 regex de referencia se compilan solo si se usan (en frío cada
+// milisegundo de arranque cuenta)
+let H_CACHE = null;
+const refLists = () => {
+  if (!H_CACHE) {
+    H_CACHE = {};
+    for (const k of ["name_strong", "name_weak", "name_negative", "desc_strong", "desc_weak"]) H_CACHE[k] = kwList(HORROR[k]);
+  }
+  return H_CACHE;
+};
 const TAGS = HORROR.tags;
 const FORCE_IN = new Set(HORROR.force_include.map(Number));
 const FORCE_OUT = new Set(HORROR.force_exclude.map(Number));
@@ -119,12 +125,12 @@ const own = (obj, k) => k != null && Object.prototype.hasOwnProperty.call(obj, k
 // las pruebas de paridad.
 const refMatcher = {
   first(key, text) {
-    for (const kw of H[key]) if (text.includes(kw.w) && kw.rx.test(text)) return kw.w;
+    for (const kw of refLists()[key]) if (text.includes(kw.w) && kw.rx.test(text)) return kw.w;
     return null;
   },
   all(key, text) {
     const out = [];
-    for (const kw of H[key]) if (text.includes(kw.w) && kw.rx.test(text)) out.push(kw.w);
+    for (const kw of refLists()[key]) if (text.includes(kw.w) && kw.rx.test(text)) out.push(kw.w);
     return out;
   },
 };

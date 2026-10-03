@@ -12,11 +12,11 @@
  *   GET /api/game/<id>       ficha en vivo
  *
  * Admin (en cualquier host, "Authorization: Bearer <ADMIN_TOKEN>"):
- *   POST /api/admin/run      lanza un muestreo  {daily?, skip?: [...], telegram_force?, now?}
+ *   POST /api/admin/run      lanza un muestreo  {daily?, skip?: [...], only?: [...], telegram_force?, now?}
  *   GET  /api/admin/status   estado (state + instancia) ?id=<instancia> &counts=1
  *   POST /api/admin/import   {table, columns, rows}  (migración, por lotes)
- *   POST /api/admin/rebuild  recalcula state.hist_agg desde daily y regenera el export
- *   POST /api/admin/export   regenera el export ahora
+ *   POST /api/admin/rebuild  recalcula state.hist_agg desde daily y lanza un export
+ *   POST /api/admin/export   lanza un Workflow que solo regenera el export
  *
  * *.workers.dev no pasa por Access: ahí solo responde /api/admin/*; todo lo
  * demás es 404.
@@ -37,7 +37,6 @@ import horrorSrc from "./horror.js" with { type: "text" };
 
 import { getState, getStates, history, importStmt, isoDate, minuteOf, rebuildHistStmt, written } from "./db.js";
 import { chunks, iconsUrl, thumbsUrl, URLS, UA } from "./sources.js";
-import { writeExport } from "./sampler.js";
 
 export { Sampler } from "./sampler.js";
 
@@ -242,7 +241,8 @@ async function admin(req, env, url) {
       if (Array.isArray(body.skip)) params.skip = body.skip.map(String);
       if (body.telegram_force) params.telegram_force = String(body.telegram_force);
       if (body.now) params.now = new Date(body.now).toISOString();
-      const id = `manual-${new Date().toISOString().slice(0, 19).replace(/[:]/g, "")}`;
+      if (Array.isArray(body.only)) params.only = body.only.map(String);
+      const id = `manual-${stamp()}`;
       const inst = await env.SAMPLER.create({ id, params });
       return json({ id: inst.id, params });
     }
@@ -255,12 +255,16 @@ async function admin(req, env, url) {
       catch (e) { throw new HttpError(400, String(e?.message || e)); }
       return json({ table, rows: rows.length, written: written(res) });
     }
+    // El export se hace por pasos (CPU): se lanza un Workflow que solo exporta
     if (action === "rebuild") {
       const res = await rebuildHistStmt(env.DB).run();
-      const exp = await writeExport(env, Date.now());
-      return json({ hist_written: written(res), export: exp });
+      const inst = await env.SAMPLER.create({ id: `export-${stamp()}`, params: { only: ["export"] } });
+      return json({ hist_written: written(res), export_instance: inst.id });
     }
-    if (action === "export") return json(await writeExport(env, Date.now()));
+    if (action === "export") {
+      const inst = await env.SAMPLER.create({ id: `export-${stamp()}`, params: { only: ["export"] } });
+      return json({ export_instance: inst.id });
+    }
     return json({ error: "No encontrado" }, 404);
   } catch (e) {
     if (e instanceof HttpError) return json({ error: e.message }, e.status);
@@ -270,7 +274,7 @@ async function admin(req, env, url) {
 
 async function adminStatus(env, url) {
   const out = { now: new Date().toISOString() };
-  out.state = await getStates(env.DB, ["last_run", "day", "closed_day", "search_cursor"]);
+  out.state = await getStates(env.DB, ["last_run", "last_partial_run", "day", "closed_day", "search_cursor", "last_sample_ts"]);
   const id = url.searchParams.get("id") || out.state.last_run?.instance;
   if (id) {
     try { out.instance = { id, ...(await (await env.SAMPLER.get(id)).status()) }; }
@@ -293,4 +297,8 @@ async function adminStatus(env, url) {
   const head = await env.BUCKET.head("data/export.json");
   if (head) out.export = { size: head.size, uploaded: head.uploaded, meta: head.customMetadata };
   return json(out);
+}
+
+function stamp() {
+  return new Date().toISOString().slice(0, 19).replace(/[:]/g, "") + Math.random().toString(36).slice(2, 6);
 }
