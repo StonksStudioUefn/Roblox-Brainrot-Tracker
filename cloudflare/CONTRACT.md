@@ -331,3 +331,16 @@ Se pasa de muestrear todo el catálogo (~2.500 juegos) a un **radar** de todo y
 - Telegram: si un envío falla con `migrate_to_chat_id` (el grupo pasó a supergrupo),
   se reintenta con el id nuevo y se guarda en `state.telegram.chat_migrated = {from, to}`;
   se usa mientras `TELEGRAM_CHAT_ID` siga siendo `from`.
+
+## En el ecosistema STONKS (03/10/2026)
+
+- R2: el binding `BUCKET` apunta al bucket común `stonks-archivos` y el código usa
+  `appBucket()` (`src/stonks.js`), que mete todas las claves en `roblox-tracker/`.
+  El resto del código sigue con claves cortas (`data/export.json`, `radar/…`).
+- `export class Operaciones` (`src/stonks.js`), para el Almacén por service binding:
+  `espacio()` → el `Espacio` del contrato del ecosistema con la base D1
+  (`meta.size_after`, filas y bytes por tabla, y `mayores` frente a los 500 MB de D1);
+  `nombres(rutas)` → nombre de hoy de sus carpetas (`site/`, `data/`, `radar/<día>/`…).
+- El Almacén cuenta las bases D1 aparte de los Durable Objects (`d1` en su medida).
+- `cloudflare/tools/uploader.js`: el Worker auxiliar `roblox-uploader` (con
+  `ADMIN_TOKEN`) que sube la web y los bundles de despliegue a esa carpeta.

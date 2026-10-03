@@ -45,19 +45,19 @@ node --single-threaded test/bench_rolimons.mjs [rolimons.json]
 
 Fixtures de `cpu_steps.mjs`: `games_pages.json` y `votes_pages.json` (20 respuestas de 50 juegos),
 `explore_pages.json`, `search_pages.json`, `rolimons.json`, `ids.json`, `part-<i>.json` (partes del export,
-`wrangler r2 object get roblox-tracker/tmp/export/part-<i>.json --local …`) y `telegram.json`.
+`wrangler r2 object get stonks-archivos/roblox-tracker/tmp/export/part-<i>.json --local …`) y `telegram.json`.
 
 ## Despliegue (lo hace el coordinador)
 
 ```sh
 cd cloudflare
 npx wrangler d1 create roblox-tracker          # copiar database_id a wrangler.toml
-npx wrangler r2 bucket create roblox-tracker   # (ya existe)
+# R2: el bucket común stonks-archivos (ya existe); el tracker usa su carpeta roblox-tracker/
 npx wrangler d1 execute roblox-tracker --remote --file=schema.sql
 npx wrangler secret put ADMIN_TOKEN            # y TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
 npx wrangler deploy
-npx wrangler r2 object put roblox-tracker/site/dashboard.html --file public/dashboard.html --remote
-npx wrangler r2 object put roblox-tracker/site/favicon.svg --file ../favicon.svg --remote
+npx wrangler r2 object put stonks-archivos/roblox-tracker/site/dashboard.html --file public/dashboard.html --remote
+npx wrangler r2 object put stonks-archivos/roblox-tracker/site/favicon.svg --file ../favicon.svg --remote
 ADMIN_TOKEN=… python3 scripts/migrate_from_git.py --url https://roblox-tracker.<cuenta>.workers.dev
 ```
 

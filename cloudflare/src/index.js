@@ -14,6 +14,7 @@
  * Admin (en cualquier host, "Authorization: Bearer <ADMIN_TOKEN>"):
  *   POST /api/admin/run      lanza un muestreo  {daily?, select?, skip?: [...], only?: [...], telegram_force?, now?}
  *   GET  /api/admin/status   estado (state + instancia) ?id=<instancia> &counts=1
+ *   GET  /api/admin/espacio  lo que ocupa la base D1 (lo mismo que espacio() para el Almacén)
  *   POST /api/admin/import   {table, columns, rows}  (migración, por lotes)
  *   POST /api/admin/rebuild  recalcula state.hist_agg desde daily y lanza un export
  *   POST /api/admin/export   lanza un Workflow que solo regenera el export
@@ -27,8 +28,10 @@
  * siempre el mismo código. El esquema (schema.sql) NO se incrusta: wrangler
  * trata los .sql como módulo aparte; se aplica con `wrangler d1 execute`.
  *
- * Bindings: DB (D1), BUCKET (R2), SAMPLER (Workflow). Secrets: ADMIN_TOKEN,
- * TELEGRAM_TOKEN, TELEGRAM_CHAT_ID.
+ * Bindings: DB (D1), BUCKET (R2 común `stonks-archivos`: el tracker solo usa su
+ * carpeta `roblox-tracker/`, ver stonks.js), SAMPLER (Workflow). Secrets:
+ * ADMIN_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID. El entrypoint `Operaciones`
+ * (stonks.js) es para el Almacén de STONKS: espacio() y nombres().
  */
 
 import configSrc from "./config.js" with { type: "text" };
@@ -37,8 +40,10 @@ import horrorSrc from "./horror.js" with { type: "text" };
 
 import { getState, getStates, history, importStmt, isoDate, minuteOf, rebuildHistStmt, written } from "./db.js";
 import { chunks, iconsUrl, thumbsUrl, URLS, UA } from "./sources.js";
+import { espacioD1, withApp } from "./stonks.js";
 
 export { Sampler } from "./sampler.js";
+export { Operaciones } from "./stonks.js";
 
 const MAX_LIVE_IDS = 200;
 const MAX_IMPORT_BYTES = 4_000_000;
@@ -53,6 +58,7 @@ const MODULES = { "/config.js": configSrc, "/metrics.js": metricsSrc, "/horror.j
 
 export default {
   async fetch(req, env, ctx) {
+    env = withApp(env);
     const url = new URL(req.url);
     const path = url.pathname;
     try {
@@ -232,6 +238,7 @@ async function admin(req, env, url) {
   const action = url.pathname.slice("/api/admin/".length);
   try {
     if (action === "status" && req.method === "GET") return await adminStatus(env, url);
+    if (action === "espacio" && req.method === "GET") return json(await espacioD1(env.DB));
     if (req.method !== "POST") return json({ error: "Método no permitido" }, 405);
 
     if (action === "run") {
