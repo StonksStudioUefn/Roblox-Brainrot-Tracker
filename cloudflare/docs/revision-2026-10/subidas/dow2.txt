@@ -1,0 +1,14 @@
+## v / media móvil centrada de 7 días (por juego, sin eventos): mediana por día [p10–p90 en "todo"]
+10k-100k  (n=580): lun 1.000 · mar 0.941 · mié 0.934 · jue 0.950 · vie 0.988 · sáb 1.059 · dom 1.123
+1k-10k    (n=1647): lun 0.980 · mar 0.931 · mié 0.926 · jue 0.941 · vie 0.995 · sáb 1.059 · dom 1.126
+2026-05   (n=97): lun 1.023 · mar 0.820 · mié 0.854 · jue 0.872 · vie 0.977 · sáb 1.120 · dom 1.236
+2026-06   (n=736): lun 0.975 · mar 0.937 · mié 0.924 · jue 0.958 · vie 1.000 · sáb 1.052 · dom 1.108
+2026-07   (n=495): lun 1.001 · mar 0.978 · mié 0.960 · jue 0.986 · vie 0.997 · sáb 1.000 · dom 1.064
+2026-08   (n=600): lun 0.991 · mar 0.977 · mié 0.950 · jue 0.964 · vie 0.979 · sáb 1.018 · dom 1.103
+2026-09   (n=469): lun 0.922 · mar 0.844 · mié 0.855 · jue 0.848 · vie 0.982 · sáb 1.254 · dom 1.270
+<1k       (n=89): lun 0.952 · mar 0.927 · mié 0.917 · jue 0.954 · vie 1.011 · sáb 1.040 · dom 1.103
+todo      (n=2397): lun 0.985 · mar 0.934 · mié 0.928 · jue 0.944 · vie 0.993 · sáb 1.059 · dom 1.126
+≥100k     (n=81): lun 0.949 · mar 0.928 · mié 0.938 · jue 0.918 · vie 0.979 · sáb 1.072 · dom 1.143
+p10/p90 todo: lun 0.81–1.10 · mar 0.77–1.04 · mié 0.77–1.04 · jue 0.78–1.06 · vie 0.87–1.12 · sáb 0.91–1.32 · dom 0.99–1.36
+Índice global normalizado (media 1): lun 0.990 · mar 0.938 · mié 0.932 · jue 0.948 · vie 0.997 · sáb 1.063 · dom 1.131
+Índice septiembre normalizado: lun 0.925 · mar 0.847 · mié 0.858 · jue 0.851 · vie 0.985 · sáb 1.259 · dom 1.275

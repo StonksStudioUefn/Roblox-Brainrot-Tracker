@@ -1,0 +1,36 @@
+# Backtest 2026-06-01–2026-09-24 · variante uni · 20479 juego-días · 500 juegos
+
+## ACTUAL (status de metrics.js)
+Reparto: flat 43.9 % · down 27.1 % · up 14.2 % · down2 9.6 % · hot 3.8 % · new 1.4 %
+% subiendo (hot+up) por día: lun 17 · mar 16 · mié 14 · jue 16 · vie 15 · sáb 20 · dom 27
+% bajando (down+down2) por día: lun 40 · mar 36 · mié 35 · jue 40 · vie 41 · sáb 39 · dom 27
+Cambios de estado: 46.2 % de los días (13.9 cambios por juego cada 30 días)
+Pasa a subiendo, por día (% de juego-días de ese día): lun 4.3 · mar 7.1 · mié 7.4 · jue 9.8 · vie 8.1 · sáb 12.6 · dom 17.8
+Pasa a bajando, por día: lun 20.8 · mar 11.7 · mié 13.1 · jue 15.3 · vie 11.1 · sáb 9.9 · dom 5.9
+Exceso fin de semana → subiendo (sáb+dom sobre la media mar–jue): 405 de 860 (47 %) · exceso lunes → bajando (sobre mar–vie): 216 de 563 (38 %)
+Entradas en subiendo que se deshacen en ≤ 3 días: 1553/1819 (85 %) · en bajando: 1596/2339 (68 %)
+Verificación (semana D+1..D+7 vs D-13..D-7): subiendo con real ≥ +10 %: 53 %, con real ≤ 0: 33 % · bajando con real ≤ −10 %: 74 %, con real ≥ 0: 14 %
+Cobertura: de los juego-días con real ≥ +25 %, marcados subiendo 50 %; con real ≤ −25 %, marcados bajando 78 %
+
+## PROPUESTA
+Reparto: up 10.2 % · flat 54.1 % · down 17.9 % · new 10.4 % · hot 2.4 % · down2 5.0 %
+% subiendo (hot+up) por día: lun 12 · mar 13 · mié 14 · jue 13 · vie 13 · sáb 12 · dom 11
+% bajando (down+down2) por día: lun 23 · mar 23 · mié 23 · jue 23 · vie 22 · sáb 23 · dom 23
+Cambios de estado: 13.9 % de los días (4.2 cambios por juego cada 30 días)
+Pasa a subiendo, por día (% de juego-días de ese día): lun 2.4 · mar 3.1 · mié 2.6 · jue 1.6 · vie 2.5 · sáb 2.6 · dom 2.0
+Pasa a bajando, por día: lun 3.3 · mar 3.6 · mié 3.1 · jue 3.4 · vie 2.9 · sáb 4.0 · dom 3.5
+Exceso fin de semana → subiendo (sáb+dom sobre la media mar–jue): 4 de 128 (3 %) · exceso lunes → bajando (sobre mar–vie): 1 de 89 (1 %)
+Entradas en subiendo que se deshacen en ≤ 3 días: 173/450 (38 %) · en bajando: 174/636 (27 %)
+Verificación (semana D+1..D+7 vs D-13..D-7): subiendo con real ≥ +10 %: 76 %, con real ≤ 0: 13 % · bajando con real ≤ −10 %: 92 %, con real ≥ 0: 3 %
+Cobertura: de los juego-días con real ≥ +25 %, marcados subiendo 63 %; con real ≤ −25 %, marcados bajando 78 %
+
+## growth_7d actual vs WoW propuesto: mediana por día de la semana de D
+día | growth_7d mediana | % > 0 | WoW mediana | % > 0 | 24h actual mediana | mismo día sem. pasada mediana
+lun | -0.4 % | 44 % | -3.1 % | 37 % | -12.7 % | -4.0 %
+mar | -2.1 % | 40 % | -3.2 % | 37 % | -4.1 % | -4.4 %
+mié | -3.8 % | 36 % | -3.5 % | 37 % | -1.7 % | -4.2 %
+jue | -4.9 % | 34 % | -3.1 % | 37 % | 0.0 % | -2.9 %
+vie | -5.6 % | 33 % | -3.1 % | 37 % | 1.9 % | -3.3 %
+sáb | -5.8 % | 31 % | -3.7 % | 37 % | 4.7 % | -3.1 %
+dom | -2.2 % | 40 % | -3.6 % | 36 % | 3.0 % | -4.2 %
+Tendencia actual (Theil–Sen 8 días), mediana por día: lun 0.3 · mar 0.0 · mié -0.6 · jue -1.3 · vie -1.6 · sáb -1.2 · dom 0.0

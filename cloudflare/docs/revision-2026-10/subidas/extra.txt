@@ -1,0 +1,26 @@
+Serie plana con índice global: growth_7d por día del último dato: lun +3.0% · mar +2.2% · mié +0.1% · jue -1.5% · vie -2.6% · sáb -3.1% · dom +1.8%
+   tendencia (Theil–Sen 8 d) %/día: lun +1.6% · mar +1.1% · mié -0.1% · jue -0.8% · vie -1.2% · sáb -0.8% · dom +1.6%
+   24 h (día vs día anterior): lun -12.5% · mar -5.2% · mié -0.7% · jue +1.7% · vie +5.2% · sáb +6.6% · dom +6.4%
+Serie plana con índice septiembre: growth_7d por día del último dato: lun +7.1% · mar +4.0% · mié +0.7% · jue -3.8% · vie -9.1% · sáb -5.6% · dom +5.6%
+   tendencia (Theil–Sen 8 d) %/día: lun +1.8% · mar +1.4% · mié -0.1% · jue -2.2% · vie -2.7% · sáb -0.5% · dom +1.4%
+   24 h (día vs día anterior): lun -27.4% · mar -8.5% · mié +1.3% · jue -0.8% · vie +15.7% · sáb +27.8% · dom +1.3%
+
+Sesgo empírico emparejado (growth_7d − WoW, puntos %), mediana por día: lun 1.3 · mar 0.3 · mié -0.9 · jue -1.6 · vie -1.6 · sáb -2.0 · dom 1.1
+   solo septiembre: lun 6.9 · mar 1.9 · mié -2.5 · jue -4.1 · vie -8.3 · sáb -3.6 · dom 5.9
+   status actual "subiendo" en septiembre por día: lun 25 % · mar 16 % · mié 14 % · jue 10 % · vie 14 % · sáb 28 % · dom 28 %
+   status actual "bajando" en septiembre por día: lun 35 % · mar 43 % · mié 43 % · jue 64 % · vie 62 % · sáb 47 % · dom 26 %
+   propuesta "subiendo" en septiembre por día: lun 10 % · mar 12 % · mié 12 % · jue 12 % · vie 11 % · sáb 9 % · dom 9 %
+Subconjunto sin 'new' (18341): cambios de estado cur: 44.6 % de los días
+Subconjunto sin 'new' (18341): cambios de estado prop: 13.9 % de los días
+Propuesta 'new': 2138 juego-días; status actual en ellos: flat 587 · hot 263 · down 390 · up 322 · down2 292 · new 284
+
+|ln(1+WoW)| por tamaño (p50 / p75 / p90): 1k-10k 11/23/43 % (n=11870) · 10k-100k 11/24/52 % (n=3619) · ≥100k 15/32/52 % (n=513) · <1k 9/20/37 % (n=901)
+|ln(1+24h)| por tamaño (p50 / p75 / p90): 1k-10k 9/20/38 % · 10k-100k 8/17/32 % · ≥100k 10/20/36 % · <1k 10/21/41 %
+
+Domingo 2026-09-13 — top 5 actual (growth_7d): [🔮UPDATE!] +1 Tongue Escape 😛 7d 195.7% (WoW —, real sig. —) | Chained in Backrooms 7d 77% (WoW —, real sig. —) | [UPDATE THE LOCUST] MM2 of The Mon 7d 71.7% (WoW —, real sig. —) | Steal A Brainrot Egg 7d 65.6% (WoW —, real sig. —) | [🎂] item asylum 7d 52.8% (WoW +44.3%, real sig. +12.2%)
+   top 5 WoW: 💀Jump To Steal SCP Monsters!💀 WoW +50.7% (7d 46.8%, real -11.3%) | [🎂] item asylum WoW +44.3% (7d 52.8%, real +12.2%) | 🕹️[Arcade] Youtuber Tycoon! WoW +41.7% (7d 24.4%, real +27.2%) | Lucky Block World WoW +40.2% (7d -6.5%, real -2.4%) | Build a +1 Obby WoW +38.7% (7d 50.9%, real +51.6%)
+   juegos con 7d > 0: 56/143; con WoW > 0: 36; signo distinto: 34
+
+Domingo 2026-09-20 — top 5 actual (growth_7d): 🌳 Lumber Tycoon 2 7d 561.7% (WoW —, real sig. —) | Chained in Backrooms 7d 130.2% (WoW —, real sig. —) | Build to Survive 🛠️  7d 77.7% (WoW +45.7%, real sig. +42.1%) | 🛠️Build and Survive 7d 76.8% (WoW +25.6%, real sig. -5.4%) | Steal an Anime Egg! 7d 55.5% (WoW —, real sig. —)
+   top 5 WoW: YooBroxDD's DOORS RP 👔 WoW +90.0% (7d 24.2%, real —) | [⚙️UPD 6] Anime Dice WoW +58.7% (7d 11%, real +90.5%) | Mansion Tycoon 🌴🏠 WoW +46.8% (7d 46.8%, real +63.0%) | Build to Survive 🛠️  WoW +45.7% (7d 77.7%, real +42.1%) | Riot City 🚨 Prison Escape WoW +32.7% (7d 20.3%, real +58.9%)
+   juegos con 7d > 0: 43/129; con WoW > 0: 25; signo distinto: 24

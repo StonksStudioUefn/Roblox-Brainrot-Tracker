@@ -1,0 +1,13 @@
+actual, 1 muestra/día (D=1)                                salta 2.22 % (194/8736)  sáb 4.1 % dom 5.4 % lab 1.0 %  | precisión vs evento(actual) 16 %, v3 24 % | cobertura actual 80 %, v3 81 %
+actual con horas, D=1.25                                   salta 7.44 % (650/8736)  sáb 17.1 % dom 18.2 % lab 2.4 %  | precisión vs evento(actual) 6 %, v3 9 % | cobertura actual 98 %, v3 98 %
+actual con horas, D=1.4                                    salta 13.04 % (1139/8736)  sáb 28.0 % dom 31.3 % lab 4.8 %  | precisión vs evento(actual) 4 %, v3 5 % | cobertura actual 100 %, v3 100 %
+propuesta: mediana de máximos 7d + mismo día semana ×1.5   salta 1.64 % (143/8736)  sáb 2.6 % dom 3.6 % lab 0.9 %  | precisión vs evento(actual) 22 %, v3 30 % | cobertura actual 80 %, v3 74 %
+propuesta, pero ratio 1.6 + mismo día ×1.5                 salta 2.26 % (197/8736)  sáb 3.5 % dom 4.8 % lab 1.3 %  | precisión vs evento(actual) 19 %, v3 26 % | cobertura actual 95 %, v3 90 %
+{
+  fire: 182,
+  sostenido: 62,
+  vuelve: 81,
+  finde: 133,
+  pctSost: '34',
+  pctVuelve: '45'
+}

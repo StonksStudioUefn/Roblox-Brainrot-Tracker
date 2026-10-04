@@ -1,0 +1,40 @@
+## Índice día de la semana: v / media de su semana (lun–dom), 2436 semanas-juego completas sin eventos
+día | mediana | p10 | p25 | p75 | p90
+lun | 1.000 | 0.811 | 0.905 | 1.092 | 1.193
+mar | 0.955 | 0.769 | 0.858 | 1.014 | 1.092
+mié | 0.940 | 0.776 | 0.858 | 1.000 | 1.053
+jue | 0.944 | 0.783 | 0.869 | 1.000 | 1.059
+vie | 0.984 | 0.859 | 0.922 | 1.042 | 1.120
+sáb | 1.041 | 0.884 | 0.965 | 1.168 | 1.320
+dom | 1.101 | 0.906 | 1.000 | 1.235 | 1.376
+
+### Por tamaño (mediana por día; n semanas)
+<1k (94): lun 0.999 · mar 0.949 · mié 0.927 · jue 0.954 · vie 1.001 · sáb 1.037 · dom 1.103
+1k-10k (1702): lun 1.000 · mar 0.953 · mié 0.937 · jue 0.941 · vie 0.983 · sáb 1.046 · dom 1.101
+10k-100k (561): lun 1.007 · mar 0.964 · mié 0.948 · jue 0.950 · vie 0.980 · sáb 1.029 · dom 1.095
+≥100k (79): lun 0.964 · mar 0.939 · mié 0.944 · jue 0.918 · vie 0.966 · sáb 1.078 · dom 1.159
+
+### Índice por juego (≥ 6 semanas, 168 juegos): sábado/lunes de su índice
+p10 0.89 · p25 0.99 · mediana 1.05 · p75 1.16 · p90 1.24
+  [🔵UPD 4.75💧] Anime Squadron: sáb/lun 0.64 [1.28 1.16 1.02 0.94 0.86 0.82 0.79]
+  [YUTA!] Anime Apocalypse: sáb/lun 0.68 [1.18 1.01 0.90 0.77 0.80 0.81 1.41]
+  [🔥] Anime Expeditions : sáb/lun 0.76 [1.26 1.18 1.05 0.96 0.90 0.95 0.83]
+  ✨Dead Spells✨ [🔩 Steampunk 🔩]: sáb/lun 1.42 [0.91 0.90 0.79 0.78 0.96 1.28 1.10]
+  Cursed Tank Simulator【HOLD THE LINE】: sáb/lun 1.46 [0.87 0.91 0.90 0.85 1.08 1.26 1.17]
+  Build Your Backrooms: sáb/lun 1.57 [0.94 0.84 0.70 0.72 1.04 1.48 1.30]
+  Steal An Egg: sáb/lun 2.01 [0.71 0.84 0.88 0.87 0.99 1.43 1.25]
+
+## Pares consecutivos (v día / v día anterior, sin eventos)
+par | n | mediana | p10 | p25 | p75 | p90 | % > +10 % | % < −7 %
+sáb/vie | 3208 | 1.066 | 0.880 | 0.975 | 1.211 | 1.389 | 43 % | 16 %
+dom/sáb | 3568 | 1.029 | 0.854 | 0.949 | 1.127 | 1.243 | 31 % | 21 %
+lun/dom | 3303 | 0.865 | 0.622 | 0.747 | 0.963 | 1.031 | 5 % | 67 %
+mar/lun | 3103 | 0.953 | 0.787 | 0.878 | 1.016 | 1.110 | 11 % | 42 %
+mié/mar | 3064 | 0.984 | 0.847 | 0.922 | 1.036 | 1.145 | 14 % | 27 %
+jue/mié | 2912 | 1.000 | 0.865 | 0.939 | 1.074 | 1.182 | 19 % | 22 %
+vie/jue | 2844 | 1.032 | 0.902 | 0.971 | 1.133 | 1.282 | 31 % | 15 %
+dom/lun siguiente | 3303 | 1.156 | p10 0.970 | p90 1.609
+
+## Agregado: panel de 41 juegos presentes cada día 2026-08-01–2026-10-01; total / media móvil centrada de 7 días
+lun 0.987 · mar 0.936 · mié 0.901 · jue 0.882 · vie 0.961 · sáb 1.209 · dom 1.273
+Juegos en el CSV por día (mediana 01/08–01/10): lun 178 · mar 169 · mié 156 · jue 143 · vie 170 · sáb 189 · dom 198
