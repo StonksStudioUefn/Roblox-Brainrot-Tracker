@@ -18,6 +18,7 @@
  *   POST /api/admin/import   {table, columns, rows}  (migración, por lotes)
  *   POST /api/admin/rebuild  recalcula state.hist_agg desde daily y lanza un export
  *   POST /api/admin/export   lanza un Workflow que solo regenera el export
+ *   POST /api/admin/backfill {ids?}  copia a samples las lecturas del radar de 48 h (por defecto, de los seguidos)
  *
  * *.workers.dev no pasa por Access: ahí solo responde /api/admin/*; todo lo
  * demás es 404.
@@ -38,7 +39,8 @@ import configSrc from "./config.js" with { type: "text" };
 import metricsSrc from "./metrics.js" with { type: "text" };
 import horrorSrc from "./horror.js" with { type: "text" };
 
-import { getState, getStates, history, importStmt, isoDate, minuteOf, rebuildHistStmt, written } from "./db.js";
+import { getState, getStates, history, importStmt, isoDate, minuteOf, rebuildHistStmt, trackedIds, written } from "./db.js";
+import { backfillFromRadar } from "./sampler.js";
 import { chunks, iconsUrl, thumbsUrl, URLS, UA } from "./sources.js";
 import { espacioD1, withApp } from "./stonks.js";
 
@@ -47,6 +49,7 @@ export { Operaciones } from "./stonks.js";
 
 const MAX_LIVE_IDS = 200;
 const MAX_IMPORT_BYTES = 4_000_000;
+const MAX_BACKFILL_IDS = 400;   // la selección son ~220: con 16 lecturas, 6.400 filas como mucho
 const TYPES = {
   html: "text/html; charset=utf-8",
   json: "application/json; charset=utf-8",
@@ -272,6 +275,16 @@ async function admin(req, env, url) {
     if (action === "export") {
       const inst = await env.SAMPLER.create({ id: `export-${stamp()}`, params: { only: ["export"] } });
       return json({ export_instance: inst.id });
+    }
+    // Para rellenar a mano los huecos de juegos ya seguidos (select solo
+    // rellena los que entran). Solo escribe las muestras que faltan.
+    if (action === "backfill") {
+      const body = await readBody(req);
+      const ids = Array.isArray(body.ids)
+        ? body.ids.map(Number).filter(Number.isSafeInteger)
+        : await trackedIds(env.DB, { selected: true });
+      const out = await backfillFromRadar(env, ids, minuteOf(Date.now()), { maxGames: MAX_BACKFILL_IDS });
+      return json({ ...out, asked: ids.length });
     }
     return json({ error: "No encontrado" }, 404);
   } catch (e) {

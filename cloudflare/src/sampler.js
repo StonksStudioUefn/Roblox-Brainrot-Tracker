@@ -44,7 +44,7 @@ import {
   resolvePlaces,
 } from "./sources.js";
 import {
-  DAY_MIN, addDays, applySelectionStmt, applyVotesStmt, buildExportSlice, closeDayStmt, exportHeader, exportPlan,
+  DAY_MIN, addDays, applySelectionStmt, applyVotesStmt, backfillSamplesStmt, buildExportSlice, closeDayStmt, exportHeader, exportPlan,
   getState, getStates, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs, lowSinceStmts,
   mergeHistStmt, minuteOf, pruneOldStmts, pruneOrphansStmt, pruneSamplesStmt, radarCloseStmt, radarCounts, radarPlayers,
   radarSlice, retrackPlacesStmt, setState, setStateStmt, sortHitsStmt, trackedIds, unknownPlaces,
@@ -72,6 +72,11 @@ export const RADAR_KEEP_DAYS = 7;            // días de ficheros del radar en R
 export const RADAR_MIN_PLAYERS = 150;        // lecturas desde aquí (un bajón nocturno no deja huecos)
 export const RADAR_DAYS = 14;                // filas diarias por juego para elegir los seguidos
 export const SELECT_SLICE = 250;             // juegos del radar por paso de select (en frío ≈ 5 ms)
+// Un juego que entra en la selección no tiene muestras de antes: se le copian
+// las lecturas del radar de las 48 h que enseña su ficha
+export const BACKFILL_HOURS = 48;
+export const BACKFILL_FILES = 16;            // 48 h con el radar cada 3 h: tope de lecturas de R2 por paso
+export const BACKFILL_MAX_GAMES = 150;       // tope de escrituras: 150 × 16 = 2.400 filas (y otras tantas al podarlas)
 
 // Peticiones externas: el plan gratis da 50 por invocación. Se deja margen.
 export const INVOCATION_BUDGET = 46;
@@ -615,7 +620,7 @@ export async function runSelect(env, step, nowMs, today, safe, summary) {
       return null;
     }
   }
-  return await safe("select-apply", async () => {
+  const applied = await safe("select-apply", async () => {
     const { ids, counts } = chooseSelection(rows);
     if (!ids.length) throw new Error("La selección ha salido vacía");
     const res = await db.batch([
@@ -623,8 +628,46 @@ export async function runSelect(env, step, nowMs, today, safe, summary) {
       setStateStmt(db, "sel_day", today),
       setStateStmt(db, "selection", { day: today, ...counts }),
     ]);
-    return { ...counts, changed: res[0]?.meta?.changes ?? 0, written: written(res) };
+    // Los que entran, con más jugadores primero (por si pasan de BACKFILL_MAX_GAMES)
+    const was = new Map(rows.map(r => [r[0], r]));
+    const added = ids.filter(id => !was.get(id)?.[2]).sort((a, b) => (was.get(b)?.[3] ?? 0) - (was.get(a)?.[3] ?? 0));
+    return { stats: { ...counts, added: added.length, changed: res[0]?.meta?.changes ?? 0, written: written(res) }, added };
   });
+  if (!applied) return null;
+  if (applied.added.length) {
+    await safe("select-backfill", () => backfillFromRadar(env, applied.added, minuteOf(nowMs)));
+  }
+  return applied.stats;
+}
+
+/**
+ * Copia a `samples` las lecturas del radar de las últimas BACKFILL_HOURS de
+ * `ids` (en ese orden, como mucho `maxGames`), cada una en el ts de su
+ * fichero, sin pisar las muestras que ya hay. Lo usan `select` con los juegos
+ * que entran y /api/admin/backfill. Como mucho BACKFILL_FILES lecturas de R2.
+ * Quien lleve agregados de `samples` tiene que saber que estas filas llegan
+ * con ts del pasado (de días ya cerrados y del día abierto).
+ */
+export async function backfillFromRadar(env, ids, nowTs, { maxGames = BACKFILL_MAX_GAMES } = {}) {
+  const games = ids.slice(0, maxGames);
+  if (!games.length) return { games: 0, files: 0, written: 0 };
+  const from = nowTs - BACKFILL_HOURS * 60;
+  const files = [];
+  for (let d = isoDate(from); d <= isoDate(nowTs); d = addDays(d, 1)) {
+    const listed = await env.BUCKET.list({ prefix: `${RADAR_PREFIX}${d}/` });
+    for (const o of listed.objects) {
+      const ts = Number(o.key.slice(o.key.lastIndexOf("/") + 1, -".json".length));
+      if (ts > from && ts <= nowTs) files.push([ts, o.key]);
+    }
+  }
+  files.sort((a, b) => a[0] - b[0]);
+  const texts = await Promise.all(files.slice(-BACKFILL_FILES).map(async ([ts, key]) => {
+    const obj = await env.BUCKET.get(key);
+    return obj ? [ts, await obj.text()] : null;
+  }));
+  const stmts = texts.filter(Boolean).map(([ts, text]) => backfillSamplesStmt(env.DB, text, ts, games));
+  const res = stmts.length ? await env.DB.batch(stmts) : [];
+  return { games: games.length, files: stmts.length, written: written(res) };
 }
 
 /**
