@@ -1,0 +1,32 @@
+2026-08-07 vie mediana 0.99 ≥1.6x: 13 / 170
+2026-08-09 dom mediana 1.07 ≥1.6x: 10 / 188
+2026-08-16 dom mediana 1.13 ≥1.6x: 2 / 180
+2026-08-23 dom mediana 1.15 ≥1.6x: 3 / 186
+2026-08-28 vie mediana 0.89 ≥1.6x: 3 / 165
+2026-08-29 sáb mediana 1.26 ≥1.6x: 23 / 184
+2026-08-30 dom mediana 1.33 ≥1.6x: 30 / 178
+2026-09-03 jue mediana 0.89 ≥1.6x: 0 / 146
+2026-09-05 sáb mediana 1.21 ≥1.6x: 12 / 167
+2026-09-06 dom mediana 1.24 ≥1.6x: 19 / 170
+2026-09-08 mar mediana 0.82 ≥1.6x: 0 / 137
+2026-09-09 mié mediana 0.87 ≥1.6x: 0 / 142
+2026-09-10 jue mediana 0.81 ≥1.6x: 1 / 142
+2026-09-12 sáb mediana 1.32 ≥1.6x: 36 / 162
+2026-09-13 dom mediana 1.42 ≥1.6x: 48 / 158
+2026-09-15 mar mediana 0.87 ≥1.6x: 0 / 139
+2026-09-17 jue mediana 0.90 ≥1.6x: 1 / 138
+2026-09-19 sáb mediana 1.32 ≥1.6x: 42 / 161
+2026-09-20 dom mediana 1.37 ≥1.6x: 47 / 153
+2026-09-22 mar mediana 0.87 ≥1.6x: 1 / 135
+2026-09-23 mié mediana 0.86 ≥1.6x: 0 / 131
+2026-09-24 jue mediana 0.87 ≥1.6x: 0 / 136
+2026-09-26 sáb mediana 1.48 ≥1.6x: 43 / 126
+2026-09-27 dom mediana 1.48 ≥1.6x: 44 / 126
+índice día de semana (v / mediana de su semana), mediana y p90 entre juego-semanas:
+lun 1.00 p90 1.23 n 2477
+mar 0.99 p90 1.11 n 2477
+mié 0.97 p90 1.06 n 2477
+jue 0.98 p90 1.05 n 2477
+vie 1.00 p90 1.17 n 2477
+sáb 1.04 p90 1.45 n 2477
+dom 1.11 p90 1.51 n 2477

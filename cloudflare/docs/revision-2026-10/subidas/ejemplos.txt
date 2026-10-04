@@ -1,0 +1,40 @@
+Ciclos "sube sáb/dom → baja lun" (estado actual) con la propuesta sin cambiar: total 86 en 61 juegos
+  [GUILDS] Anime Astral Simulator: 4 veces
+  Fisch 🐟 [RACING]: 3 veces
+  ⛏️Dig to Escape: 3 veces
+  The Curse [HORROR]: 3 veces
+  Protect The House From Monsters: 3 veces
+  [🌊] Escape Tsunami For Brainrots!: 2 veces
+
+### [GUILDS] Anime Astral Simulator (10502841145)
+fecha | jugadores | actual (24h / 7d / tend) | propuesta (WoW / mismo día sem. pasada)
+jue 09-17 | 15774 | down (-11.8% / -7.4% / -1.4%) | flat (-9.3% / -13.5%)
+vie 09-18 | 14064 | down (-10.8% / -11.5% / -2.8%) | flat (-10.0% / -17.0%)
+sáb 09-19 | 13428 | down (-4.5% / -21.2% / -4.8%) | flat (-10.9% / -21.2%)
+dom 09-20 | 18800 | down (40% / -14.7% / -4.8%) | flat (-11.9% / -10.5%)
+lun 09-21 | 15027 | down2 (-20.1% / -11% / -2.5%) | flat (-12.3% / -13.6%)
+mar 09-22 | 13272 | down (-11.7% / -12.4% / -2.5%) | down (-13.8% / -13.6%)
+mié 09-23 | 15791 | flat (19% / -11.5% / -1.6%) | down (-14.3% / -11.7%)
+jue 09-24 | 13688 | down (-13.3% / -9.6% / -0.8%) | down (-14.2% / -13.2%)
+
+### Fisch 🐟 [RACING] (5750914919)
+fecha | jugadores | actual (24h / 7d / tend) | propuesta (WoW / mismo día sem. pasada)
+jue 09-17 | 77357 | down (-3.3% / -16.3% / -4%) | flat (-5.2% / -14.6%)
+vie 09-18 | 81520 | down (5.4% / -22.6% / -4.4%) | flat (-11.9% / -18.2%)
+sáb 09-19 | 110775 | down (35.9% / -18.6% / -3.4%) | down (-17.3% / -11.0%)
+dom 09-20 | 117576 | flat (6.1% / -6% / -0.8%) | down (-16.6% / -7.4%)
+lun 09-21 | 83994 | down (-28.6% / -1.5% / 1%) | down (-12.4% / -5.1%)
+mar 09-22 | 76460 | down (-9% / -2% / 0.6%) | flat (-11.7% / -7.6%)
+mié 09-23 | 75054 | flat (-1.8% / -4.5% / -0.6%) | flat (-10.2% / -6.2%)
+jue 09-24 | 74326 | flat (-1% / -6.4% / -1.6%) | flat (-8.8% / -3.9%)
+
+### ⛏️Dig to Escape (9145063979)
+fecha | jugadores | actual (24h / 7d / tend) | propuesta (WoW / mismo día sem. pasada)
+jue 09-17 | 6098 | down (18.9% / -16.9% / -3.8%) | flat (-12.2% / -6.7%)
+vie 09-18 | 8522 | down (39.8% / -9.7% / -3.9%) | flat (-10.8% / +12.2%)
+sáb 09-19 | 8143 | flat (-4.4% / -9.4% / -1.6%) | flat (-10.7% / -5.1%)
+dom 09-20 | 8152 | flat (0.1% / 0.6% / 2.9%) | down (-14.4% / -24.4%)
+lun 09-21 | 5220 | flat (-36% / -9.5% / 2.9%) | down (-10.8% / -12.1%)
+mar 09-22 | 6000 | up (14.9% / -8.6% / -0.1%) | flat (-9.3% / -6.2%)
+mié 09-23 | 5515 | down (-8.1% / -5.3% / -1%) | flat (-5.9% / +7.5%)
+jue 09-24 | 6845 | down (24.1% / -6.4% / -3.5%) | flat (-3.4% / +12.2%)
