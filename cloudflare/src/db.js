@@ -314,6 +314,23 @@ export function insertSamplesStmt(db, rows, ts) {
 }
 
 /**
+ * Relleno de muestras con una lectura del radar: `text` es el fichero
+ * radar/<día>/<ts>.json tal cual ({universe_id: jugadores}); lo desmonta
+ * SQLite, porque parsear en el Worker los 16 ficheros de 48 h (~40 KB cada
+ * uno) se comería los 10 ms del paso. Solo `ids` y, como en el muestreo,
+ * desde TRACK_MIN_PLAYERS. Sin visitas: el radar no las tiene (el export y
+ * el cierre toman el máximo, que ignora los NULL). OR IGNORE: una muestra que
+ * ya existe nunca se pisa, y repetirlo no escribe nada.
+ */
+export function backfillSamplesStmt(db, text, ts, ids) {
+  return db.prepare(
+    `INSERT OR IGNORE INTO samples (universe_id, ts, playing, visits)
+     SELECT CAST(r.key AS INTEGER), ?2, r.value, NULL FROM json_each(?1) r
+     WHERE r.value >= ?4 AND CAST(r.key AS INTEGER) IN (SELECT value FROM json_each(?3))`,
+  ).bind(text, ts, JSON.stringify(ids), TRACK_MIN_PLAYERS);
+}
+
+/**
  * low_since: [[universe_id, playing], …]. Marca la fecha en que bajan de
  * TRACK_MIN_PLAYERS y la borra cuando vuelven a subir (solo escribe cambios).
  */

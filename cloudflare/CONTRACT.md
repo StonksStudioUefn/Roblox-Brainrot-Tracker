@@ -230,7 +230,8 @@ El dashboard calcula los días de evento con `flagEvents`.
 (Admin: `POST /api/admin/run` `{daily?, skip?, only?, telegram_force?, now?}`, `GET /api/admin/status?id=&counts=1`
 (filas del desglose de `espacio()`; `counts=exacto` las cuenta recorriendo las tablas), `GET /api/admin/espacio[?exacto=1]`,
 `POST /api/admin/import` `{table, columns, rows}`, `POST /api/admin/rebuild` (recalcula `hist_agg` y lanza un
-export), `POST /api/admin/export` (lanza un Workflow solo de export). El esquema se aplica con
+export), `POST /api/admin/export` (lanza un Workflow solo de export), `POST /api/admin/backfill` `{ids?}`
+(muestras desde el radar de 48 h; ver «Radar y juegos seguidos»). El esquema se aplica con
 `wrangler d1 execute`, no por la API.)
 
 - `GET /` → `public/dashboard.html` (R2 `site/dashboard.html`); `/favicon.svg`.
@@ -330,6 +331,17 @@ Se pasa de muestrear todo el catálogo (~2.500 juegos) a un **radar** de todo y
   añade `radar_games` y `selected_games`. `buildDashboard` añade `categories.*.top`
   (10 primeros por jugadores) y las dos categorías bajan `min_players` a 300.
 - Admin: `POST /api/admin/run {"only":["select"],"select":true}` rehace la selección.
+- Relleno de los que entran (`select-backfill`, `backfillFromRadar` de `sampler.js` +
+  `backfillSamplesStmt` de `db.js`): un juego que pasa de `sel = 0` a 1 no tiene muestras
+  de antes, y la vista «Día» de su ficha salía vacía hasta 24 h después. Se copian a
+  `samples` las lecturas del radar de las últimas 48 h (como mucho 16 ficheros de R2) en el
+  ts de cada fichero, con `visits` NULL (el radar no las tiene), desde TRACK_MIN_PLAYERS y
+  con `INSERT OR IGNORE` (nunca pisa una muestra). Tope de 150 juegos (los de más
+  jugadores): ≤ 2.400 filas al día, y otras tantas al podarlas. Esas filas llegan con ts
+  del pasado (días ya cerrados y el día abierto): quien mantenga agregados de `samples`
+  tiene que contarlas. Solo cubre los juegos que salen en el radar (Rolimons + `places`).
+  `POST /api/admin/backfill {ids?}` hace lo mismo a mano (por defecto, con todos los
+  seguidos; solo escribe las muestras que faltan).
 
 ## Cada hora y un año de datos (03/10/2026)
 
