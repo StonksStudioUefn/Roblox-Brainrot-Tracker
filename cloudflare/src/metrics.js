@@ -175,23 +175,28 @@ const pyIso = ms => new Date(ms).toISOString().slice(0, 19) + '+00:00';
 
 // ─── Series y eventos ─────────────────────────────────────────────────────────
 /**
- * Port de analytics.flag_events: marca días de evento (picos que se salen de
- * su entorno y luego bajan). Compara con los días de antes Y de después,
- * descuenta el día de la semana (mismo día de hace 7 y 14 días) y nunca marca
- * el último día. `values`: medianas diarias; `dates`: "AAAA-MM-DD" ascendente.
+ * Marca días de evento (picos que se salen de su entorno y luego bajan).
+ * Compara con los días de antes Y de después, descuenta el día de la semana
+ * (mismo día de hace 7 y 14 días) y nunca marca el último día.
+ * `values`: medianas diarias; `dates`: "AAAA-MM-DD" ascendente.
  */
 export function flagEvents(values, dates) {
-  return flagCore(values, null, dates);
+  return flagCore(values, dates.map(dayNum));
 }
 
-// `rows` (filas del export, fecha en [0]) o `dates`: así gameMetrics no copia las fechas
-function flagCore(values, rows, dates) {
-  const n = values.length, w = Math.floor(EVENTS.window_days / 2);
+/**
+ * `dn`: nº de día de cada valor. Los vecinos son los 3 de cada lado que estén
+ * a 7 días o menos: con huecos, un juego no se compara con días de hace meses.
+ */
+function flagCore(values, dn) {
+  const n = values.length, w = Math.floor(EVENTS.window_days / 2), gap = EVENTS.window_days;
   const minRatio = EVENTS.min_ratio, madK = EVENTS.mad_k;
   const flags = new Array(n).fill(false);
   const b = bufFor(2 * w + 2);
   for (let i = 0; i < n; i++) {
-    const lo = Math.max(0, i - w), hi = Math.min(n, i + 1 + w);
+    let lo = Math.max(0, i - w), hi = Math.min(n, i + 1 + w);
+    while (lo < i && dn[i] - dn[lo] > gap) lo++;
+    while (hi > i + 1 && dn[hi - 1] - dn[i] > gap) hi--;
     const nb = i - lo, na = hi - i - 1;
     if (nb < 2 || na === 0) continue;
     const base = Math.max(medianRange(values, lo, i), medianRange(values, i + 1, hi));
@@ -204,13 +209,11 @@ function flagCore(values, rows, dates) {
     const mad = Math.max(medianBuf(b, k) * 1.4826, m * 0.05);
     if (!((v - base) > madK * mad)) continue;
     // ¿Se explica por el día de la semana?
-    const d = dayNum(rows ? rows[i][0] : dates[i]);
     let maxSame = null;
     for (const back of [7, 14]) {
-      const target = d - back;
-      // dict(zip(dates, values)): si una fecha se repite, gana la última
-      for (let j = n - 1; j >= 0; j--) {
-        if (dayNum(rows ? rows[j][0] : dates[j]) === target) {
+      const target = dn[i] - back;
+      for (let j = i - 1; j >= 0 && dn[j] >= target; j--) {
+        if (dn[j] === target) {
           const x = values[j];
           if (x && (maxSame === null || x > maxSame)) maxSame = x;
           break;
@@ -222,14 +225,15 @@ function flagCore(values, rows, dates) {
   return flags;
 }
 
-const TX = new Float64Array(8), TY = new Float64Array(8), LAST8 = new Float64Array(8), BASE7 = new Float64Array(8);
+const TX = new Float64Array(8), TY = new Float64Array(8), LAST8 = new Float64Array(8), LAST8X = new Float64Array(8);
+const MAX7 = new Float64Array(8), SAME = new Float64Array(4);
 
-/** analytics.theil_sen_daily_growth sobre vals[0..k) (k ≤ 8): crecimiento diario típico (%). */
-function theilSen(vals, k) {
+/** Crecimiento diario típico (%) por Theil–Sen sobre vals[0..k) en los días xs[0..k) (k ≤ 8). */
+function theilSen(vals, xs, k) {
   let n = 0;
   for (let i = 0; i < k; i++) {
     const v = vals[i];
-    if (v && v > 0) { TX[n] = i; TY[n] = Math.log(v); n++; }
+    if (v && v > 0) { TX[n] = xs[i]; TY[n] = Math.log(v); n++; }
   }
   if (n < 4) return null;
   const b = bufFor(n * (n - 1) / 2);
@@ -239,13 +243,18 @@ function theilSen(vals, k) {
 }
 
 // ─── Métricas por juego ───────────────────────────────────────────────────────
-// Port de analytics.game_metrics. `g` es un juego del export.
+// `g` es un juego del export. Las ventanas van por FECHA, contadas hacia atrás
+// desde ayer (el último día cerrado): el día de hoy está a medias y solo cuenta
+// para «ahora» y las 24 h (por las muestras).
 function gameMetrics(g, ctx) {
   const d = g.d || [], s = g.s || [];
   const n = d.length;
-  const values = new Array(n);
-  for (let i = 0; i < n; i++) values[i] = d[i][1];
-  const events = flagCore(values, d, null);
+  const values = new Array(n), dn = new Array(n);
+  for (let i = 0; i < n; i++) { values[i] = d[i][1]; dn[i] = dayNum(d[i][0]); }
+  const events = flagCore(values, dn);
+  let nc = n;                                       // filas de días cerrados: [0, nc)
+  while (nc > 0 && dn[nc - 1] >= ctx.today) nc--;
+  const D = ctx.today - 1;                          // ayer: el último día cerrado
 
   // Muestras (ascendentes según el contrato)
   const ns = s.length;
@@ -258,46 +267,61 @@ function gameMetrics(g, ctx) {
   let n24 = 0;
   for (let i = 0; i < ns; i++) { const t = s[i][0]; if (t >= ref - 1440 && t < ref + 1) b[n24++] = s[i][1]; }
   let typical = n24 ? medianBuf(b, n24) : null;
-  if (n24 < 2) typical = n ? values[n - 1] : nowPlayers;
+  // Sin muestras: el último día cerrado (o el de hoy si no hay otro)
+  const tIdx = nc ? nc - 1 : n - 1;
+  if (n24 < 2) typical = n ? values[tIdx] : nowPlayers;
   let nprev = 0;
   for (let i = 0; i < ns; i++) { const t = s[i][0]; if (t >= ref - 2880 && t < ref - 1440) b[nprev++] = s[i][1]; }
   let prev = nprev ? medianBuf(b, nprev) : null;
   if (nprev < 2) {
     prev = null;
-    // sin muestras de ayer: el último día "limpio" anterior
-    for (let i = n - 2; i >= 0; i--) if (!events[i]) { prev = values[i]; break; }
+    // sin muestras de ayer: el último día "limpio" cerrado anterior al que da el típico (≤ 7 días antes)
+    const from = n24 < 2 ? tIdx - 1 : nc - 1;
+    const anchor = n24 < 2 && tIdx >= 0 ? dn[tIdx] : D + 1;
+    for (let i = from; i >= 0 && anchor - dn[i] <= 7; i--) if (!events[i]) { prev = values[i]; break; }
   }
   const growth24 = pct(typical, prev);
 
-  // Una pasada hacia atrás por la serie (k = 1 es el último día):
-  //   last7 = values[-7:], recent3 = values[-3:], week_ago = values[-10:-6] y
-  //   values[-8:] para la tendencia, todos sin días de evento; clean[-8:-1]
-  //   para el pico; días de evento de los últimos 30; las 2 últimas visitas.
+  // Una pasada hacia atrás por los días cerrados; k = D − día + 1 (1 = ayer):
+  //   7 días = k 1..7, recent3 = k 1..3, week_ago = k 7..10 y k 1..8 para la
+  //   tendencia, todos sin días de evento; los máximos de k 1..7 y del mismo
+  //   día de la semana de hace 1-3 semanas para el pico; días de evento de los
+  //   últimos 30; las 2 últimas visitas (en todas las filas).
   let sum7 = 0, c7 = 0, sum3 = 0, c3 = 0, sumW = 0, cW = 0, evDays = 0;
-  let nc = 0, n8 = 0, nb7 = 0, vz = -1, va = -1;
+  let n8 = 0, nmax = 0, nsame = 0, vz = -1, va = -1;
   for (let i = n - 1; i >= 0; i--) {
-    const k = n - i;
+    if (va < 0 && d[i][5]) { if (vz < 0) vz = i; else va = i; }
+    if (i >= nc) continue;
+    const k = D - dn[i] + 1;
+    if (k > 30 && va >= 0) break;
     if (events[i]) {
       if (k <= EVENT_DAYS_WINDOW) evDays++;
-    } else {
-      const v = values[i];
-      if (k <= 7) { sum7 += v; c7++; }
-      if (k <= 3) { sum3 += v; c3++; }
-      if (k >= 7 && k <= 10) { sumW += v; cW++; }
-      if (k <= 8) LAST8[n8++] = v;
-      nc++;
-      if (nc >= 2 && nc <= 8) BASE7[nb7++] = v;
+      continue;
     }
-    if (va < 0 && d[i][5]) { if (vz < 0) vz = i; else va = i; }
+    const v = values[i];
+    if (k <= 7) { sum7 += v; c7++; MAX7[nmax++] = d[i][3] ?? v; }
+    if (k <= 3) { sum3 += v; c3++; }
+    if (k >= 7 && k <= 10) { sumW += v; cW++; }
+    if (k <= 8) { LAST8[n8] = v; LAST8X[n8] = dn[i]; n8++; }
+    const back = ctx.today - dn[i];
+    if (back % 7 === 0 && back <= 21 && nsame < 3) SAME[nsame++] = d[i][3] ?? v;
   }
   const avg7 = c7 ? pyRound0(sum7 / c7) : typical;
   const growth7 = c3 && cW ? pct(sum3 / c3, sumW / cW) : null;
-  for (let a = 0, z = n8 - 1; a < z; a++, z--) { const t = LAST8[a]; LAST8[a] = LAST8[z]; LAST8[z] = t; }
-  const trend = theilSen(LAST8, n8);
+  for (let a = 0, z = n8 - 1; a < z; a++, z--) {
+    let t = LAST8[a]; LAST8[a] = LAST8[z]; LAST8[z] = t;
+    t = LAST8X[a]; LAST8X[a] = LAST8X[z]; LAST8X[z] = t;
+  }
+  const trend = theilSen(LAST8, LAST8X, n8);
 
-  // Pico ahora: última muestra ≥ 1,8 × la mediana de los 7 días limpios anteriores
-  const base7 = nc >= 4 ? medianBuf(BASE7, nb7) : null;
-  const spikeNow = !!(base7 && nowPlayers >= base7 * EVENTS.spike_now_ratio);
+  // Pico ahora: la última muestra frente a los MÁXIMOS diarios (con muestras
+  // cada hora la mediana del día queda por debajo del pico de la tarde) de los
+  // 7 días limpios anteriores y, si los hay, del mismo día de la semana de
+  // hace 1-3 semanas.
+  const baseMax = nmax >= 4 ? medianBuf(MAX7, nmax) : null;
+  const sameMax = nsame ? medianBuf(SAME, nsame) : null;
+  const spikeNow = !!(baseMax && nowPlayers >= baseMax * EVENTS.spike_now_ratio
+    && (sameMax === null || nowPlayers >= sameMax * EVENTS.spike_weekday_ratio));
 
   // Visitas: actuales y ganadas en el último día
   const visits = vz >= 0 ? d[vz][5] : null;
@@ -314,7 +338,7 @@ function gameMetrics(g, ctx) {
     }
   }
   if (visitsDay === null && va >= 0) {
-    const gap = (dayNum(d[vz][0]) - dayNum(d[va][0])) || 1;
+    const gap = (dn[vz] - dn[va]) || 1;
     visitsDay = pyRound0((d[vz][5] - d[va][5]) / gap);
   }
   if (visitsDay !== null && visitsDay < 0) visitsDay = null;
@@ -324,7 +348,7 @@ function gameMetrics(g, ctx) {
   const likeRatio = up !== null && down !== null && up + down > 0 ? pyRound(up * 100 / (up + down), 1) : null;
 
   const created = isoUs(g.created), updated = isoUs(g.updated), firstSeen = isoUs(g.first_seen);
-  let seen = g.first_day ? dayNum(g.first_day) : (n ? dayNum(d[0][0]) : null);
+  let seen = g.first_day ? dayNum(g.first_day) : (n ? dn[0] : null);
   if (firstSeen !== null) {
     const fs = Math.floor(firstSeen / DAY_US);
     if (seen === null || fs < seen) seen = fs;
@@ -485,6 +509,29 @@ function radarCtx(now) {
   return RADAR_CTX;
 }
 
+/**
+ * Las cifras de cada juego que necesita el prefiltro de Telegram (telegram.js
+ * quickRows), calculadas con las MISMAS funciones que buildDashboard: así los
+ * candidatos y el dashboard no pueden separarse. → [{ g, m, em }] (activos).
+ */
+export function quickMetrics(games, { now } = {}) {
+  const ctx = radarCtx(now);
+  const out = [];
+  for (const g of games || []) {
+    const d = g.d;
+    if (!d || !d.length || d[d.length - 1][0] < ctx.activeCut) continue;
+    const m = gameMetrics(g, ctx);
+    m.status = status(m);
+    m.momentum = momentumScore(m);
+    out.push({ g, m, em: emerging(m, g.sorts) });
+  }
+  return out;
+}
+
+/** «En tendencia»: subiendo de forma sostenida, sin ser solo un pico. */
+export const isRising = m => (m.status === 'hot' || m.status === 'up') && (m.trend === null || m.trend > 0)
+  && !(m.spike_now && (m.trend || 0) < 5);
+
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 /**
  * Port de export_dashboard.build() sobre el export de Cloudflare.
@@ -524,8 +571,7 @@ export function buildDashboard(exportData, { now } = {}) {
     const emerg = list.filter(x => belongs(x) && x.em);
     emerg.sort((a, b) => (b.em[0] - a.em[0]) || byOrder(a, b));
     emerg.length = Math.min(emerg.length, EMERGING.max_results);
-    const rising = ({ m }) => (m.status === 'hot' || m.status === 'up') && (m.trend === null || m.trend > 0)
-      && !(m.spike_now && (m.trend || 0) < 5);
+    const rising = ({ m }) => isRising(m);
     const trending = ids.filter(rising).sort((a, b) => b.m.momentum - a.m.momentum).slice(0, TRENDING_MAX);
     let players = 0, up = 0, down = 0, events = 0, new7 = 0;
     for (const { m } of ids) {

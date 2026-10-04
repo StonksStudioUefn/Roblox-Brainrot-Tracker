@@ -56,9 +56,11 @@ Toda la configuración está en **`cloudflare/src/config.js`**: umbrales, catego
 | **Valor del día** | Mediana de las ~24 muestras del día. Un pico de una hora no mueve el día. |
 | **Días de evento** | Días muy por encima de su entorno (filtro de Hampel) **que luego vuelven a bajar**, descontando el efecto fin de semana (se comparan con el mismo día de la semana anterior). No cuentan para las medias. Si el salto se mantiene es crecimiento real y no se marca. |
 | **24h** | Mediana de las últimas 24 h frente a la de las 24 h anteriores. |
-| **7d** | Media de los 3 últimos días frente a la de hace una semana, sin días de evento. |
-| **Tendencia/día** | Pendiente de Theil–Sen sobre los últimos 8 días limpios. Es robusta: un valor raro no la arrastra. |
-| **🎉 Pico ahora** | La última muestra supera 1,8× lo normal: probablemente hay un evento o un update. |
+| **7d** | Media de los 3 últimos días cerrados frente a la de los días 7 a 10 atrás, por fecha y sin días de evento. |
+| **Tendencia/día** | Pendiente de Theil–Sen sobre los últimos 8 días cerrados y limpios, con la fecha real de cada día. Es robusta: un valor raro no la arrastra. |
+
+Todas las ventanas van **por fecha**: si un juego tiene huecos, no se compara con días de hace semanas. Y solo cuentan **días cerrados**: el de hoy está a medias y solo entra en «ahora» y en las 24 h.
+| **🎉 Pico ahora** | La última muestra supera 1,8× el máximo típico de los últimos 7 días limpios y 1,5× el máximo del mismo día de la semana de hace 1–3 semanas: probablemente hay un evento o un update. Se compara con el máximo diario porque, con una muestra cada hora, la mediana del día queda por debajo del pico de la tarde. |
 | **Visitas/día** | Visitas ganadas en las últimas ~24 h. |
 
 ## Emergentes 🌱

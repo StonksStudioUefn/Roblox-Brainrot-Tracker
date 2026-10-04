@@ -31,8 +31,8 @@
  * console.log y cuenta como enviado (igual que notifier.py), para no repetir.
  */
 
-import { CATEGORIES, EMERGING, EVENTS, SCAN_START, TELEGRAM } from "./config.js";
-import { buildDashboard as metricsBuildDashboard, flagEvents, ROBLOX_SORT_POINTS } from "./metrics.js";
+import { CATEGORIES, EMERGING, TELEGRAM } from "./config.js";
+import { buildDashboard as metricsBuildDashboard, isRising, quickMetrics } from "./metrics.js";
 import { pyLen, pyRstrip } from "./horror.js";
 
 export const TELEGRAM_MAX_FETCH = 50;
@@ -242,325 +242,36 @@ export function isoWeek(now) {
 // Márgenes: se pasan más juegos de los que caben en los mensajes, por si el
 // cálculo reducido y el completo difieren en algún borde.
 const PICK = {
-  emerging_margin: 10,     // puntos por debajo de EMERGING.min_score que aún se pasan
-  emerging_top: 30,        // los N mejores emergentes (estimados) de cada categoría
+  emerging_top: 30,        // los N mejores emergentes de cada categoría (EMERGING.max_results + margen)
   trending_top: 18,        // en tendencia: TRENDING_MAX (12) + margen, por categoría
   weekly_up: 8,            // semanal: se muestran 5 y 3
   weekly_down: 6,
 };
 
-/** round(x) de Python (empate al par). */
-function pyRound0(x) {
-  const f = Math.floor(x), d = x - f;
-  if (d < 0.5) return f;
-  if (d > 0.5) return f + 1;
-  return f % 2 === 0 ? f : f + 1;
-}
-/** round(x, nd) de Python (mismo criterio que metrics.js). */
-function pyRound(x, nd) {
-  const p = 10 ** nd, y = x * p;
-  const f = Math.floor(y), d = y - f;
-  if (Math.abs(d - 0.5) > 1e-6 && Math.abs(y) < 1e9) return (d < 0.5 ? f : f + 1) / p;
-  const q = x * 2 ** (nd + 1);
-  if (Number.isInteger(q) && q % 2 !== 0) return (f % 2 === 0 ? f : f + 1) / p;
-  return Number(x.toFixed(nd));
-}
-const pctNum = (nw, old) => (nw === null || !old ? null : pyRound((nw - old) * 100 / old, 1));
-const clip = (x, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, x));
-
-let BUF = new Float64Array(64);
-function median(n) {           // mediana de BUF[0..n)
-  const b = BUF;
-  for (let i = 1; i < n; i++) {
-    const v = b[i];
-    let j = i - 1;
-    while (j >= 0 && b[j] > v) { b[j + 1] = b[j]; j--; }
-    b[j + 1] = v;
-  }
-  const k = n >> 1;
-  return n % 2 ? b[k] : (b[k - 1] + b[k]) / 2;
-}
-function buf(n) {
-  if (BUF.length < n) BUF = new Float64Array(Math.max(n, BUF.length * 2));
-  return BUF;
-}
-
-const ISO_RE = /^(\d{4})-(\d\d)-(\d\d)(?:[T ](\d\d):(\d\d)(?::(\d\d)(?:[.,](\d{1,3}))?\d*)?)?/;
-function isoMs(s) {
-  const m = s ? ISO_RE.exec(s) : null;
-  if (!m) return null;
-  const ms = Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0),
-    m[7] ? +(m[7] + "00").slice(0, 3) : 0);
-  return Number.isNaN(ms) ? null : ms;
-}
-const dayNum = s => Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10)) / DAY_MS;
-
-function status(g24, t) {
-  if (g24 === null && t === null) return "new";
-  const g = g24 || 0;
-  if ((t !== null && t >= 15) || (g >= 30 && (t === null || t >= 0))) return "hot";
-  if ((t !== null && t >= 5) || (g >= 10 && (t === null || t >= -1))) return "up";
-  if ((t !== null && t <= -8) || (g <= -20 && (t === null || t <= 0))) return "down2";
-  if ((t !== null && t <= -3) || (g <= -7 && (t === null || t <= 1))) return "down";
-  return "flat";
-}
-
-const LOG_SIZE = Math.log10(1_000_000 / 300), LOG30 = Math.log10(30);
-
-// Búferes reutilizados: en frío (isolate recién creado) la basura y las
-// llamadas pesan mucho más que en caliente.
-const VALS = new Float64Array(64), CLEAN = new Float64Array(64), EV = new Uint8Array(64);
-const SM = new Float64Array(8);
-let LOGX = new Float64Array(8), LOGY = new Float64Array(8);
-const TAIL = 11;   // días del final cuyos eventos importan (g7 mira 10, la tendencia 8)
-
-/** Mediana de arr[lo..hi) (n ≤ 8) sin tocar arr. */
-function smallMedian(arr, lo, hi) {
-  const n = hi - lo;
-  for (let i = 0; i < n; i++) {
-    const v = arr[lo + i];
-    let j = i - 1;
-    while (j >= 0 && SM[j] > v) { SM[j + 1] = SM[j]; j--; }
-    SM[j + 1] = v;
-  }
-  const k = n >> 1;
-  return n % 2 ? SM[k] : (SM[k - 1] + SM[k]) / 2;
-}
-
-/** analytics.flag_events para el día i (VALS[0..n), fechas en d[off + i][0]). */
-function isEvent(i, n, d, off) {
-  const w = EVENTS.window_days >> 1;
-  const lo = Math.max(0, i - w), hi = Math.min(n, i + 1 + w);
-  if (i - lo < 2 || hi - i - 1 === 0) return false;
-  const base = Math.max(smallMedian(VALS, lo, i), smallMedian(VALS, i + 1, hi));
-  const v = VALS[i];
-  if (!(v > base * EVENTS.min_ratio)) return false;
-  const nb = new Float64Array(8);
-  let k = 0;
-  for (let j = lo; j < hi; j++) if (j !== i) nb[k++] = VALS[j];
-  const m = smallMedian(nb, 0, k);
-  for (let j = 0; j < k; j++) nb[j] = Math.abs(nb[j] - m);
-  const mad = Math.max(smallMedian(nb, 0, k) * 1.4826, m * 0.05);
-  if (!((v - base) > EVENTS.mad_k * mad)) return false;
-  // ¿Se explica por el día de la semana? (mismo día de hace 7 y 14 días)
-  const di = dayNum(d[off + i][0]);
-  let maxSame = null;
-  for (const back of [7, 14]) {
-    for (let j = n - 1; j >= 0; j--) {
-      if (dayNum(d[off + j][0]) === di - back) {
-        const x = VALS[j];
-        if (x && (maxSame === null || x > maxSame)) maxSame = x;
-        break;
-      }
-    }
-  }
-  return !(maxSame !== null && v < maxSame * EVENTS.min_ratio);
-}
-
-/**
- * Días de evento en EV[0..n). Solo hacen falta los del final (TAIL días, que
- * contienen todo lo que miran g7, la tendencia, el "ayer" y los 8 días limpios
- * del pico); si ahí hay demasiados eventos, se calculan todos. Atajo exacto:
- * si en la ventana max ≤ min_ratio·min, ningún día puede ser evento.
- */
-function markEvents(d, off, n) {
-  EV.fill(0, 0, n);
-  let from = Math.max(0, n - TAIL);
-  for (let pass = 0; pass < 2; pass++) {
-    let mn = Infinity, mx = -Infinity;
-    for (let i = Math.max(0, from - (EVENTS.window_days >> 1)); i < n; i++) {
-      const v = VALS[i];
-      if (v < mn) mn = v;
-      if (v > mx) mx = v;
-    }
-    if (mn > 0 && mx <= mn * EVENTS.min_ratio) return;
-    let clean = 0;
-    for (let i = from; i < n; i++) {
-      EV[i] = isEvent(i, n, d, off) ? 1 : 0;
-      if (!EV[i]) clean++;
-    }
-    if (from === 0 || clean >= 9) return;
-    from = 0;   // pocos días limpios al final: hacen falta los anteriores
-  }
-}
-
-/** analytics.theil_sen_daily_growth sobre CLEAN[lo..hi) (índices relativos, contando los ≤ 0). */
-function theilSenClean(lo, hi) {
-  let n = 0;
-  if (LOGX.length < hi - lo) { LOGX = new Float64Array(hi - lo); LOGY = new Float64Array(hi - lo); }
-  for (let i = lo; i < hi; i++) if (CLEAN[i] > 0) { LOGX[n] = i - lo; LOGY[n] = Math.log(CLEAN[i]); n++; }
-  if (n < 4) return null;
-  const b = buf(n * (n - 1) / 2);
-  let k = 0;
-  for (let a = 0; a < n; a++) for (let c = a + 1; c < n; c++) b[k++] = (LOGY[c] - LOGY[a]) / (LOGX[c] - LOGX[a]);
-  return pyRound((Math.exp(median(k)) - 1) * 100, 1);
-}
-
-/** Visitas ganadas por día (game_metrics), o null. */
-function visitsDay(d, s) {
-  const n = d.length, ns = s.length;
-  let vday = null, i1 = ns - 1;
-  while (i1 >= 0 && !s[i1][2]) i1--;
-  if (i1 >= 0) {
-    const t1 = s[i1][0], v1 = s[i1][2];
-    for (let i = i1 - 1; i >= 0; i--) {
-      if (s[i][2] && s[i][0] <= t1 - 1200) {
-        vday = pyRound0((v1 - s[i][2]) * 86400 / Math.max((t1 - s[i][0]) * 60, 1));
-        break;
-      }
-    }
-  }
-  if (vday === null) {
-    let a = -1, z = -1;
-    for (let i = n - 1; i >= 0; i--) if (d[i][5]) { if (z < 0) z = i; else { a = i; break; } }
-    if (a >= 0) vday = pyRound0((d[z][5] - d[a][5]) / ((dayNum(d[z][0]) - dayNum(d[a][0])) || 1));
-  }
-  return vday !== null && vday < 0 ? null : vday;
-}
-
-/** Las partes del score de emergente que no dependen de la tendencia. */
-function emergingParts(g, typ, visits, ctx) {
-  let sRoblox = 0;
-  if (g.sorts) for (const k of EMERGING.roblox_sorts || []) {
-    if (g.sorts[k] != null) sRoblox = Math.max(sRoblox, ROBLOX_SORT_POINTS[k] ?? 10);
-  }
-  const d = g.d;
-  let seen = g.first_day ? dayNum(g.first_day) : (d.length ? dayNum(d[0][0]) : null);
-  const fsMs = isoMs(g.first_seen);
-  if (fsMs !== null) {
-    const fs = Math.floor(fsMs / DAY_MS);
-    if (seen === null || fs < seen) seen = fs;
-  }
-  const fresh = seen !== null && seen >= ctx.scanStart + 2 && ctx.today - seen <= 3;
-  const vday = visitsDay(d, g.s || []);
-  const vg = visits && vday ? pyRound(vday * 100 / visits, 2) : 0;
-  const created = isoMs(g.created);
-  const age = created !== null ? Math.floor((ctx.nowMs - created) / DAY_MS) : null;
-  let sYoung = age !== null ? 20 * clip(1 - age / EMERGING.max_age_days) : 0;
-  if (fresh) sYoung = Math.max(sYoung, 8);
-  const up = g.up ?? null, down = g.down ?? null;
-  const lr = up !== null && down !== null && up + down > 0 ? pyRound(up * 100 / (up + down), 1) : null;
-  return {
-    sRoblox, fresh, sVisits: 30 * clip(vg / 12), sYoung,
-    sSize: 15 * clip(Math.log10(typ / EMERGING.min_players) / LOG30), sLike: 10 * clip(((lr || 0) - 75) / 20),
-  };
-}
-
-/** Typical (mediana de 24 h) y visitas: lo barato, para todos los juegos. */
-function basics(g) {
-  const d = g.d, s = g.s || [];
-  const n = d.length, ns = s.length;
-  let typical, n24 = 0;
-  if (ns) {
-    const ref = s[ns - 1][0], b = buf(ns);
-    for (let i = ns - 1; i >= 0; i--) {
-      const t = s[i][0];
-      if (t < ref - 1440) break;
-      if (t < ref + 1) b[n24++] = s[i][1];
-    }
-    if (n24 >= 2) typical = median(n24);
-  }
-  if (n24 < 2) typical = n ? d[n - 1][1] : (ns ? s[ns - 1][1] : 0);
-  let visits = null;
-  for (let i = n - 1; i >= 0; i--) if (d[i][5]) { visits = d[i][5]; break; }
-  return { typical, typicalR: typical != null ? pyRound0(typical) : null, visits };
-}
-
-/** El resto de game_metrics + status + momentum + emerging (sin motivos). */
-function details(g, b, ep, ctx) {
-  const d = g.d, s = g.s || [];
-  const n = Math.min(d.length, 64), ns = s.length;
-  const off = d.length - n;               // el export trae 21 días; por si acaso
-  for (let i = 0; i < n; i++) VALS[i] = d[off + i][1];
-  markEvents(d, off, n);
-  const ref = ns ? s[ns - 1][0] : ctx.nowMin;
-  const nowPlayers = ns ? s[ns - 1][1] : (n ? VALS[n - 1] : 0);
-
-  let prev = null, nprev = 0;
-  if (ns) {
-    const bb = buf(ns);
-    for (let i = ns - 1; i >= 0; i--) {
-      const t = s[i][0];
-      if (t < ref - 2880) break;
-      if (t < ref - 1440) bb[nprev++] = s[i][1];
-    }
-    if (nprev >= 2) prev = median(nprev);
-  }
-  if (nprev < 2) {
-    prev = null;
-    for (let i = n - 2; i >= 0; i--) if (!EV[i]) { prev = VALS[i]; break; }
-  }
-  const g24 = pctNum(b.typical, prev);
-
-  let s3 = 0, c3 = 0, sw = 0, cw = 0;
-  for (let i = Math.max(0, n - 3); i < n; i++) if (!EV[i]) { s3 += VALS[i]; c3++; }
-  for (let i = Math.max(0, n - 10), e = Math.max(0, n - 6); i < e; i++) if (!EV[i]) { sw += VALS[i]; cw++; }
-  const g7 = c3 && cw ? pctNum(s3 / c3, sw / cw) : null;
-
-  let nc = 0, c8 = 0;
-  for (let i = 0; i < n; i++) if (!EV[i]) { CLEAN[nc++] = VALS[i]; if (i >= n - 8) c8++; }
-  const t = theilSenClean(nc - c8, nc);
-  let base7 = null;
-  if (nc >= 4) {
-    const lo = Math.max(0, nc - 8), bb = buf(nc);
-    for (let i = lo; i < nc - 1; i++) bb[i - lo] = CLEAN[i];
-    base7 = median(nc - 1 - lo);
-  }
-  const spike = !!(base7 && nowPlayers >= base7 * EVENTS.spike_now_ratio);
-  const st = status(g24, t);
-
-  const size = clip(Math.log10(Math.max(b.typicalR || 1, 1) / 300) / LOG_SIZE);
-  let mom = 35 * clip((t || 0) / 20) + 25 * clip((g24 || 0) / 50) + 20 * clip((g7 || 0) / 100) + 20 * size;
-  if (spike && (t || 0) < 5) mom *= 0.7;
-  const rising = (st === "hot" || st === "up") && (t === null || t > 0) && !(spike && (t || 0) < 5);
-
-  let em = null;
-  if (ep) {
-    const growing = (t !== null && t > 0) || (g24 !== null && g24 > 0) || (g7 !== null && g7 > 0)
-      || (ep.sRoblox > 0 && t === null && g24 === null && g7 === null);
-    if ((growing || ep.fresh) && st !== "down" && st !== "down2") {
-      const growth = Math.max(t || 0, (g24 || 0) / 2, (g7 || 0) / 5);
-      // mismo orden de sumas que metrics.js (el redondeo depende de él)
-      em = Math.min(100, pyRound0(ep.sVisits + 25 * clip(growth / 20) + ep.sYoung + ep.sSize + ep.sLike + ep.sRoblox));
-      if (spike && (t || 0) < 5) em = pyRound0(em * 0.8);
-    }
-  }
-  return { st: STATUS_CODE[st], rising: rising ? 1 : 0, momentum: pyRound0(mom), g7, em };
-}
-
 const STATUS_CODE = { new: 0, flat: 1, hot: 2, up: 3, down: 4, down2: 5 };
 const CATS = Object.entries(CATEGORIES);
 
 /**
- * El cálculo reducido de cada juego que puede importar (pertenece a una
- * categoría o puede ser emergente). Devuelve filas pequeñas y serializables,
- * así que se puede repartir el export entre varios pasos y juntar luego las
- * filas (ver telegramScanText / telegramReduce).
- * → [{ id, typical, cat (bit por categoría), st, rising, momentum, g7, em }]
+ * Las cifras de cada juego que puede importar (pertenece a una categoría o
+ * puede ser emergente), con las mismas funciones que el dashboard
+ * (quickMetrics de metrics.js). Devuelve filas pequeñas y serializables, así
+ * que se puede repartir el export entre varios pasos y juntar luego las filas
+ * (ver telegramScanText / telegramReduce).
+ * → [{ id, horror, typical, cat (bit por categoría), st, rising, momentum, g7, em }]
  */
 export function quickRows(games, { now } = {}) {
-  const nowMs = toDate(now).getTime();
-  const today = Math.floor(nowMs / DAY_MS);
-  const ctx = { nowMs, nowMin: nowMs / 60000, today, scanStart: dayNum(SCAN_START) };
-  const activeCut = new Date((today - 2) * DAY_MS).toISOString().slice(0, 10);
   const rows = [];
-  for (const g of games) {
-    const d = g.d;
-    if (!d || !d.length || d[d.length - 1][0] < activeCut) continue;   // como buildDashboard
-    const b = basics(g);
-    const typ = b.typicalR || 0;
+  for (const { g, m, em } of quickMetrics(games, { now: toDate(now) })) {
+    const typ = m.typical || 0;
     let cat = 0;
     CATS.forEach(([, c], ci) => {
       if ((c.classifier === "all" || g.horror) && typ >= c.min_players) cat |= 1 << ci;
     });
-    const pool = b.visits !== null && b.visits <= EMERGING.max_visits && typ >= EMERGING.min_players;
-    if (!pool && !cat) continue;
-    const ep = pool ? emergingParts(g, typ, b.visits, ctx) : null;
-    // Cota superior exacta del emergente (crecimiento al máximo, sin penalización):
-    // si ni así llega, y el juego no está en ninguna categoría, no hace falta más.
-    if (!cat && Math.min(100, ep.sVisits + 25 + ep.sYoung + ep.sSize + ep.sLike + ep.sRoblox) + 1
-        < EMERGING.min_score - PICK.emerging_margin) continue;
-    rows.push({ id: g.id, horror: g.horror ? 1 : 0, typical: b.typicalR, cat, ...details(g, b, ep, ctx) });
+    if (!cat && !em) continue;
+    rows.push({
+      id: g.id, horror: g.horror ? 1 : 0, typical: m.typical, cat, st: STATUS_CODE[m.status],
+      rising: isRising(m) ? 1 : 0, momentum: m.momentum, g7: m.growth_7d, em: em ? em[0] : null,
+    });
   }
   return rows;
 }
@@ -582,7 +293,7 @@ export function pickCandidates(rows) {
     counts[key] = { games: ids.length, players, rising, falling };
     // emergentes: los de la categoría (horror: los juegos de horror, aunque no lleguen al mínimo)
     const belongs = cfg.classifier === "all" ? () => true : r => r.horror;
-    rows.filter(r => belongs(r) && r.em !== null && r.em >= EMERGING.min_score - PICK.emerging_margin)
+    rows.filter(r => belongs(r) && r.em !== null)
       .sort((a, b) => b.em - a.em).slice(0, PICK.emerging_top).forEach(r => picked.add(r.id));
     ids.filter(r => r.rising).sort((a, b) => b.momentum - a.momentum)
       .slice(0, PICK.trending_top).forEach(r => picked.add(r.id));
