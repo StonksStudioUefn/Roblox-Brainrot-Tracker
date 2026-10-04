@@ -135,6 +135,9 @@ Total estimado en régimen: **~45.000–48.000 filas/día** (límite 100.000; el
 La migración escribe ~41.700 una sola vez; volver a ejecutarla escribe 0.
 
 Lecturas: ~215.000–245.000 por export hoy (6 trozos + telegram), ~300.000 en régimen → ~2,4 M/día de 5 M.
+Lo demás (espacio para el Almacén, poda, radar, lista de seguidos): ver "Lecturas fuera del export" en
+`CONTRACT.md`. Para medir una consulta con datos reales, la base exportada (`wrangler d1 export`) se carga en
+el D1 local y se lee `meta.rows_read`.
 
 ## Paridad con Python (comprobada)
 

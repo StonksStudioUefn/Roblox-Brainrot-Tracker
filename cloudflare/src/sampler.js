@@ -47,7 +47,7 @@ import {
   DAY_MIN, addDays, applySelectionStmt, applyVotesStmt, buildExportSlice, closeDayStmt, exportHeader, exportPlan,
   getState, getStates, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs, lowSinceStmts,
   mergeHistStmt, minuteOf, pruneOldStmts, pruneOrphansStmt, pruneSamplesStmt, radarCloseStmt, radarCounts, radarPlayers,
-  radarSlice, retrackPlacesStmt, setState, setStateStmt, sortHitsStmt, trackedIds, unknownPlaces,
+  radarSlice, radarStaleStmt, retrackPlacesStmt, setState, setStateStmt, sortHitsStmt, trackedIds, unknownPlaces,
   untrackStmt, updateMetaStmt, upsertDiscoveredStmt, written,
 } from "./db.js";
 import { classifyHorror } from "./horror.js";
@@ -234,7 +234,7 @@ export class Sampler extends WorkflowEntrypoint {
         if (!all || !all.length) throw new Error("Rolimons no devolvió la lista");
         // Un fichero por muestreo (un reintento lo reescribe igual): sin leer ni
         // reescribir el del día entero, que costaría CPU en cada pasada
-        const players = await radarPlayers(db, all);
+        const players = await radarPlayers(db, all, today);
         await env.BUCKET.put(`${RADAR_PREFIX}${today}/${ts}.json`, JSON.stringify(players));
         const stats = { radar: Object.keys(players).length, calls: budget.used };
         if (!daily) return { stats };
@@ -245,6 +245,7 @@ export class Sampler extends WorkflowEntrypoint {
           unknownPlaces(db, pids),
           retrackPlacesStmt(db, pids).run(),
         ]);
+        if (res.meta?.changes) await radarStaleStmt(db).run();
         const byPid = new Map(list.map(r => [r[0], r]));
         // Primero los que más jugadores tienen; tope diario
         const todo = unknown.map(pid => byPid.get(pid)).sort((a, b) => b[2] - a[2])
@@ -270,6 +271,7 @@ export class Sampler extends WorkflowEntrypoint {
           const res = ok.length ? await db.batch([
             insertPlacesStmt(db, ok),
             upsertDiscoveredStmt(db, ok.map(([pid, uid]) => [uid, pid, names.get(pid)]), "rolimons", firstSeen),
+            radarStaleStmt(db),
           ]) : [];
           return { asked: part.length, resolved: ok.length, calls: budget.used, written: written(res) };
         });
@@ -368,23 +370,28 @@ export class Sampler extends WorkflowEntrypoint {
     }
 
     // ── maint: poda de muestras, untrack y ficheros viejos del radar ────────
+    // Una vez al día (state.maint_day). Podar muestras recorre todos los juegos
+    // (~6.000 filas leídas aunque solo borre una hora): cada hora eran ~150.000
+    // al día y una vez ~20.000; a cambio las muestras duran hasta un día más
+    // que SAMPLE_RETENTION_DAYS, y nada lee muestras tan viejas. untrack mira
+    // fechas (low_since, puestos de hoy o ayer) y solo puede cambiar al cambiar
+    // el día: repetirlo cada hora no quitaba ningún juego más.
     if (want("maint")) {
       await safe("maint", async () => {
+        if (!init.firstOfDay && (await getState(db, "maint_day")) === today) return { skipped: true };
         const cutoff = ts - SAMPLE_RETENTION_DAYS * DAY_MIN;
-        const stmts = [pruneSamplesStmt(db, cutoff), untrackStmt(db, today)];
-        // Una vez al día: lo que tiene más de un año (días y puestos en listas)
-        if (init.firstOfDay) stmts.push(pruneOrphansStmt(db, cutoff), ...pruneOldStmts(db, addDays(today, -DATA_RETENTION_DAYS)));
+        const stmts = [
+          pruneSamplesStmt(db, cutoff), untrackStmt(db, today),
+          pruneOrphansStmt(db, cutoff), ...pruneOldStmts(db, addDays(today, -DATA_RETENTION_DAYS)),
+          radarStaleStmt(db), setStateStmt(db, "maint_day", today),
+        ];
         const res = await db.batch(stmts);
-        let radarFiles = 0;
-        if (init.firstOfDay) {
-          const old = `${RADAR_PREFIX}${addDays(today, -RADAR_KEEP_DAYS)}/`;
-          const listed = await env.BUCKET.list({ prefix: RADAR_PREFIX, limit: 1000 });
-          const keys = listed.objects.map(o => o.key).filter(k => k < old);
-          if (keys.length) await env.BUCKET.delete(keys);
-          radarFiles = keys.length;
-        }
-        const oldRows = init.firstOfDay ? (res[3]?.meta?.changes ?? 0) + (res[4]?.meta?.changes ?? 0) : 0;
-        return { pruned: res[0]?.meta?.changes ?? 0, untracked: res[1]?.meta?.changes ?? 0, old_rows: oldRows, radar_files: radarFiles, written: written(res) };
+        const old = `${RADAR_PREFIX}${addDays(today, -RADAR_KEEP_DAYS)}/`;
+        const listed = await env.BUCKET.list({ prefix: RADAR_PREFIX, limit: 1000 });
+        const keys = listed.objects.map(o => o.key).filter(k => k < old);
+        if (keys.length) await env.BUCKET.delete(keys);
+        const oldRows = (res[3]?.meta?.changes ?? 0) + (res[4]?.meta?.changes ?? 0);
+        return { pruned: res[0]?.meta?.changes ?? 0, untracked: res[1]?.meta?.changes ?? 0, old_rows: oldRows, radar_files: keys.length, written: written(res) };
       });
     }
 
@@ -622,6 +629,7 @@ export async function runSelect(env, step, nowMs, today, safe, summary) {
       applySelectionStmt(db, ids),
       setStateStmt(db, "sel_day", today),
       setStateStmt(db, "selection", { day: today, ...counts }),
+      radarStaleStmt(db),
     ]);
     return { ...counts, changed: res[0]?.meta?.changes ?? 0, written: written(res) };
   });

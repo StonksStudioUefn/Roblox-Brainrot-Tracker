@@ -85,8 +85,14 @@ export function written(res) {
  * Los nuevos entran con tracked=1; los existentes se vuelven a seguir si
  * estaban parados y se añade la fuente a `sources` si faltaba.
  * Solo escribe las filas que cambian.
+ *
+ * La fuente se busca en `sources` como texto (`instr` con la cadena JSON
+ * entre comillas) y no con json_each: D1 cuenta como leída cada fila de un
+ * json_each, y esto corre con cada página de explore y cada búsqueda.
+ * `"explore"` con sus comillas solo casa con un elemento entero del array.
  */
 export function upsertDiscoveredStmt(db, rows, source, firstSeen) {
+  const has = "instr(COALESCE(games.sources, '[]'), json_quote(?3)) > 0";
   return db.prepare(
     `INSERT INTO games (universe_id, place_id, name, first_seen, sources, tracked)
      SELECT j.value ->> 0, j.value ->> 1, j.value ->> 2, ?2, json_array(?3), 1
@@ -96,14 +102,12 @@ export function upsertDiscoveredStmt(db, rows, source, firstSeen) {
        low_since = CASE WHEN games.tracked = 0 THEN NULL ELSE games.low_since END,
        place_id = COALESCE(games.place_id, excluded.place_id),
        name = COALESCE(games.name, excluded.name),
-       sources = CASE
-         WHEN EXISTS (SELECT 1 FROM json_each(COALESCE(games.sources, '[]')) s WHERE s.value = ?3)
-         THEN games.sources
+       sources = CASE WHEN ${has} THEN games.sources
          ELSE json_insert(COALESCE(games.sources, '[]'), '$[#]', ?3) END
      WHERE games.tracked IS NOT 1
         OR (games.place_id IS NULL AND excluded.place_id IS NOT NULL)
         OR (games.name IS NULL AND excluded.name IS NOT NULL)
-        OR NOT EXISTS (SELECT 1 FROM json_each(COALESCE(games.sources, '[]')) s WHERE s.value = ?3)`,
+        OR NOT ${has}`,
   ).bind(JSON.stringify(rows), firstSeen, source);
 }
 
@@ -175,16 +179,39 @@ export async function selectedAmong(db, ids) {
  * Lecturas de Rolimons [[placeId, name, players], …] → {universe_id: players}
  * de los juegos del radar (tracked = 1) cuyo place está en la caché.
  */
-export async function radarPlayers(db, list) {
-  const { results } = await db.prepare(
-    `SELECT g.universe_id AS id, j.value ->> 2 AS p
-     FROM json_each(?1) j JOIN places pl ON pl.place_id = (j.value ->> 0)
-     JOIN games g ON g.universe_id = pl.universe_id WHERE g.tracked = 1`,
-  ).bind(JSON.stringify(list.map(([pid, , players]) => [pid, null, players]))).all();
+export async function radarPlayers(db, list, today) {
+  const map = await radarPlaces(db, today);
   const out = {};
-  for (const r of results) out[r.id] = Math.max(out[r.id] ?? 0, r.p);   // varios places de un juego: el mayor
+  for (let i = 0; i < list.length; i++) {
+    const id = map.get(list[i][0]);
+    if (id != null) out[id] = Math.max(out[id] ?? 0, list[i][2]);   // varios places de un juego: el mayor
+  }
   return out;
 }
+
+/**
+ * Map place_id → universe_id de los places de juegos del radar, guardado como
+ * pares en state.radar_places (una fila). Cruzar en SQL la lista de Rolimons
+ * (~3.500 places) con places y games leía ~10.000 filas en cada lectura del
+ * radar (8 al día); así se rehace una vez al día o cuando cambian places o
+ * tracked (radarStaleStmt lo borra). Un juego que explore vuelve a seguir a
+ * media tarde entra en el radar al día siguiente.
+ */
+export async function radarPlaces(db, today) {
+  const cached = await getState(db, "radar_places");
+  if (cached?.day === today && Array.isArray(cached.pairs)) return new Map(cached.pairs);
+  const { results } = await db.prepare(
+    `SELECT pl.place_id AS pid, pl.universe_id AS id
+     FROM places pl JOIN games g ON g.universe_id = pl.universe_id WHERE g.tracked = 1`,
+  ).all();
+  const pairs = results.map(r => [r.pid, r.id]);
+  await setState(db, "radar_places", { day: today, pairs });
+  return new Map(pairs);
+}
+
+/** Cachés de state que dependen de tracked, sel o places: se borran al cambiarlos. */
+export const radarStaleStmt = db =>
+  db.prepare("DELETE FROM state WHERE key IN ('radar_places', 'radar_counts')");
 
 /**
  * Filas diarias del radar para `date`: `readings` = {universe_id: [jugadores
@@ -260,12 +287,22 @@ export function applySelectionStmt(db, ids) {
   ).bind(JSON.stringify(ids));
 }
 
-/** Juegos en el radar y seguidos (para la cabecera del export). */
-export async function radarCounts(db) {
+/**
+ * Juegos en el radar y seguidos (para la cabecera del export). Contarlos lee
+ * `games` entera (~3.000 filas) y el export corre cada hora: se guarda en
+ * state.radar_counts para el día y se borra cuando select o maint cambian sel
+ * o tracked (radarStaleStmt). Los que explore añade durante el día se cuentan
+ * al día siguiente.
+ */
+export async function radarCounts(db, today = isoDate(minuteOf(Date.now()))) {
+  const cached = await getState(db, "radar_counts");
+  if (cached?.day === today) return { radar: cached.radar, selected: cached.selected };
   const row = await db.prepare(
     "SELECT COUNT(*) AS radar, COALESCE(SUM(sel = 1), 0) AS selected FROM games WHERE tracked = 1",
   ).first();
-  return { radar: row?.radar ?? 0, selected: row?.selected ?? 0 };
+  const out = { radar: row?.radar ?? 0, selected: row?.selected ?? 0 };
+  await setState(db, "radar_counts", { day: today, ...out });
+  return out;
 }
 
 /** [[universe_id, playing, visits], …] con el mismo ts. Idempotente (OR IGNORE). */

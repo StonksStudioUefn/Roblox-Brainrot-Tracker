@@ -83,7 +83,8 @@ CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);  -- Telegra
 - `state` (claves): `telegram`, `search_cursor`, `day` (último día con la 1ª pasada hecha), `closed_day`
   (último día cerrado en `daily`), `last_sample_ts`, `hist_agg` (agregados de toda la historia por juego:
   `{id: [peak, peak_date, days, first_day, favorites, up, down, last_date]}`, se actualiza al cerrar cada día),
-  `last_run` y `last_partial_run` (resumen de la última pasada).
+  `last_run` y `last_partial_run` (resumen de la última pasada). Cachés para leer menos (ver "Lecturas fuera
+  del export"): `maint_day`, `radar_counts`, `radar_places` y `espacio`.
 
 ## Presupuesto de escrituras D1 (por día)
 
@@ -224,7 +225,8 @@ El dashboard calcula los días de evento con `flagEvents`.
 
 ## Rutas del Worker
 
-(Admin: `POST /api/admin/run` `{daily?, skip?, only?, telegram_force?, now?}`, `GET /api/admin/status?id=&counts=1`,
+(Admin: `POST /api/admin/run` `{daily?, skip?, only?, telegram_force?, now?}`, `GET /api/admin/status?id=&counts=1`
+(filas del desglose de `espacio()`; `counts=exacto` las cuenta recorriendo las tablas), `GET /api/admin/espacio[?exacto=1]`,
 `POST /api/admin/import` `{table, columns, rows}`, `POST /api/admin/rebuild` (recalcula `hist_agg` y lanza un
 export), `POST /api/admin/export` (lanza un Workflow solo de export). El esquema se aplica con
 `wrangler d1 execute`, no por la API.)
@@ -339,8 +341,35 @@ Se pasa de muestrear todo el catálogo (~2.500 juegos) a un **radar** de todo y
   El resto del código sigue con claves cortas (`data/export.json`, `radar/…`).
 - `export class Operaciones` (`src/stonks.js`), para el Almacén por service binding:
   `espacio()` → el `Espacio` del contrato del ecosistema con la base D1
-  (`meta.size_after`, filas y bytes por tabla, y `mayores` frente a los 500 MB de D1);
+  (`meta.size_after`, filas y bytes por tabla, y `mayores` frente a los 500 MB de D1;
+  el desglose por tabla se rehace como mucho una vez al día, ver "Lecturas fuera del export");
   `nombres(rutas)` → nombre de hoy de sus carpetas (`site/`, `data/`, `radar/<día>/`…).
 - El Almacén cuenta las bases D1 aparte de los Durable Objects (`d1` en su medida).
 - `cloudflare/tools/uploader.js`: el Worker auxiliar `roblox-uploader` (con
   `ADMIN_TOKEN`) que sube la web y los bundles de despliegue a esa carpeta.
+
+## Lecturas fuera del export (04/10/2026)
+
+El plan gratis da 5 M filas leídas al día a D1; al pasarse, todas las consultas fallan hasta las 00:00 UTC.
+Medido con la base de producción del 04/10 en local (`meta.rows_read`):
+
+| Qué | Antes | Ahora |
+|---|---|---|
+| `espacio()` (Almacén, cada vez que se abre y la medida tiene > 10 min) | recorría todas las tablas: ~61.000 filas por llamada, ~2 M dentro de un año | 1 fila; el desglose se rehace como mucho una vez al día (~47.000 hoy, ~85.000 en régimen) |
+| `status?counts=1` | ~61.000 | lo de `espacio()` |
+| `maint`: poda de muestras + untrack, cada hora | ~6.000 + ~2.900 por pasada | una vez al día (`state.maint_day`): ~3.000 + 2 por muestra borrada, y 2.900 |
+| `radarCounts` (cabecera del export, cada hora) | 2.935 | 1 (`state.radar_counts`, del día; lo borran select y maint) |
+| `radarPlayers` (cada lectura del radar) | ~9.700 | 1 (`state.radar_places`, pares place → juego; ~5.200 al rehacerlo) |
+| lista de seguidos (`sample-list`, cada hora) | 2.935 | 221 (índice parcial `games_sel`) |
+| `upsertDiscoveredStmt` (cada página de explore y cada búsqueda) | ~3 por juego | ~2 por juego (`instr` en vez de `json_each` sobre `sources`) |
+
+- **Índice parcial `games_sel`** (`ON games (universe_id) WHERE sel = 1`): solo guarda los ~200 seguidos, así
+  que solo se escribe cuando un juego entra o sale de la selección (unas decenas de filas al día; crearlo
+  escribe ~220). `samples` sigue sin índice por ts.
+- **Muestras**: con la poda diaria duran hasta un día más que `SAMPLE_RETENTION_DAYS` (nada lee muestras tan
+  viejas: el export, el cierre y el historial buscan por clave primaria desde una fecha).
+- **Lo que tarda en verse**: un juego que explore añade o vuelve a seguir durante el día entra en
+  `radar_games` y en las lecturas del radar al día siguiente (o antes, si se resuelven places o corre select).
+- **`espacio()`**: `base.bytes` (lo que cuenta para el tope) sale en cada llamada. Del desglose, `daily` se
+  estima con los días de `state.hist_agg` y `sort_hits` con las filas de ayer × días + las de hoy; las demás
+  tablas se cuentan (`samples` no pasa de ~9 días). `GET /api/admin/espacio?exacto=1` las cuenta todas.

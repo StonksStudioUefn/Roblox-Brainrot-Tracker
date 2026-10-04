@@ -27,6 +27,12 @@ CREATE TABLE IF NOT EXISTS games (
 );
 -- En una base anterior a `sel`: ALTER TABLE games ADD COLUMN sel INTEGER DEFAULT 0;
 
+-- Índice PARCIAL de los seguidos (~200 de ~3.000): «WHERE tracked = 1 AND sel = 1»
+-- (la lista de cada muestreo, cada hora) lee ~200 filas en vez de toda `games`.
+-- Solo guarda las filas con sel = 1, así que solo se escribe cuando un juego entra
+-- o sale de la selección (unas decenas al día); los juegos nuevos entran con sel = 0.
+CREATE INDEX IF NOT EXISTS games_sel ON games (universe_id) WHERE sel = 1;
+
 CREATE TABLE IF NOT EXISTS places (place_id INTEGER PRIMARY KEY, universe_id INTEGER);  -- caché Rolimons
 
 CREATE TABLE IF NOT EXISTS samples (

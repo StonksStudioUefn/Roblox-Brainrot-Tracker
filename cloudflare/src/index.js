@@ -13,8 +13,8 @@
  *
  * Admin (en cualquier host, "Authorization: Bearer <ADMIN_TOKEN>"):
  *   POST /api/admin/run      lanza un muestreo  {daily?, select?, skip?: [...], only?: [...], telegram_force?, now?}
- *   GET  /api/admin/status   estado (state + instancia) ?id=<instancia> &counts=1
- *   GET  /api/admin/espacio  lo que ocupa la base D1 (lo mismo que espacio() para el Almacén)
+ *   GET  /api/admin/status   estado (state + instancia) ?id=<instancia> &counts=1 (estimado) | &counts=exacto
+ *   GET  /api/admin/espacio  lo que ocupa la base D1 (lo mismo que espacio() para el Almacén) ?exacto=1
  *   POST /api/admin/import   {table, columns, rows}  (migración, por lotes)
  *   POST /api/admin/rebuild  recalcula state.hist_agg desde daily y lanza un export
  *   POST /api/admin/export   lanza un Workflow que solo regenera el export
@@ -38,7 +38,7 @@ import configSrc from "./config.js" with { type: "text" };
 import metricsSrc from "./metrics.js" with { type: "text" };
 import horrorSrc from "./horror.js" with { type: "text" };
 
-import { getState, getStates, history, importStmt, isoDate, minuteOf, rebuildHistStmt, written } from "./db.js";
+import { getState, getStates, history, importStmt, isoDate, minuteOf, radarCounts, rebuildHistStmt, written } from "./db.js";
 import { chunks, iconsUrl, thumbsUrl, URLS, UA } from "./sources.js";
 import { espacioD1, withApp } from "./stonks.js";
 
@@ -238,7 +238,7 @@ async function admin(req, env, url) {
   const action = url.pathname.slice("/api/admin/".length);
   try {
     if (action === "status" && req.method === "GET") return await adminStatus(env, url);
-    if (action === "espacio" && req.method === "GET") return json(await espacioD1(env.DB));
+    if (action === "espacio" && req.method === "GET") return json(await espacioD1(env.DB, { exacto: !!url.searchParams.get("exacto") }));
     if (req.method !== "POST") return json({ error: "Método no permitido" }, 405);
 
     if (action === "run") {
@@ -289,8 +289,17 @@ async function adminStatus(env, url) {
     try { out.instance = { id, ...(await (await env.SAMPLER.get(id)).status()) }; }
     catch (e) { out.instance = { id, error: String(e?.message || e) }; }
   }
-  if (url.searchParams.get("counts")) {
-    // Ojo: COUNT(*) de samples recorre la tabla entera (~150k filas leídas)
+  const counts = url.searchParams.get("counts");
+  if (counts && counts !== "exacto") {
+    // Las filas del desglose de espacio() (de las últimas 24 h, y estimadas en
+    // daily y sort_hits): contarlas recorre todas las tablas (~60.000 filas hoy)
+    const [esp, radar] = await Promise.all([espacioD1(env.DB), radarCounts(env.DB)]);
+    const n = name => esp.base.tablas.find(t => t.nombre === name)?.filas ?? null;
+    out.counts = {
+      games: { n: n("games"), tracked: radar.radar }, places: n("places"), samples: n("samples"),
+      daily: { n: n("daily"), last: out.state.closed_day ?? null }, sort_hits: n("sort_hits"), estimado: true,
+    };
+  } else if (counts) {
     const r = await env.DB.batch([
       env.DB.prepare("SELECT COUNT(*) AS n, SUM(tracked = 1) AS tracked FROM games"),
       env.DB.prepare("SELECT COUNT(*) AS n FROM places"),
