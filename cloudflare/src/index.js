@@ -40,9 +40,9 @@ import metricsSrc from "./metrics.js" with { type: "text" };
 import horrorSrc from "./horror.js" with { type: "text" };
 
 import { getState, getStates, history, importStmt, isoDate, minuteOf, rebuildHistStmt, written } from "./db.js";
-import { backfillFromRadar } from "./sampler.js";
 import { chunks, iconsUrl, thumbsUrl, URLS, UA } from "./sources.js";
 import { espacioD1, withApp } from "./stonks.js";
+import { backfillFromRadar } from "./sampler.js";
 
 export { Sampler } from "./sampler.js";
 export { Operaciones } from "./stonks.js";
