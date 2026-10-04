@@ -39,7 +39,7 @@ import configSrc from "./config.js" with { type: "text" };
 import metricsSrc from "./metrics.js" with { type: "text" };
 import horrorSrc from "./horror.js" with { type: "text" };
 
-import { getState, getStates, history, importStmt, isoDate, minuteOf, rebuildHistStmt, trackedIds, written } from "./db.js";
+import { getState, getStates, history, importStmt, isoDate, minuteOf, rebuildHistStmt, written } from "./db.js";
 import { backfillFromRadar } from "./sampler.js";
 import { chunks, iconsUrl, thumbsUrl, URLS, UA } from "./sources.js";
 import { espacioD1, withApp } from "./stonks.js";
@@ -280,11 +280,8 @@ async function admin(req, env, url) {
     // rellena los que entran). Solo escribe las muestras que faltan.
     if (action === "backfill") {
       const body = await readBody(req);
-      const ids = Array.isArray(body.ids)
-        ? body.ids.map(Number).filter(Number.isSafeInteger)
-        : await trackedIds(env.DB, { selected: true });
-      const out = await backfillFromRadar(env, ids, minuteOf(Date.now()), { maxGames: MAX_BACKFILL_IDS });
-      return json({ ...out, asked: ids.length });
+      const ids = Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isSafeInteger) : null;
+      return json(await backfillFromRadar(env, ids, minuteOf(Date.now()), { maxGames: MAX_BACKFILL_IDS }));
     }
     return json({ error: "No encontrado" }, 404);
   } catch (e) {

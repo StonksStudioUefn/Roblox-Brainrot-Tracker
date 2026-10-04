@@ -642,15 +642,17 @@ export async function runSelect(env, step, nowMs, today, safe, summary) {
 
 /**
  * Copia a `samples` las lecturas del radar de las últimas BACKFILL_HOURS de
- * `ids` (en ese orden, como mucho `maxGames`), cada una en el ts de su
- * fichero, sin pisar las muestras que ya hay. Lo usan `select` con los juegos
- * que entran y /api/admin/backfill. Como mucho BACKFILL_FILES lecturas de R2.
+ * `ids` (en ese orden, como mucho `maxGames`; null = todos los seguidos), cada
+ * una en el ts de su fichero, sin pisar las muestras que ya hay. Lo usan
+ * `select` con los juegos que entran y /api/admin/backfill. Como mucho
+ * BACKFILL_FILES lecturas de R2.
  * Quien lleve agregados de `samples` tiene que saber que estas filas llegan
  * con ts del pasado (de días ya cerrados y del día abierto).
  */
 export async function backfillFromRadar(env, ids, nowTs, { maxGames = BACKFILL_MAX_GAMES } = {}) {
+  ids ??= await trackedIds(env.DB, { selected: true });
   const games = ids.slice(0, maxGames);
-  if (!games.length) return { games: 0, files: 0, written: 0 };
+  if (!games.length) return { asked: ids.length, games: 0, files: 0, written: 0 };
   const from = nowTs - BACKFILL_HOURS * 60;
   const files = [];
   for (let d = isoDate(from); d <= isoDate(nowTs); d = addDays(d, 1)) {
@@ -667,7 +669,7 @@ export async function backfillFromRadar(env, ids, nowTs, { maxGames = BACKFILL_M
   }));
   const stmts = texts.filter(Boolean).map(([ts, text]) => backfillSamplesStmt(env.DB, text, ts, games));
   const res = stmts.length ? await env.DB.batch(stmts) : [];
-  return { games: games.length, files: stmts.length, written: written(res) };
+  return { asked: ids.length, games: games.length, files: stmts.length, written: written(res) };
 }
 
 /**
