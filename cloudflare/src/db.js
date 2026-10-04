@@ -176,37 +176,54 @@ export async function selectedAmong(db, ids) {
 
 // ─── Radar ────────────────────────────────────────────────────────────────────
 /**
- * Lecturas de Rolimons [[placeId, name, players], …] → {universe_id: players}
- * de los juegos del radar (tracked = 1) cuyo place está en la caché.
+ * Lecturas de Rolimons [[placeId, name, players], …] → `players` =
+ * {universe_id: players} de los juegos del radar (tracked = 1), y `missing` =
+ * los del radar que no tienen lectura (no salen en la lista que llega): esos
+ * los lee la Games API en el paso radar-api.
  */
 export async function radarPlayers(db, list, today) {
-  const map = await radarPlaces(db, today);
+  const { map, ids } = await radarPlaces(db, today);
   const out = {};
   for (let i = 0; i < list.length; i++) {
     const id = map.get(list[i][0]);
     if (id != null) out[id] = Math.max(out[id] ?? 0, list[i][2]);   // varios places de un juego: el mayor
   }
-  return out;
+  return { players: out, missing: ids.filter(id => out[id] === undefined) };
 }
 
 /**
- * Map place_id → universe_id de los places de juegos del radar, guardado como
- * pares en state.radar_places (una fila). Cruzar en SQL la lista de Rolimons
- * (~3.500 places) con places y games leía ~10.000 filas en cada lectura del
- * radar (8 al día); así se rehace una vez al día o cuando cambian places o
- * tracked (radarStaleStmt lo borra). Un juego que explore vuelve a seguir a
- * media tarde entra en el radar al día siguiente.
+ * Map place_id → universe_id de los juegos del radar y la lista de sus ids,
+ * guardados en state.radar_places (una fila: `pairs` y `nop`, los que no
+ * tienen ningún place). Cruzar en SQL la lista de Rolimons (~3.500 places)
+ * con places y games leía ~10.000 filas en cada lectura del radar (8 al
+ * día); así se rehace una vez al día o cuando cambian places o tracked
+ * (radarStaleStmt lo borra). Un juego que explore vuelve a seguir a media
+ * tarde entra en el radar al día siguiente.
+ * Los places son los de la caché y además games.place_id: los juegos que
+ * entran por Explore o el buscador traen su place raíz, y sin él no se
+ * cruzaban con Rolimons hasta resolverlo (tope RESOLVE_PER_DAY, y solo los
+ * de ≥ TRACK_MIN_PLAYERS). Sin `nop` es una caché de antes: se rehace.
  */
 export async function radarPlaces(db, today) {
   const cached = await getState(db, "radar_places");
-  if (cached?.day === today && Array.isArray(cached.pairs)) return new Map(cached.pairs);
+  if (cached?.day === today && Array.isArray(cached.pairs) && Array.isArray(cached.nop)) {
+    const map = new Map(cached.pairs);
+    return { map, ids: [...new Set(map.values()), ...cached.nop] };
+  }
+  // UNION ALL y no UNION: el UNION deduplica en una tabla temporal y D1 cuenta
+  // sus filas; los repetidos los quita el Map
   const { results } = await db.prepare(
-    `SELECT pl.place_id AS pid, pl.universe_id AS id
+    `SELECT place_id AS pid, universe_id AS id FROM games WHERE tracked = 1
+     UNION ALL
+     SELECT pl.place_id, pl.universe_id
      FROM places pl JOIN games g ON g.universe_id = pl.universe_id WHERE g.tracked = 1`,
   ).all();
-  const pairs = results.map(r => [r.pid, r.id]);
-  await setState(db, "radar_places", { day: today, pairs });
-  return new Map(pairs);
+  const map = new Map();
+  for (const r of results) if (r.pid != null) map.set(r.pid, r.id);
+  const withPlace = new Set(map.values());
+  const nop = [...new Set(results.filter(r => !withPlace.has(r.id)).map(r => r.id))];
+  await setState(db, "radar_places", { day: today, pairs: [...map], nop });
+  return { map, ids: [...withPlace, ...nop] };
 }
 
 /** Cachés de state que dependen de tracked, sel o places: se borran al cambiarlos. */

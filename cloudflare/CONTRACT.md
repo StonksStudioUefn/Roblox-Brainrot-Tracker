@@ -292,7 +292,7 @@ Solución (`sampler.js`):
   invocación. Cada paso coge su parte con `SubBudget`.
 - **Pasada en varias ejecuciones encadenadas.** Antes de un paso con red se comprueba si caben sus
   peticiones. Si no caben, se crea la siguiente ejecución (`<id>-s<N>`) con `phase` y `cursor`, y la
-  actual termina. Las fases son discover → search → rolimons → resolve → sample → finalize.
+  actual termina. Las fases son discover → search → rolimons → resolve → sample → radar-api → finalize.
 - **Datos entre ejecuciones.** Las listas que necesita la siguiente ejecución (ids, places por resolver y
   votos) van a R2 `tmp/run/<id>/` y se borran en `finish`.
 - **Estado.** D1 `state.run_current` dice qué ejecución va ahora; `/api/admin/status` la enseña.
@@ -314,8 +314,16 @@ Se pasa de muestrear todo el catálogo (~2.500 juegos) a un **radar** de todo y
   día anterior cerrado (`state.sel_day`, resumen en `state.selection`). Base anterior:
   `ALTER TABLE games ADD COLUMN sel INTEGER DEFAULT 0`.
 - Radar: en cada pasada, `rolimons` lee la lista de Rolimons (≥ 150 jugadores),
-  la cruza con `places` y guarda `{universe_id: jugadores}` en R2
+  la cruza con `places` y con `games.place_id` y guarda `{universe_id: jugadores}` en R2
   `radar/<día>/<ts>.json` (un fichero por muestreo; 7 días).
+- Los del radar sin lectura de Rolimons (04/10/2026, J-Z): el 04/10, 358 de 2.752, casi todos
+  juegos que entraron por Explore o el buscador y que Rolimons no lista (334; otros ~25 salen con menos
+  de 150 jugadores). Los que no se siguen (~320; los seguidos ya tienen muestras cada hora) los lee el
+  paso `radar-api` con la Games API, después de las muestras, y van al mismo fichero (desde
+  `RADAR_MIN_PLAYERS`): 7 peticiones por lectura del radar, como mucho `RADAR_API_MAX` = 400 juegos.
+  La lista pasa por R2 `tmp/run/<id>/radar-api.json`. Así el cierre y el relleno de los que entran
+  tienen sus lecturas cada 3 h. Si la Games API corta por ráfaga (429), se pierde esa lectura del radar
+  (el paso escribe lo que ha recibido) y las muestras de los seguidos, que van antes, no se tocan.
 - `samples` y votos solo de los seguidos. El meta diario (Games API) sigue siendo de
   todo el radar: ficha, horror, y jugadores y visitas de los no seguidos, que van al
   cierre por `tmp/run/<id>/votes-<i>.json` = `{v: votos de seguidos, r: {id: [playing, visits]}}`.
@@ -339,7 +347,7 @@ Se pasa de muestrear todo el catálogo (~2.500 juegos) a un **radar** de todo y
   con `INSERT OR IGNORE` (nunca pisa una muestra). Tope de 150 juegos (los de más
   jugadores): ≤ 2.400 filas al día, y otras tantas al podarlas. Esas filas llegan con ts
   del pasado (días ya cerrados y el día abierto): quien mantenga agregados de `samples`
-  tiene que contarlas. Solo cubre los juegos que salen en el radar (Rolimons + `places`).
+  tiene que contarlas. Cubre lo que haya en los ficheros del radar (Rolimons y `radar-api`).
   `POST /api/admin/backfill {ids?}` hace lo mismo a mano (por defecto, con todos los
   seguidos; solo escribe las muestras que faltan).
 
@@ -382,7 +390,7 @@ Medido con la base de producción del 04/10 en local (`meta.rows_read`):
 | `status?counts=1` | ~61.000 | lo de `espacio()` |
 | `maint`: poda de muestras + untrack, cada hora | ~6.000 + ~2.900 por pasada | una vez al día (`state.maint_day`): ~3.000 + 2 por muestra borrada, y 2.900 |
 | `radarCounts` (cabecera del export, cada hora) | 2.935 | 1 (`state.radar_counts`, del día; lo borran select y maint) |
-| `radarPlayers` (cada lectura del radar) | ~9.700 | 1 (`state.radar_places`, pares place → juego; ~5.200 al rehacerlo) |
+| `radarPlayers` (cada lectura del radar) | ~9.700 | 2 (`state.radar_places`, pares place → juego, y `state.sel_ids`; ~8.100 al rehacerlo, con `games.place_id`) |
 | lista de seguidos (`sample-list`, cada hora) | 2.935 | 221 (índice parcial `games_sel`) |
 | `upsertDiscoveredStmt` (cada página de explore y cada búsqueda) | ~3 por juego | ~2 por juego (`instr` en vez de `json_each` sobre `sources`) |
 
