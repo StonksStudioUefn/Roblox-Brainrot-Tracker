@@ -53,7 +53,7 @@ import {
 import { classifyHorror } from "./horror.js";
 import { radarScore } from "./metrics.js";
 import { withApp } from "./stonks.js";
-import { pickCandidates, runTelegram, telegramScanText } from "./telegram.js";
+import { gameOffsets, pickCandidates, runTelegram, telegramScanText } from "./telegram.js";
 
 // Tamaños de trozo (CPU medida en frío: ver README "CPU por paso")
 export const SAMPLE_CHUNK = 400;       // 8 lotes de 50: parsear ~560 KB de la Games API ≈ 4,3 ms
@@ -66,6 +66,7 @@ export const TG_SCAN_GAMES = 40;       // juegos por paso de telegramScanText (e
 export const EXPORT_KEY = "data/export.json";
 export const TELEGRAM_KEY = "data/telegram.json";
 export const PART_PREFIX = "tmp/export/part-";
+export const TG_PART_PREFIX = "tmp/export/tg-";   // juegos de Telegram sacados de cada parte
 export const RUN_PREFIX = "tmp/run/";        // listas que pasan de una ejecución a otra
 export const RADAR_PREFIX = "radar/";        // radar/<día>/<ts>.json: lecturas de Rolimons de cada muestreo
 export const RADAR_KEEP_DAYS = 7;            // días de ficheros del radar en R2
@@ -431,7 +432,7 @@ function compact(summary) {
   const out = { ...summary, errors: (summary.errors || []).slice(-30) };
   const steps = {};
   for (const [k, v] of Object.entries(summary.steps || {})) {
-    if (/^(explore-\d+|resolve-\d+|search-\d+|export-\d+|select-\d+|tg-scan-)/.test(k)) continue;   // demasiados: van en el total
+    if (/^(explore-\d+|resolve-\d+|search-\d+|export-\d+|select-\d+|tg-scan-|tg-pick-)/.test(k)) continue;   // demasiados: van en el total
     steps[k] = v;
   }
   out.steps = steps;
@@ -620,6 +621,8 @@ export async function runSelect(env, step, nowMs, today, safe, summary) {
     if (!ids.length) throw new Error("La selección ha salido vacía");
     const res = await db.batch([
       applySelectionStmt(db, ids),
+      // La lista va también a state para que el export no tenga que recorrer games
+      setStateStmt(db, "sel_ids", ids),
       setStateStmt(db, "sel_day", today),
       setStateStmt(db, "selection", { day: today, ...counts }),
     ]);
@@ -629,33 +632,41 @@ export async function runSelect(env, step, nowMs, today, safe, summary) {
 
 /**
  * Export por trozos: export-plan (rangos) → export-i (SQL de un rango → R2
- * tmp/export/part-i) → export-join (telegram.json con los candidatos y
- * export.json uniendo las partes con un stream).
+ * tmp/export/part-i) → export-join (export.json uniendo las partes con un
+ * stream) → tg-scan-i-j → tg-reduce (candidatos) → tg-pick-i (sus objetos,
+ * copiados de la parte i) → tg-write (telegram.json).
  * `step`/`safe` del Workflow; fuera de él (pruebas) se puede pasar un `step`
  * que ejecute directamente.
  */
 export async function runExport(env, step, nowMs, safe, summary) {
   const db = env.DB;
   const plan = await safe("export-plan", async () => {
-    const [lastTs, closed, radar] = await Promise.all([
-      lastSampleTs(db), getState(db, "closed_day"), radarCounts(db),
+    const [lastTs, closed, radar, selIds] = await Promise.all([
+      lastSampleTs(db), getState(db, "closed_day"), radarCounts(db), getState(db, "sel_ids"),
     ]);
-    // Solo los juegos seguidos; si aún no hay selección, todo el radar
+    // Solo los juegos seguidos; si aún no hay selección, todo el radar.
+    // Con la lista de state.sel_ids (la escribe select-apply) no se recorre
+    // games; sin ella (selección anterior a sel_ids), por rangos como antes.
     const selected = radar.selected > 0;
-    const ranges = await exportPlan(db, EXPORT_SLICE, { selected });
+    const ranges = selected && Array.isArray(selIds) && selIds.length
+      ? chunks([...selIds].sort((a, b) => a - b), EXPORT_SLICE).map(ids => [ids[0], ids[ids.length - 1], ids])
+      : await exportPlan(db, EXPORT_SLICE, { selected });
     const today = isoDate(minuteOf(nowMs));
     return { lastTs, openDay: closed ? addDays(closed, 1) : today, ranges, selected, radar };
   });
   if (!plan) return null;
   const slices = [];
-  for (const [i, [lo, hi]] of plan.ranges.entries()) {
+  for (const [i, [lo, hi, ids]] of plan.ranges.entries()) {
     const name = `export-${i}`;
     let r = null;
     try {
       r = await step.do(name, STEP, async () => {
-        const s = await buildExportSlice(db, { nowMs, lastTs: plan.lastTs, openDay: plan.openDay, lo, hi, selected: plan.selected });
+        const s = await buildExportSlice(db, { nowMs, lastTs: plan.lastTs, openDay: plan.openDay, lo, hi, ids: ids ?? null, selected: plan.selected });
         const obj = await env.BUCKET.put(`${PART_PREFIX}${i}.json`, s.frag);
-        return { n: s.n, bytes: obj?.size ?? 0, last_ts: s.last_ts, ts24: s.ts24, rows_read: s.meta?.rows_read ?? null };
+        return {
+          n: s.n, bytes: obj?.size ?? 0, last_ts: s.last_ts, ts24: s.ts24,
+          rows_read: s.meta?.rows_read ?? null, rows_written: s.meta?.rows_written ?? null,
+        };
       });
     } catch (e) {
       // Sin todas las partes no se publica un export incompleto
@@ -704,6 +715,7 @@ export async function runExport(env, step, nowMs, safe, summary) {
     return {
       bytes: put?.size ?? size, games: total, slices: slices.length,
       rows_read: slices.reduce((a, s) => a + (s.rows_read || 0), 0),
+      rows_written: slices.reduce((a, s) => a + (s.rows_written || 0), 0),
     };
   });
   if (!join) return null;
@@ -711,38 +723,82 @@ export async function runExport(env, step, nowMs, safe, summary) {
   // data/telegram.json: prefiltro de telegram.js (telegramScanText) por trozos
   // de ~TG_SCAN_GAMES juegos sobre cada parte, y al final pickCandidates.
   const nowIso = new Date(nowMs).toISOString();
-  const rowParts = [];
+  const rowParts = [];   // [[parte, filas], …]
   let scanOk = true;
   for (const [i, sl] of slices.entries()) {
     const k = Math.max(1, Math.ceil(sl.n / TG_SCAN_GAMES));
     for (let j = 0; sl.n && j < k; j++) {
       const name = `tg-scan-${i}-${j}`;
       try {
-        rowParts.push(await step.do(name, STEP, async () => {
+        rowParts.push([i, await step.do(name, STEP, async () => {
           const o = await env.BUCKET.get(`${PART_PREFIX}${i}.json`);
           if (!o) throw new Error(`Falta la parte ${i} del export`);
           return telegramScanText(`{"games":[${await o.text()}]}`, { now: nowIso, part: j, parts: k });
-        }));
+        })]);
       } catch (e) {
         summary?.errors.push(`${name}: ${String(e?.message || e).slice(0, 200)}`);
         scanOk = false;
       }
     }
   }
-  const tg = scanOk ? await safe("tg-reduce", async () => {
-    const { counts, ids } = pickCandidates(rowParts.flat());
-    const list = [...ids];
-    const red = list.length
-      ? await buildExportSlice(db, { nowMs, lastTs: plan.lastTs, openDay: plan.openDay, ids: list })
-      : { frag: "", n: 0, meta: {} };
+  const red = scanOk ? await safe("tg-reduce", async () => {
+    const { counts, ids } = pickCandidates(rowParts.flatMap(([, rows]) => rows));
+    const byPart = {};
+    for (const [i, rows] of rowParts) for (const r of rows) if (ids.has(r.id)) (byPart[i] ||= []).push(r.id);
+    return { counts, byPart, rows: rowParts.reduce((a, [, rows]) => a + rows.length, 0) };
+  }) : null;
+  // Los objetos de los candidatos son los mismos que los de las partes: se
+  // copian de ahí en vez de volver a pedirlos a D1 (eran ~37k filas leídas).
+  let picked = !!red;
+  for (const [i, list] of Object.entries(red?.byPart || {})) {
+    const name = `tg-pick-${i}`;
+    try {
+      await step.do(name, STEP, async () => {
+        const o = await env.BUCKET.get(`${PART_PREFIX}${i}.json`);
+        if (!o) throw new Error(`Falta la parte ${i} del export`);
+        const out = pickGames(await o.text(), list);
+        if (out.n !== list.length) throw new Error(`La parte ${i} tiene ${out.n} de ${list.length} candidatos`);
+        await env.BUCKET.put(`${TG_PART_PREFIX}${i}.json`, out.frag);
+        return { n: out.n };
+      });
+    } catch (e) {
+      summary?.errors.push(`${name}: ${String(e?.message || e).slice(0, 200)}`);
+      picked = false;
+    }
+  }
+  const tg = picked ? await safe("tg-write", async () => {
+    const frags = [];
+    for (const i of Object.keys(red.byPart).sort((a, b) => a - b)) {
+      const o = await env.BUCKET.get(`${TG_PART_PREFIX}${i}.json`);
+      if (!o) throw new Error(`Faltan los candidatos de la parte ${i}`);
+      frags.push(await o.text());
+    }
+    const candidates = Object.values(red.byPart).reduce((a, l) => a + l.length, 0);
     // Mismo formato que el export + cabeceras exactas (telegram.counts, y totals = lo mismo)
     const text = `${JSON.stringify({
-      ...header, totals: counts, telegram: { counts, total, candidates: red.n },
-    }).slice(0, -1)},"games":[${red.frag}]}`;
+      ...header, totals: red.counts, telegram: { counts: red.counts, total, candidates },
+    }).slice(0, -1)},"games":[${frags.join(",")}]}`;
     const obj = await env.BUCKET.put(TELEGRAM_KEY, text, { httpMetadata: { contentType: "application/json; charset=utf-8" } });
-    return { candidates: red.n, bytes: obj?.size ?? null, rows: rowParts.reduce((a, r) => a + r.length, 0), rows_read: red.meta?.rows_read ?? null };
+    return { candidates, bytes: obj?.size ?? null, rows: red.rows };
   }) : null;
   join.telegram = tg;
   if (summary && join) summary.steps.export = join;
   return join;
+}
+
+/**
+ * Los objetos de `ids` (en el orden de la parte, que es el de universe_id)
+ * copiados del texto de una parte del export, sin parsearlos.
+ * → { frag: '{…},{…}', n }
+ */
+export function pickGames(part, ids) {
+  const want = new Set(ids);
+  const text = `{"games":[${part}]}`;
+  const offs = gameOffsets(text), out = [];
+  for (let k = 0; k < offs.length - 1; k++) {
+    const p = offs[k] + 6;   // el id va justo después de {"id":
+    if (!want.has(Number(text.slice(p, text.indexOf(",", p))))) continue;
+    out.push(text.slice(offs[k], offs[k + 1]).replace(/,$/, ""));
+  }
+  return { frag: out.join(","), n: out.length };
 }

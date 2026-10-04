@@ -110,7 +110,8 @@ medida: ver `README.md` ("CPU por paso").
 Nombres reales de los pasos: `init` → `explore-0..P` (una página de get-sorts por paso) → `explore-more`
 (get-sort-content) → `search-0..2` → `search-cursor` → [`rolimons` → `resolve-0..4`] → `sample-list` →
 `sample-0..M` (400 juegos; en la 1ª pasada del día 50 juegos con meta, horror y votos) → [`close`] → `maint` →
-`export-plan` → `export-0..E` → `export-join` → `tg-scan-i-j` → `tg-reduce` → `telegram` → `finish`.
+`export-plan` → `export-0..E` → `export-join` → `tg-scan-i-j` → `tg-reduce` → `tg-pick-i` → `tg-write` →
+`telegram` → `finish`.
 
 1. **explore**: `apis.roblox.com/explore-api/v1/get-sorts` (con paginación `sortsPageToken`) y
    `get-sort-content` para las listas con `nextPageToken` (~9 llamadas). Se insertan los juegos nuevos
@@ -140,8 +141,9 @@ Nombres reales de los pasos: `init` → `explore-0..P` (una página de get-sorts
    `data/export.json` = cabecera + partes + cierre con un `FixedLengthStream` (las partes no pasan por JS).
    Los juegos van en orden de universe_id.
 8. **telegram.json**: `tg-scan-i-j` aplica `telegramScanText` (de `telegram.js`) a la parte i en trozos de
-   50 juegos; `tg-reduce` junta las filas, elige los candidatos con `pickCandidates`, pide a D1 solo esos
-   juegos y escribe R2 **`data/telegram.json`**: mismo formato que el export, solo los candidatos (~60–90),
+   50 juegos; `tg-reduce` junta las filas y elige los candidatos con `pickCandidates`; `tg-pick-i` copia
+   sus objetos del texto de la parte i (sin parsearlos ni volver a D1) y `tg-write` escribe R2
+   **`data/telegram.json`**: mismo formato que el export, solo los candidatos (~60–90),
    más `totals` y `telegram: {counts, total, candidates}` (cabeceras exactas: games, players, rising, falling
    por categoría).
 9. **telegram**: lee `data/telegram.json` y llama a `runTelegram({ env, exportData, now, getState, setState,
@@ -241,7 +243,7 @@ export), `POST /api/admin/export` (lanza un Workflow solo de export). El esquema
 
 ## Telegram: prefiltro de candidatos
 
-(Backend: este prefiltro se hace en los pasos `tg-scan-*`/`tg-reduce` con `telegramScanText` y
+(Backend: este prefiltro se hace en los pasos `tg-scan-*`/`tg-reduce`/`tg-pick-*` con `telegramScanText` y
 `pickCandidates` de `telegram.js`, y el resultado es R2 `data/telegram.json`; ver el paso 8 del muestreo.)
 
 `telegram.js` pasa a `buildDashboard()` un export reducido. Tiene solo los juegos que pueden salir en los
@@ -259,8 +261,17 @@ en D1 `state`, clave `telegram`. Los secrets son `TELEGRAM_TOKEN` y `TELEGRAM_CH
    `samples` por la clave primaria (`CROSS JOIN`), así que leen solo las filas necesarias.
 2. **`state.hist_agg`**: pico, fecha del pico, días, primer día y últimos favoritos/votos de toda la historia,
    mantenidos al cerrar cada día (1 fila escrita al día). Sin esto, cada export leería `daily` entera.
-3. **Lecturas D1** (medidas en local con `meta.rows_read`, que cuenta también las tablas temporales de las
-   CTE): ~300.000 por export en régimen (~2,4 M/día con 8 pasadas, límite 5 M).
+3. **Lecturas D1**: D1 cuenta cada fila que pasa por un cursor, también las de las CTE materializadas, las
+   ordenaciones, las ventanas y `json_each` (comprobado en producción el 04/10/2026: el mismo SQL da casi las
+   mismas filas que en local). Con el export cada hora era el ~57 % del día. Desde el 04/10/2026 cada
+   juego recorre sus muestras de 48 h una sola vez y lo demás sale de funciones JSON escalares; Telegram no
+   vuelve a D1; los rangos salen de `state.sel_ids` (los seguidos, que escribe `select-apply` junto con
+   `games.sel`); y las filas cerradas de `d` se calculan una vez al día en `state.export_d`
+   (`{day: openDay, g: {id: entrada}}`, ~250 KB con ~220 seguidos). Las muestras no se guardan ahí, así que
+   insertar muestras con fechas pasadas no lo invalida; quien reescriba filas de `daily` de días ya cerrados
+   fuera del cierre tiene que borrar `export_d` (`dropExportCacheStmt`; ya lo hacen `/api/admin/import` de
+   `daily` y `/api/admin/rebuild`). Medido en local con los datos del 04/10 16:00: ~13.700 filas por pasada
+   (antes ~144.000), y ~5.000 más en la primera del día.
 4. **Muestras < TRACK_MIN_PLAYERS no se guardan** (como en tracker.py): ahorra ~5.000 escrituras al día.
 5. **`EXPORT_DAILY_DAYS = 24`** y `d` = últimas N filas por juego (paridad con Python, pedido por métricas).
    El filtro de emergentes exige visitas conocidas (de samples o, si no, la última de `daily`), como
