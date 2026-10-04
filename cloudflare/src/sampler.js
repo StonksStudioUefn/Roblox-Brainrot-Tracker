@@ -17,7 +17,8 @@
  *
  * Radar y juegos seguidos: en cada pasada se lee la lista de Rolimons (1
  * petición) y los jugadores de todos los juegos del radar (tracked = 1) se
- * apuntan en R2 radar/<día>/<ts>.json; al cerrar el día se convierten en UNA fila
+ * apuntan en R2 radar/<día>/<ts>.json (los no seguidos que no salen en
+ * Rolimons, con la Games API: ~7 peticiones); al cerrar el día se convierten en UNA fila
  * diaria por juego. Solo los juegos seguidos (sel = 1, unos 200 elegidos cada
  * día en `select`) tienen muestras cada hora y votos, y salen en el export.
  *
@@ -25,7 +26,7 @@
  *         search-0..N → search-cursor → rolimons (radar; en la 1ª del día, también
  *         places nuevos) → [resolve-0..K] → sample-list → sample-0..M (seguidos; en
  *         la 1ª pasada del día todo el radar con meta y horror, y votos de los
- *         seguidos) → [close (+ filas del radar)] → [select-plan → select-0..R →
+ *         seguidos) → radar-api → [close (+ filas del radar)] → [select-plan → select-0..R →
  *         select-apply] → maint → export-plan → export-0..E → export-join →
  *         telegram → finish
  *
@@ -40,7 +41,7 @@ import {
   SEARCH_QUERIES_PER_RUN, SELECTION, TRACK_MIN_PLAYERS,
 } from "./config.js";
 import {
-  Budget, SubBudget, chunks, fetchGames, fetchRolimons, fetchSearch, fetchSortContent, fetchSortsPage, fetchVotes,
+  Budget, GAMES_BATCH, SubBudget, chunks, fetchGames, fetchRolimons, fetchSearch, fetchSortContent, fetchSortsPage, fetchVotes,
   resolvePlaces,
 } from "./sources.js";
 import {
@@ -71,6 +72,10 @@ export const RUN_PREFIX = "tmp/run/";        // listas que pasan de una ejecuci�
 export const RADAR_PREFIX = "radar/";        // radar/<día>/<ts>.json: lecturas de Rolimons de cada muestreo
 export const RADAR_KEEP_DAYS = 7;            // días de ficheros del radar en R2
 export const RADAR_MIN_PLAYERS = 150;        // lecturas desde aquí (un bajón nocturno no deja huecos)
+// Los del radar sin lectura de Rolimons (casi todos entraron por Explore o el
+// buscador y Rolimons no los lista) que no se siguen se leen con la Games API
+// en el paso radar-api: tope por paso como sample-i (8 lotes ≈ 4,9 ms en frío)
+export const RADAR_API_MAX = 400;
 export const RADAR_DAYS = 14;                // filas diarias por juego para elegir los seguidos
 export const SELECT_SLICE = 250;             // juegos del radar por paso de select (en frío ≈ 5 ms)
 // Un juego que entra en la selección no tiene muestras de antes: se le copian
@@ -157,7 +162,7 @@ export class Sampler extends WorkflowEntrypoint {
     const firstSeen = isoMinute(ts);
     summary.ts = firstSeen;
     summary.first_of_day = init.firstOfDay;
-    const order = ["discover", "search", "rolimons", "resolve", "sample", "finalize"];
+    const order = ["discover", "search", "rolimons", "resolve", "sample", "radar-api", "finalize"];
     const at = order.indexOf(p.phase || "discover");
     const reach = ph => order.indexOf(ph) >= at;
     const startCursor = ph => (ph === (p.phase || "discover") ? p.cursor || 0 : 0);
@@ -236,13 +241,23 @@ export class Sampler extends WorkflowEntrypoint {
       if (inv.left < ROLIMONS_NEED) return await next("rolimons");
       await safe("rolimons", async () => {
         const budget = sub(ROLIMONS_NEED);
+        // Sin bajar de RADAR_MIN_PLAYERS: con la lista entera (7.600 juegos y no
+        // 3.100) el filtro tarda el doble, y los ~25 del radar que salen con
+        // menos solo cuestan medio lote de la Games API
         const all = await fetchRolimons(budget, RADAR_MIN_PLAYERS);
         if (!all || !all.length) throw new Error("Rolimons no devolvió la lista");
         // Un fichero por muestreo (un reintento lo reescribe igual): sin leer ni
         // reescribir el del día entero, que costaría CPU en cada pasada
-        const players = await radarPlayers(db, all, today);
+        const [{ players, missing }, selIds] = await Promise.all([
+          radarPlayers(db, all, today), getState(db, "sel_ids"),
+        ]);
         await env.BUCKET.put(`${RADAR_PREFIX}${today}/${ts}.json`, JSON.stringify(players));
-        const stats = { radar: Object.keys(players).length, calls: budget.used };
+        // Los seguidos ya tienen muestras cada hora; el radar les hace falta
+        // antes, para el relleno del día en que los eligen
+        const sel = new Set(selIds || []);
+        const api = missing.filter(id => !sel.has(id)).slice(0, RADAR_API_MAX);
+        await env.BUCKET.put(`${tmp}radar-api.json`, JSON.stringify(api));
+        const stats = { radar: Object.keys(players).length, missing: missing.length, api: api.length, calls: budget.used };
         if (!daily) return { stats };
 
         const list = all.filter(r => r[2] >= TRACK_MIN_PLAYERS);
@@ -324,6 +339,38 @@ export class Sampler extends WorkflowEntrypoint {
       summary.steps.sample = agg;   // un resumen (con meta son ~45 pasos)
     }
 
+    // ── radar-api: los del radar sin lectura de Rolimons, con la Games API, al
+    // mismo fichero radar/<día>/<ts>.json (ts de la pasada: vale en otra ejecución).
+    // Después de las muestras: si la Games API corta por ráfaga (429), que se
+    // pierda una lectura del radar y no las muestras de los seguidos
+    if (reach("radar-api") && want("rolimons") && (daily || radarHour)) {
+      const todo = await step.do(`radar-api-list-${seg}`, STEP, async () => {
+        const o = await env.BUCKET.get(`${tmp}radar-api.json`);
+        return o ? await o.json() : [];
+      });
+      if (todo.length) {
+        const need = Math.ceil(todo.length / GAMES_BATCH) + 4;
+        if (inv.left < need) return await next("radar-api");
+        await safe("radar-api", async () => {
+          const budget = sub(need);
+          const games = await fetchGames(budget, todo);
+          const batches = Math.ceil(todo.length / GAMES_BATCH);
+          if (games.failed === batches) throw new Error(`Games API: ${batches}/${batches} lotes sin respuesta`);
+          // Leer y reescribir el fichero de Rolimons lo deja igual si el paso se repite
+          const key = `${RADAR_PREFIX}${today}/${ts}.json`;
+          const obj = await env.BUCKET.get(key);
+          const players = obj ? await obj.json() : {};
+          let added = 0;
+          for (const g of games.data) {
+            if ((g.playing || 0) < RADAR_MIN_PLAYERS) continue;
+            players[g.id] = Math.max(players[g.id] ?? 0, g.playing);
+            added++;
+          }
+          await env.BUCKET.put(key, JSON.stringify(players));
+          return { asked: todo.length, got: games.data.length, added, failed: games.failed, calls: budget.used };
+        });
+      }
+    }
     // ── finalize: cierre, mantenimiento, export y Telegram (en una ejecución
     // nueva si ya no quedan peticiones para Telegram)
     if (inv.left < TELEGRAM_NEED && want("telegram") && p.phase !== "finalize") return await next("finalize");

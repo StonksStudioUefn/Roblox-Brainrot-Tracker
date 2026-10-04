@@ -104,6 +104,7 @@ parsear respuestas, calcular y serializar (esperar a la red, D1 o R2 no cuenta).
 | `rolimons` | gamelist de 1 MB: decodificar + filtro por texto (regex) | 6,8 |
 | `resolve-i` | 40 respuestas pequeñas | < 0,5 |
 | `sample-i` (400 juegos) | 8 respuestas de la Games API (~560 KB) | 4,9 |
+| `radar-api` (~320 juegos) | 7 respuestas de la Games API (~450 KB) + leer y reescribir el fichero del radar (~48 KB) | ~4 (por debajo de `sample-i` medido en la misma máquina) |
 | `sample-i` con meta (50 juegos) | 1 respuesta + votos + `classifyHorror` de 50 | 3,9 |
 | `export-i` | recibir ~330 KB de D1 (hoy) / ~680 KB (parte grande en régimen) | 3,0 / 6,2 |
 | `export-join` | cabecera; las partes van en stream | 0,1 |
