@@ -120,7 +120,8 @@ export const EVENTS = {
   window_days: 7,
   mad_k: 3.5,
   min_ratio: 1.6,
-  spike_now_ratio: 1.8,
+  spike_now_ratio: 1.8,      // «Pico ahora»: la muestra de ahora frente a la mediana de los máximos de 7 días
+  spike_weekday_ratio: 1.5,  // y frente al máximo del mismo día de la semana de hace 1-3 semanas
 };
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
