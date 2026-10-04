@@ -12,7 +12,7 @@ La interfaz entre piezas está en [`CONTRACT.md`](CONTRACT.md).
 | `src/sources.js` | Clientes de Rolimons, Explore, Search, Games, Votes, place→universe, iconos |
 | `src/db.js` | SQL: inserciones (`json_each`), cierre diario, `hist_agg`, export por trozos, historial, import |
 | `scripts/migrate_from_git.py` | Sube los datos actuales del repo (git o carpeta) a D1 por `/api/admin/import` |
-| `test/` | `dev.sh`/`sync.sh` (servidor local), `cpu_steps.mjs` (CPU por paso), `bench_rolimons.mjs`, `cf_loader.mjs` |
+| `test/` | `dev.sh`/`sync.sh` (servidor local), `cpu_steps.mjs` (CPU por paso), `bench_rolimons.mjs`, `cf_loader.mjs`, `export.bench.mjs` (filas leídas y salida del export contra un D1 local) |
 
 ## Desarrollo y pruebas en local
 
@@ -108,7 +108,8 @@ parsear respuestas, calcular y serializar (esperar a la red, D1 o R2 no cuenta).
 | `export-i` | recibir ~330 KB de D1 (hoy) / ~680 KB (parte grande en régimen) | 3,0 / 6,2 |
 | `export-join` | cabecera; las partes van en stream | 0,1 |
 | `tg-scan-i-j` (50 juegos) | decodificar la parte + `telegramScanText` (régimen; con 100 juegos ~9–13) | ~4 |
-| `tg-reduce` | `pickCandidates` (~1.000 filas) + ~80 juegos de D1 | 2,4 |
+| `tg-reduce` | `pickCandidates` (~1.000 filas) | < 2,4 |
+| `tg-pick-i` | decodificar la parte + copiar los ~70 candidatos (`pickGames`, parte de 416 KB) | ~2 |
 | `telegram` | `runTelegram` sin mensajes / con alertas o diario | 6,2 / 11–14 |
 
 Filtro de Rolimons (1,05 MB, 7.602 juegos → 2.127): `JSON.parse` + filtro 12–17 ms en frío (5,5 ms en
@@ -134,7 +135,12 @@ temporales de las CTE):
 Total estimado en régimen: **~45.000–48.000 filas/día** (límite 100.000; el objetivo de 45.000 queda justo).
 La migración escribe ~41.700 una sola vez; volver a ejecutarla escribe 0.
 
-Lecturas: ~215.000–245.000 por export hoy (6 trozos + telegram), ~300.000 en régimen → ~2,4 M/día de 5 M.
+Lecturas del export (`test/export.bench.mjs`, datos de producción del 04/10 16:00, 221 seguidos, 6.089
+muestras de 48 h): **~13.700 filas por pasada** y ~5.000 más en la primera del día, cuando se rehace
+`state.export_d`; antes eran ~144.000 (103.000 del trozo, 37.000 de Telegram y 3.400 del plan). Casi todo
+es recorrer una vez las muestras de 48 h (~10.600 en régimen) y ordenar las del día en curso para las
+medianas. En producción, la misma consulta sin `export_d` leyó 18.891 filas (18.449 en local). Escribe 2
+filas al día (`export_d`).
 Lo demás (espacio para el Almacén, poda, radar, lista de seguidos): ver "Lecturas fuera del export" en
 `CONTRACT.md`. Para medir una consulta con datos reales, la base exportada (`wrangler d1 export`) se carga en
 el D1 local y se lee `meta.rows_read`.

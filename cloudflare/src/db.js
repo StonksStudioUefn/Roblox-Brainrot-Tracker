@@ -538,8 +538,15 @@ export function untrackStmt(db, today) {
  * une en `data/export.json` con un stream (sin pasar el contenido por JS).
  *
  * data/telegram.json (candidatos de Telegram) lo calcula sampler.js con
- * telegramScanText/pickCandidates de telegram.js sobre las partes, y luego
- * pide aquí solo esos juegos (`ids`).
+ * telegramScanText/pickCandidates de telegram.js sobre las partes, y copia de
+ * esas mismas partes los juegos elegidos (no vuelve a D1).
+ *
+ * Lecturas: el export corre cada hora y era el ~57 % de las filas leídas del
+ * día (límite de 5 M en el plan gratis). D1 cuenta cada fila que pasa por un
+ * cursor: tablas, CTE materializadas, ordenaciones, ventanas y también las de
+ * json_each. Por eso cada juego recorre sus muestras UNA vez (en orden de la
+ * clave primaria, sin ordenar) y todo lo demás sale de ese recorrido o de
+ * funciones JSON escalares (json_set, json_insert…), que no recorren filas.
  */
 
 /** Rangos de universe_id con ~`size` juegos seguidos cada uno. → [[lo, hi], …] */
@@ -566,11 +573,64 @@ export async function lastSampleTs(db) {
 }
 
 /**
- * Un trozo del export: los juegos con universe_id en [lo, hi] (o solo `ids`)
- * que cumplen el filtro del contrato (con `ids`, sin filtro).
+ * state.export_d = {day: openDay, g: {universe_id: entrada}}: las filas
+ * cerradas de `daily` que salen en `d`, que no cambian hasta que se cierra
+ * otro día (y entonces cambia openDay). Se calculan una vez al día por juego
+ * en vez de leer ~24 filas por juego en cada export. Las muestras NO se
+ * guardan aquí: se leen siempre de `samples`, así que da igual cuándo se
+ * inserten (también las de fechas pasadas). Quien reescriba filas cerradas de
+ * `daily` fuera del cierre (import, rebuild) tiene que borrar esta clave.
+ */
+export const EXPORT_D_KEY = "export_d";
+
+export function dropExportCacheStmt(db) {
+  return db.prepare("DELETE FROM state WHERE key = ?1").bind(EXPORT_D_KEY);
+}
+
+// Días sin cerrar que puede tocar la ventana de muestras (48 h tocan como
+// mucho 3 fechas; la 4ª por si entra una pasada más nueva que lastTs).
+const OPEN_DAYS = [0, 1, 2, 3];
+
+// Entrada de un juego (?9 = filas de `d`, ?10 = openDay, como en buildExportSlice):
+// [filas cerradas asc ([fecha, mediana, mín, máx, n, null], las últimas ?9 antes
+// de openDay), [[índice, visitas] de las 2 últimas de esas filas con visitas, la
+// más reciente primero]]. Las visitas van aparte porque cuáles se enseñan depende
+// de los días abiertos de cada export.
+const closedEntrySql = id => `(SELECT json_array(
+    (SELECT json_group_array(json_array(date, median, min, max, n, NULL) ORDER BY date) FROM (
+       SELECT date, median, min, max, n FROM daily
+       WHERE universe_id = ${id} AND date < ?10 ORDER BY date DESC LIMIT ?9)),
+    (SELECT json_group_array(json_array(
+              (SELECT COUNT(*) FROM daily dd WHERE dd.universe_id = ${id} AND dd.date >= w.lo AND dd.date < v.date),
+              v.visits) ORDER BY v.date DESC)
+     FROM (SELECT date, visits FROM daily
+           WHERE universe_id = ${id} AND date >= w.lo AND date < ?10 AND visits IS NOT NULL
+           ORDER BY date DESC LIMIT 2) v))
+  FROM (SELECT COALESCE((SELECT date FROM daily WHERE universe_id = ${id} AND date < ?10
+                         ORDER BY date DESC LIMIT 1 OFFSET ?9 - 1), '') AS lo) w)`;
+
+// Juegos del trozo: los de la lista ?13 o los del rango (y seguidos si ?15).
+// La rama que no toca se descarta antes de recorrer nada.
+const SLICE_GAMES = `g0 AS (
+      SELECT universe_id AS id FROM games
+      WHERE ?13 IS NULL AND universe_id BETWEEN ?11 AND ?12 AND (?15 = 0 OR sel = 1)
+      UNION ALL
+      SELECT value FROM json_each(?13) WHERE ?13 IS NOT NULL
+    )`;
+
+/** Mediana redondeada como Python de los `n` elementos ORDENADOS de `a` que empiezan en `f`. */
+const sortedMedian = (a, f, n) => {
+  const mid = `(CASE WHEN ${n} % 2 = 1 THEN ${a} ->> (${f} + ${n} / 2) ELSE (${a} ->> (${f} + ${n} / 2 - 1)) + (${a} ->> (${f} + ${n} / 2)) END)`;
+  return `(CASE WHEN ${n} % 2 = 1 THEN ${mid} ELSE ${mid} / 2 + (${mid} % 2) * ((${mid} / 2) % 2) END)`;
+};
+
+/**
+ * Un trozo del export: los juegos con universe_id en [lo, hi] o los de `ids`
+ * que cumplen el filtro del contrato (`filter: false`, todos los que tengan
+ * muestras). Con `ids` se usa y se completa state.export_d.
  * → { frag: '{…},{…}', n, last_ts, ts24: [ts…], meta }
  */
-export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi = Number.MAX_SAFE_INTEGER, ids = null, selected = false }) {
+export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi = Number.MAX_SAFE_INTEGER, ids = null, selected = false, filter = true }) {
   const now = minuteOf(nowMs);
   const today = isoDate(now);
   openDay = openDay && openDay < today ? openDay : today;
@@ -578,115 +638,165 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
   const sFrom = lastTs - EXPORT_SAMPLE_HOURS * 60;      // muestras: última − 48 h (incluida)
   const cut24 = lastTs - 24 * 60;                        // máximo de 24 h para el filtro
   const openTs = Math.max(dayStart(openDay), sFrom);
-  const sql = `
-    WITH
-    s48 AS MATERIALIZED (
-      SELECT s.universe_id AS id, s.ts, s.playing AS p, s.visits AS v
-      FROM games g CROSS JOIN samples s ON s.universe_id = g.universe_id AND s.ts >= ?1
-      WHERE CASE WHEN ?13 IS NULL THEN (g.universe_id BETWEEN ?11 AND ?12) AND (?15 = 0 OR g.sel = 1)
-                 ELSE g.universe_id IN (SELECT value FROM json_each(?13)) END
-    ),
-    st AS MATERIALIZED (
-      SELECT id, MAX(CASE WHEN ts >= ?2 THEN p END) AS max24,
-             MAX(v) AS visits,     -- las visitas solo crecen: el máximo es el último valor
-             MAX(CASE WHEN v IS NOT NULL THEN ts END) AS t1
-      FROM s48 GROUP BY id
-    ),
-    sel AS MATERIALIZED (
-      SELECT g.*, st.max24, st.t1
-      FROM st CROSS JOIN games g ON g.universe_id = st.id
-      WHERE ?13 IS NOT NULL
-         OR st.max24 >= ?3
-         OR (g.horror = 1 AND st.max24 >= ?4)
-         OR (st.max24 >= ?6 AND COALESCE(st.visits, (SELECT d.visits FROM daily d WHERE d.universe_id = g.universe_id
-               AND d.visits IS NOT NULL ORDER BY d.date DESC LIMIT 1)) < ?5)   -- sin visitas conocidas, no
-    ),
-    -- Días sin cerrar en daily: se calculan desde las muestras
-    pr AS (
-      SELECT x.id, x.p, x.v, date(x.ts * 60, 'unixepoch') AS day,
-             ROW_NUMBER() OVER (PARTITION BY x.id, date(x.ts * 60, 'unixepoch') ORDER BY x.p) AS rn,
-             COUNT(*) OVER (PARTITION BY x.id, date(x.ts * 60, 'unixepoch')) AS cnt
-      FROM s48 x WHERE x.ts >= ?7 AND x.id IN (SELECT universe_id FROM sel)
-    ),
-    part AS MATERIALIZED (
-      SELECT id, day, MAX(cnt) AS n,
-             ${MEDIAN_SQL} AS median,
-             MIN(p) AS mn, MAX(p) AS mx, MAX(v) AS v
-      FROM pr GROUP BY id, day
-    ),
-    pa AS MATERIALIZED (
-      SELECT id, MAX(mx) AS pmx, COUNT(*) AS pdays, MIN(day) AS pfirst,
-             MAX(CASE WHEN rk = 1 THEN day END) AS pday
-      FROM (SELECT id, day, mx, ROW_NUMBER() OVER (PARTITION BY id ORDER BY mx DESC, day) AS rk FROM part)
-      GROUP BY id
-    ),
-    -- Agregados de toda la historia (state.hist_agg): un solo valor JSON que se
-    -- consulta con json_extract por juego (un JOIN con json_each recorría el
-    -- objeto entero por cada juego: millones de filas leídas)
-    hj AS (SELECT COALESCE((SELECT value FROM state WHERE key = 'hist_agg'), '{}') AS j),
-    sel2 AS (
-      SELECT sel.*, json_extract(hj.j, '$."' || sel.universe_id || '"') AS hv FROM sel CROSS JOIN hj
-    ),
-    games_json AS (
-      SELECT s2.universe_id AS id, json_object(
-        'id', s2.universe_id, 'place_id', s2.place_id, 'name', s2.name,
-        'creator', s2.creator,
-        'creator_verified', json(CASE s2.creator_verified WHEN 1 THEN 'true' WHEN 0 THEN 'false' ELSE 'null' END),
-        'created', s2.created, 'updated', s2.updated,
-        'genre', s2.genre, 'genre_l1', s2.genre_l1, 'genre_l2', s2.genre_l2,
-        'max_players', s2.max_players, 'first_seen', s2.first_seen,
-        'horror', json(CASE WHEN s2.horror = 1 THEN 'true' ELSE 'false' END),
-        'horror_score', COALESCE(s2.horror_score, 0),
-        'horror_reasons', json(COALESCE(s2.horror_reasons, '[]')),
-        'sorts', json(COALESCE((SELECT json_group_object(k.sort_id, k.rank) FROM sort_hits k
-                       WHERE k.universe_id = s2.universe_id AND k.date = ?8 AND k.sort_id NOT LIKE 'search:%'), '{}')),
-        'favorites', s2.hv ->> 4, 'up', s2.hv ->> 5, 'down', s2.hv ->> 6,
-        'peak', CASE WHEN pa.pmx > COALESCE(s2.hv ->> 0, -1) THEN pa.pmx ELSE s2.hv ->> 0 END,
-        'peak_date', CASE WHEN pa.pmx > COALESCE(s2.hv ->> 0, -1) THEN pa.pday ELSE s2.hv ->> 1 END,
-        'days_tracked', COALESCE(s2.hv ->> 2, 0) + COALESCE(pa.pdays, 0),
-        'first_day', COALESCE(s2.hv ->> 3, pa.pfirst),
-        -- Últimas ?9 filas (cerradas + días abiertos). visits solo en las 2
-        -- últimas filas que la tienen (lo único que usa metrics.js)
-        'd', json(COALESCE((SELECT json_group_array(json_array(r.o, r.median, r.mn, r.mx, r.n,
-                 CASE WHEN r.v IS NOT NULL AND r.vk <= 2 THEN r.v END)) FROM (
-               SELECT u.*, SUM(u.v IS NOT NULL) OVER (ORDER BY u.o DESC ROWS UNBOUNDED PRECEDING) AS vk
-               FROM (SELECT * FROM (
-                       SELECT date AS o, median, min AS mn, max AS mx, n, visits AS v FROM daily
-                       WHERE universe_id = s2.universe_id AND date < ?10 ORDER BY date DESC LIMIT ?9)
-                     UNION ALL
-                     SELECT day, median, mn, mx, n, v FROM part WHERE id = s2.universe_id
-                     ORDER BY 1 DESC LIMIT ?9) u
-               ORDER BY u.o) r), '[]')),
-        -- visits solo en la última muestra que la tiene y en la última ≥ 20 h anterior
-        's', json(COALESCE((SELECT json_group_array(json_array(x.ts, x.playing,
-                 CASE WHEN x.ts = s2.t1 OR x.ts = x.t0 THEN x.visits END)) FROM (
-               SELECT ts, playing, visits,
-                      MAX(CASE WHEN visits IS NOT NULL AND ts <= s2.t1 - 1200 THEN ts END) OVER () AS t0
-               FROM samples WHERE universe_id = s2.universe_id AND ts >= ?1 ORDER BY ts) x), '[]'))
-      ) AS gj
-      FROM sel2 s2 LEFT JOIN pa ON pa.id = s2.universe_id
-    ),
-    gm AS MATERIALIZED (SELECT MAX(ts) AS last_ts FROM s48)
-    SELECT
-      (SELECT group_concat(gj, ',') FROM (SELECT gj FROM games_json ORDER BY id)) AS frag,
-      (SELECT COUNT(*) FROM sel) AS n,
-      (SELECT last_ts FROM gm) AS last_ts,
-      (SELECT json_group_array(ts) FROM (SELECT DISTINCT ts FROM s48 WHERE ts >= ?14)) AS ts24`;
-
-  const res = await db.prepare(sql).bind(
+  const binds = [
     sFrom, cut24,
     CATEGORIES.general.min_players, CATEGORIES.horror.min_players,
     EMERGING.max_visits, EMERGING.min_players,
     openTs, today, EXPORT_DAILY_DAYS, openDay, lo, hi,
     ids ? JSON.stringify(ids) : null, now - 24 * 60, selected ? 1 : 0,
-  ).all();
-  const row = res.results?.[0] || {};
+    filter ? 1 : 0, Math.floor(openTs / DAY_MIN), EXPORT_D_KEY,
+  ];
+  // Con una lista (los seguidos, ~200 juegos) las filas cerradas van a
+  // state.export_d; sin ella (aún sin selección: todo el radar) no caben en
+  // una fila de D1 y se leen de daily en cada export, como antes.
+  const cache = !!ids;
+
+  // Días sin cerrar, de lo que deja cada juego en `a`: x[5] = jugadores de los
+  // días abiertos ordenados por día y jugadores; el día k empieza en x[6 + 3k],
+  // tiene x[7 + 3k] muestras y x[8 + 3k] es su máximo de visitas.
+  const K = OPEN_DAYS.map(k => ({
+    a: "(s.x -> 5)", f: `(s.x ->> ${6 + 3 * k})`, n: `(s.x ->> ${7 + 3 * k})`, v: `(s.x ->> ${8 + 3 * k})`,
+    day: `date((?17 + ${k}) * 86400, 'unixepoch')`,
+  }));
+  for (const k of K) {
+    k.has = `(${k.n} > 0)`;
+    k.mn = `(${k.a} ->> ${k.f})`;
+    k.mx = `(${k.a} ->> (${k.f} + ${k.n} - 1))`;
+    k.median = sortedMedian(k.a, k.f, k.n);
+  }
+  const days = `(${K.map(k => k.has).join(" + ")})`;
+  const vdays = `(${K.map(k => `(${k.has} AND ${k.v} IS NOT NULL)`).join(" + ")})`;
+  const pmx = `NULLIF(MAX(${K.map(k => `CASE WHEN ${k.has} THEN ${k.mx} ELSE -1 END`).join(", ")}), -1)`;
+
+  const sql = `
+    WITH
+    ${SLICE_GAMES},
+    -- Última muestra con visitas (t1) y la última ≥ 20 h anterior (t0): las
+    -- únicas de "s" que llevan visitas. Hacia atrás por la clave primaria.
+    g1 AS (
+      SELECT id, (SELECT ts FROM samples WHERE universe_id = g0.id AND ts >= ?1 AND visits IS NOT NULL
+                  ORDER BY ts DESC LIMIT 1) AS t1
+      FROM g0
+    ),
+    g2 AS MATERIALIZED (
+      SELECT id, t1, (SELECT ts FROM samples WHERE universe_id = g1.id AND ts >= ?1 AND ts <= g1.t1 - 1200
+                      AND visits IS NOT NULL ORDER BY ts DESC LIMIT 1) AS t0
+      FROM g1
+    ),
+    -- Un solo recorrido de las muestras de 48 h de cada juego:
+    -- x = [último ts, máx 24 h, máx visitas, "s", ts de 24 h, jugadores de los
+    --      días abiertos ordenados (para las medianas), y por día abierto k
+    --      dónde empieza, cuántas muestras tiene y su máximo de visitas]
+    a AS MATERIALIZED (
+      SELECT g2.id, g2.t1, (SELECT json_array(
+          MAX(ts), MAX(CASE WHEN ts >= ?2 THEN playing END), MAX(visits),
+          json_group_array(json_array(ts, playing, CASE WHEN ts = g2.t1 OR ts = g2.t0 THEN visits END)),
+          json_group_array(ts) FILTER (WHERE ts >= ?14),
+          json_group_array(playing ORDER BY ts / 1440, playing) FILTER (WHERE ts >= ?7),
+          ${OPEN_DAYS.map(k => `COUNT(*) FILTER (WHERE ts >= ?7 AND ts / 1440 < ?17 + ${k}),
+          COUNT(*) FILTER (WHERE ts >= ?7 AND ts / 1440 = ?17 + ${k}),
+          MAX(visits) FILTER (WHERE ts >= ?7 AND ts / 1440 = ?17 + ${k})`).join(",\n          ")})
+        FROM (SELECT ts, playing, visits FROM samples WHERE universe_id = g2.id AND ts >= ?1 ORDER BY ts)) AS x
+      FROM g2
+    ),
+    st AS (SELECT id, t1, x, x ->> 1 AS max24, x ->> 2 AS visits FROM a WHERE x ->> 0 IS NOT NULL),
+    sel AS MATERIALIZED (
+      SELECT g.*, st.max24, st.t1, st.x
+      FROM st CROSS JOIN games g ON g.universe_id = st.id
+      WHERE ?16 = 0
+         OR st.max24 >= ?3
+         OR (g.horror = 1 AND st.max24 >= ?4)
+         OR (st.max24 >= ?6 AND COALESCE(st.visits, (SELECT d.visits FROM daily d WHERE d.universe_id = g.universe_id
+               AND d.visits IS NOT NULL ORDER BY d.date DESC LIMIT 1)) < ?5)   -- sin visitas conocidas, no
+    ),
+    -- Días sin cerrar (pmx/pday/pdays/pfirst = pico, su día, nº de días y el primero)
+    -- y filas cerradas de daily (ce: de state.export_d o, si falta, de daily).
+    -- Sin caché, MATERIALIZED: ce se usa varias veces y cada uso volvería a leer daily
+    s3 AS ${cache ? "" : "MATERIALIZED "}(
+      SELECT s.*, ${days} AS pdays, ${vdays} AS pvdays, ${pmx} AS pmx,
+             CASE ${K.map(k => `WHEN ${k.has} THEN ${k.day}`).join(" ")} END AS pfirst,
+             COALESCE(json_extract((SELECT CASE WHEN value ->> '$.day' = ?10 THEN value END FROM state WHERE key = ?18),
+                                   '$.g."' || s.universe_id || '"'),
+                      ${closedEntrySql("s.universe_id")}) AS ce
+      FROM sel s
+    ),
+    s4 AS (
+      SELECT s.*, CASE ${K.map(k => `WHEN ${k.has} AND ${k.mx} = s.pmx THEN ${k.day}`).join(" ")} END AS pday,
+             MAX(0, json_array_length(s.ce -> 0) + s.pdays - ?9) AS dropn,
+             json_extract((SELECT value FROM state WHERE key = 'hist_agg'), '$."' || s.universe_id || '"') AS hv
+      FROM s3 s
+    ),
+    games_json AS (
+      SELECT s.universe_id AS id, json_object(
+        'id', s.universe_id, 'place_id', s.place_id, 'name', s.name,
+        'creator', s.creator,
+        'creator_verified', json(CASE s.creator_verified WHEN 1 THEN 'true' WHEN 0 THEN 'false' ELSE 'null' END),
+        'created', s.created, 'updated', s.updated,
+        'genre', s.genre, 'genre_l1', s.genre_l1, 'genre_l2', s.genre_l2,
+        'max_players', s.max_players, 'first_seen', s.first_seen,
+        'horror', json(CASE WHEN s.horror = 1 THEN 'true' ELSE 'false' END),
+        'horror_score', COALESCE(s.horror_score, 0),
+        'horror_reasons', json(COALESCE(s.horror_reasons, '[]')),
+        'sorts', json(COALESCE((SELECT json_group_object(k.sort_id, k.rank) FROM sort_hits k
+                       WHERE k.universe_id = s.universe_id AND k.date = ?8 AND k.sort_id NOT LIKE 'search:%'), '{}')),
+        'favorites', s.hv ->> 4, 'up', s.hv ->> 5, 'down', s.hv ->> 6,
+        'peak', CASE WHEN s.pmx > COALESCE(s.hv ->> 0, -1) THEN s.pmx ELSE s.hv ->> 0 END,
+        'peak_date', CASE WHEN s.pmx > COALESCE(s.hv ->> 0, -1) THEN s.pday ELSE s.hv ->> 1 END,
+        'days_tracked', COALESCE(s.hv ->> 2, 0) + s.pdays,
+        'first_day', COALESCE(s.hv ->> 3, s.pfirst),
+        -- Últimas ?9 filas: las cerradas (sin las ?dropn más viejas) y los días
+        -- abiertos. visits solo en las 2 últimas filas que la tienen (lo único
+        -- que usa metrics.js): primero las de los días abiertos y, si faltan, las
+        -- cerradas. Las rutas '$.x' no existen en un array: json_set/json_insert/
+        -- json_remove las ignoran, y así cada paso es condicional sin repetir texto.
+        'd', json(json_insert(json_remove(json_set(s.ce -> 0,
+                 CASE WHEN s.pvdays < 2 AND json_array_length(s.ce -> 1) >= 1 AND (s.ce ->> '$[1][0][0]') >= s.dropn
+                      THEN '$[' || (s.ce ->> '$[1][0][0]') || '][5]' ELSE '$.x' END, s.ce ->> '$[1][0][1]',
+                 CASE WHEN s.pvdays < 1 AND json_array_length(s.ce -> 1) >= 2 AND (s.ce ->> '$[1][1][0]') >= s.dropn
+                      THEN '$[' || (s.ce ->> '$[1][1][0]') || '][5]' ELSE '$.x' END, s.ce ->> '$[1][1][1]'),
+               ${OPEN_DAYS.map(k => `CASE WHEN s.dropn > ${k} THEN '$[0]' ELSE '$.x' END`).join(", ")}),
+               ${K.map((k, i) => `CASE WHEN ${k.has} THEN '$[#]' ELSE '$.x' END,
+                 json_array(${k.day}, ${k.median}, ${k.mn}, ${k.mx}, ${k.n},
+                            CASE WHEN ${k.v} IS NOT NULL AND (${K.slice(i + 1).map(j => `(${j.has} AND ${j.v} IS NOT NULL)`).join(" + ") || "0"}) < 2
+                                 THEN ${k.v} END)`).join(",\n               ")})),
+        's', json(s.x -> 3)
+      ) AS gj
+      FROM s4 s
+    )
+    SELECT
+      (SELECT group_concat(gj, ',') FROM (SELECT gj FROM games_json ORDER BY id)) AS frag,
+      (SELECT COUNT(*) FROM sel) AS n,
+      (SELECT MAX(x ->> 0) FROM a) AS last_ts,
+      (SELECT json_group_array(json(x -> 4)) FROM a WHERE x ->> 0 IS NOT NULL) AS ts24`;
+
+  const stmts = [db.prepare(sql).bind(...binds)];
+  if (cache) {
+    // Filas cerradas de los juegos que aún no están en state.export_d (con un
+    // día nuevo, todos): una escritura al día, o cuando cambia la selección.
+    stmts.unshift(db.prepare(`
+      WITH
+      ${SLICE_GAMES},
+      c AS (SELECT CASE WHEN value ->> '$.day' = ?10 THEN value END AS j FROM state WHERE key = ?18),
+      miss AS (SELECT id FROM g0 WHERE json_type((SELECT j FROM c), '$.g."' || id || '"') IS NULL)
+      INSERT INTO state (key, value)
+      SELECT ?18, json_object('day', ?10, 'g', json_patch(COALESCE((SELECT j FROM c) -> '$.g', '{}'),
+                                                          json_group_object(id, json(${closedEntrySql("miss.id")}))))
+      FROM miss WHERE true HAVING COUNT(*) > 0
+      ON CONFLICT (key) DO UPDATE SET value = excluded.value WHERE state.value IS NOT excluded.value`).bind(...binds));
+  }
+  const res = await db.batch(stmts);
+  const main = res[res.length - 1];
+  const row = main.results?.[0] || {};
+  const ts24 = [...new Set(JSON.parse(row.ts24 || "[]").flat())];
   return {
     frag: row.frag || "",
     n: row.n || 0,
     last_ts: row.last_ts ?? null,
-    ts24: JSON.parse(row.ts24 || "[]"),
-    meta: res.meta,
+    ts24,
+    meta: {
+      rows_read: res.reduce((t, r) => t + (r.meta?.rows_read || 0), 0),
+      rows_written: res.reduce((t, r) => t + (r.meta?.rows_written || 0), 0),
+    },
   };
 }
 

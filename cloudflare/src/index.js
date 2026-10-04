@@ -41,6 +41,7 @@ import horrorSrc from "./horror.js" with { type: "text" };
 import { getState, getStates, history, importStmt, isoDate, minuteOf, radarCounts, rebuildHistStmt, written } from "./db.js";
 import { chunks, iconsUrl, thumbsUrl, URLS, UA } from "./sources.js";
 import { espacioD1, withApp } from "./stonks.js";
+import { dropExportCacheStmt } from "./db.js";
 
 export { Sampler } from "./sampler.js";
 export { Operaciones } from "./stonks.js";
@@ -259,13 +260,14 @@ async function admin(req, env, url) {
       if (!Array.isArray(columns) || !Array.isArray(rows)) throw new HttpError(400, "Faltan columns/rows");
       if (!rows.length) return json({ table, rows: 0, written: 0 });
       let res;
-      try { res = await importStmt(env.DB, table, columns, rows).run(); }
+      // Filas de daily importadas: las cerradas que guarda el export (state.export_d) ya no valen
+      try { res = await env.DB.batch([importStmt(env.DB, table, columns, rows), ...(table === "daily" ? [dropExportCacheStmt(env.DB)] : [])]); }
       catch (e) { throw new HttpError(400, String(e?.message || e)); }
-      return json({ table, rows: rows.length, written: written(res) });
+      return json({ table, rows: rows.length, written: written(res[0]) });
     }
     // El export se hace por pasos (CPU): se lanza un Workflow que solo exporta
     if (action === "rebuild") {
-      const res = await rebuildHistStmt(env.DB).run();
+      const [res] = await env.DB.batch([rebuildHistStmt(env.DB), dropExportCacheStmt(env.DB)]);
       const inst = await env.SAMPLER.create({ id: `export-${stamp()}`, params: { only: ["export"] } });
       return json({ hist_written: written(res), export_instance: inst.id });
     }
