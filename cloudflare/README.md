@@ -65,8 +65,11 @@ se hace una vez en `test/.filas/` (`--seed` la rehace) y es la base como estaba 
 pasada de las 00:00 y las de 01:00 a 03:00 (`--dia`: las 24 y la de las 00:00 del día siguiente), y
 `espacio()` del Almacén. Imprime las filas por pasada y por paso (`-v`: por consulta) y **falla** si una
 pasada pasa de su tope (`TOPES`, ~20 % sobre lo medido), si una consulta lee más de un 20 % (y más de
-10.000 filas) en `anio` que en `regimen` (recorre `daily` o `sort_hits` enteras) o si un cierre que falla
-siempre repite el meta o se intenta más de `DAILY_TRIES` veces («cascada»). Para comparar con otra versión:
+10.000 filas) en `anio` que en `regimen` (recorre `daily` o `sort_hits` enteras), si un cierre que falla
+siempre repite el meta o se intenta más de `DAILY_TRIES` veces («cascada»), si dos pasadas que se cortan
+antes de las tareas del día les gastan los intentos («cortes») o si, al desplegar a media pasada, una
+ejecución encadenada del código de antes escribe en `hist` antes de migrar `state.hist_agg` o exporta sin
+sus datos («despliegue», con y sin el esquema aplicado). Para comparar con otra versión:
 `--src=<carpeta con su src/>`, y `--salida=<carpeta>` guarda el export y `telegram.json` de cada pasada
 (`cmp -r` entre versiones). `test/export.bench.mjs` acepta `--config=test/filas.wrangler.toml
 --persist=<copia de test/.filas/<escenario>/semilla>` para medir solo el export sobre esa base.
@@ -83,11 +86,19 @@ Fixtures de `cpu_steps.mjs`: `games_pages.json` y `votes_pages.json` (20 respues
    (`CREATE TABLE IF NOT EXISTS`; lo demás ya está aplicado y no cambia; no borra datos).
 2. `npx wrangler deploy`.
 3. Nada más: la primera pasada copia `state.hist_agg` a `hist` y borra la clave (en su paso `init`, en un
-   batch), y lee la marca vieja `day` mientras no exista `meta_day`, así que no repite el meta del día.
-   Si el código llegara antes que el esquema, `migrateHist` crea la tabla. Para comprobarlo:
-   `GET /api/admin/status` enseña `meta_day`, `maint_day` y `daily_tries`, y
+   batch: las dos cosas o ninguna; repetirla no hace nada), y lee la marca vieja `day` mientras no exista
+   `meta_day`, así que el día del despliegue no repite el meta, ni el cierre, ni select ni maint (sus marcas
+   ya son de hoy) y a las 00:00 los hace todos. Si al desplegar hay una pasada en marcha, sus ejecuciones
+   encadenadas pueden seguir con el código nuevo y el `init` de antes: migran antes de tocar `hist` (`close`, `close-hist`,
+   `select-plan` y `export-plan` también llaman a `migrateHist`). Si el código llegara antes que el esquema,
+   `migrateHist` crea la tabla. Mejor no desplegar entre las :00 y las :05 (cuando corre la pasada).
+   Para comprobarlo: `GET /api/admin/status` enseña `meta_day`, `closed_day`, `maint_day` y `daily_tries`
+   (y `last_run.pendiente`, si alguna tarea del día se ha quedado sin intentos), y
    `wrangler d1 execute roblox-tracker --remote --command "SELECT COUNT(*) FROM hist"` da los juegos con
    filas diarias (~3.000) y `… "SELECT COUNT(*) FROM state WHERE key = 'hist_agg'"` da 0.
+4. Si una tarea del día se queda sin intentos (2 al día) y hay que repetirla hoy:
+   `POST /api/admin/run {"daily": ["close"]}` (o `["select"]`, `["maint"]`, `["meta"]`); `{"daily": true}`
+   las repite todas (el meta de todo el radar lee ~150.000 filas).
 
 Desde cero:
 
@@ -168,9 +179,11 @@ pocas veces al día y Cloudflare tolera excesos ocasionales. Sin mensajes, ~6 ms
 Cierre del día (`test/cierre.cpu.mjs`, datos sintéticos del tamaño de producción: 2.800 juegos × 8
 lecturas, 56 ficheros de votos; medido el 05/10/2026 en otra máquina, compartida y ~2 veces más lenta que la
 de la tabla, mediana de 11): el paso `close` de antes, que juntaba todas las lecturas con `JSON.parse`,
-costaba **~32–55 ms**. Ahora `close` (votos y meta) ~4–8 ms y cada `close-radar-<día>-<k>` (1 de 5 partes:
-una expresión regular saca del texto de los 8 ficheros los ids de su parte, y `radarDailyRows`) ~7–13 ms;
-en la máquina de la tabla, la mitad.
+costaba **~32–55 ms**. Ahora `close` (votos y meta) ~4–8 ms y `close-radar-<día>-<k>` (1 de 10 partes: una
+expresión regular saca del texto de los 8 ficheros los ids de su parte, y `radarDailyRows`) ~4–9 ms (mediana
+6,7) la primera de la ejecución (decodifica los 8 ficheros de R2 y comprueba su forma) y ~3–6 ms (mediana
+3,6) las demás, que reciben los ficheros ya leídos; en la máquina de la tabla, la mitad. Con 5 partes y sin
+guardar los ficheros eran ~7–12 ms cada una.
 
 ## D1: escrituras y lecturas
 
@@ -201,11 +214,14 @@ el D1 local y se lee `meta.rows_read`.
 
 | Escenario | Pasada de las 00:00 | Pasada normal (01:00 → 23:00) | Día | Escritas al día |
 |---|---|---|---|---|
-| `hoy` | 554.940 → 175.449 | 15.050 → 15.252 (21.586 a las 23:00) | 1.071.946 → 685.546 | 34.345 → 37.143 |
-| `regimen` | 617.225 → 205.869 | 15.050 → 15.252 (21.586) | 1.151.897 → 715.966 | 40.395 → 43.193 |
-| `anio` | 622.818 → 211.462 | 15.050 → 15.252 (21.586) | 1.157.490 → 721.559 | 43.192 → 45.990 |
+| `hoy` | 554.940 → 181.115 | 15.050 → 15.250 (21.584 a las 23:00) | 1.071.946 → 691.165 | 34.345 → 37.148 |
+| `regimen` | 617.225 → 211.535 | 15.050 → 15.250 (21.584) | 1.151.897 → 721.585 | 40.395 → 43.198 |
+| `anio` | 622.818 → 217.128 | 15.050 → 15.250 (21.584) | 1.157.490 → 727.178 | 43.192 → 45.995 |
 
-La pasada de las 00:00 en `regimen`, por pasos (antes → ahora): cierre 305.593 → 27.451 (`close` 13.309 +
+El export y `telegram.json` de las 25 pasadas de cada escenario son idénticos byte a byte a los de main
+(`--salida` y `diff -r`).
+
+La pasada de las 00:00 en `regimen`, por pasos (antes → ahora): cierre 305.593 → 33.115 (`close` 18.973 +
 `close-radar` 5.594 + `close-hist` 8.548), select 85.711 → 46.541, maint 82.623 → 36.537 (sin la poda de
 huérfanas), relleno 44.727 → 2.176, `select-plan` 8.560 → 2.953. `espacio()` 89.245 → 60.024 (`samples`
 estimada). Un cierre que falla: antes ~266.000 filas cada hora (meta, cierre, select y maint otra vez);
