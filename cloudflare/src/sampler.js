@@ -784,17 +784,19 @@ export async function runExport(env, step, nowMs, safe, summary) {
     const [lastTs, closed, radar, selIds] = await Promise.all([
       lastSampleTs(db), getState(db, "closed_day"), radarCounts(db), getState(db, "sel_ids"),
     ]);
-    // Solo los juegos seguidos; si aún no hay selección, todo el radar.
-    // Con la lista de state.sel_ids (la escribe select-apply) no se recorre
-    // games; sin ella (selección anterior a sel_ids), por rangos como antes.
-    const selected = radar.selected > 0;
-    const ranges = selected && Array.isArray(selIds) && selIds.length
-      ? chunks([...selIds].sort((a, b) => a - b), EXPORT_SLICE).map(ids => [ids[0], ids[ids.length - 1], ids])
-      : await exportPlan(db, EXPORT_SLICE, { selected });
-    const today = isoDate(minuteOf(nowMs));
-    return { lastTs, openDay: closed ? addDays(closed, 1) : today, ranges, selected, radar };
+    // Solo los juegos seguidos, de state.sel_ids (la última selección que
+    // escribió select-apply), sin recorrer games. Sin esa lista, por rangos de
+    // los sel = 1 como antes. Sin ninguna selección no se reexporta: exportar
+    // todo el radar leía ~150.000 filas en cada pasada y se queda el export de antes.
+    if (Array.isArray(selIds) && selIds.length) {
+      const ranges = chunks([...selIds].sort((a, b) => a - b), EXPORT_SLICE).map(ids => [ids[0], ids[ids.length - 1], ids]);
+      return { lastTs, openDay: closed ? addDays(closed, 1) : isoDate(minuteOf(nowMs)), ranges, selected: true, radar };
+    }
+    if (!(radar.selected > 0)) return { skipped: "sin selección: se queda el export de antes" };
+    const ranges = await exportPlan(db, EXPORT_SLICE, { selected: true });
+    return { lastTs, openDay: closed ? addDays(closed, 1) : isoDate(minuteOf(nowMs)), ranges, selected: true, radar };
   });
-  if (!plan) return null;
+  if (!plan || plan.skipped) return null;
   const slices = [];
   for (const [i, [lo, hi, ids]] of plan.ranges.entries()) {
     const name = `export-${i}`;
