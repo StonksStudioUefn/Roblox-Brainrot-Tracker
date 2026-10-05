@@ -10,9 +10,9 @@ La interfaz entre piezas está en [`CONTRACT.md`](CONTRACT.md).
 | `src/index.js` | `fetch` (web, API, admin) y `scheduled` (crea la instancia del Workflow) |
 | `src/sampler.js` | `class Sampler extends WorkflowEntrypoint`: el muestreo por pasos, el radar y la elección de los juegos seguidos |
 | `src/sources.js` | Clientes de Rolimons, Explore, Search, Games, Votes, place→universe, iconos |
-| `src/db.js` | SQL: inserciones (`json_each`), cierre diario, `hist_agg`, export por trozos, historial, import |
+| `src/db.js` | SQL: inserciones (`json_each`), cierre diario, tabla `hist`, export por trozos, historial, import |
 | `scripts/migrate_from_git.py` | Sube los datos actuales del repo (git o carpeta) a D1 por `/api/admin/import` |
-| `test/` | `dev.sh`/`sync.sh` (servidor local), `cpu_steps.mjs` (CPU por paso), `bench_rolimons.mjs`, `cf_loader.mjs`, `export.bench.mjs` (filas leídas y salida del export contra un D1 local) |
+| `test/` | `dev.sh`/`sync.sh` (servidor local), `cpu_steps.mjs` (CPU por paso), `bench_rolimons.mjs`, `cf_loader.mjs`, `export.bench.mjs` (filas leídas y salida del export contra un D1 local), `filas.bench.mjs` (filas de D1 de pasadas completas, con topes), `cierre.parity.mjs` y `cierre.cpu.mjs` (el cierre del día: mismo resultado que antes y su CPU) |
 
 ## Desarrollo y pruebas en local
 
@@ -41,13 +41,55 @@ curl -H "Host: roblox-tracker.x.workers.dev" http://127.0.0.1:8787/api/export   
 # CPU de cada paso (Node, procesos en frío, --single-threaded) con respuestas reales guardadas
 node test/cpu_steps.mjs <carpeta_fixtures> 7
 node --single-threaded test/bench_rolimons.mjs [rolimons.json]
+node --import ./test/cf_loader.mjs test/cierre.cpu.mjs       # close y close-radar (datos sintéticos)
 ```
+
+### Pruebas (antes de juntar)
+
+```sh
+cd cloudflare
+node --import ./test/cf_loader.mjs test/filas.bench.mjs todos     # filas de D1 por pasada: falla si se pasa de los topes
+node --import ./test/cf_loader.mjs test/cierre.parity.mjs         # el cierre da lo mismo que las consultas de antes
+node --test test/telegram.test.mjs                                # necesitan data/ en la raíz del repo (rama de datos:
+node test/metrics.parity.mjs --quick                              #  git archive <commit> data | tar -x) y python3
+node test/horror.parity.mjs                                       # descarga de la Games API (o usa su caché)
+npx wrangler deploy --dry-run --outdir /tmp/dist                  # que empaqueta
+```
+
+**`test/filas.bench.mjs`** corre el Workflow `Sampler` de verdad (todas las ejecuciones encadenadas de cada
+pasada) con Roblox, Rolimons y R2 simulados y un D1 local (miniflare) del tamaño de producción: 2.953 juegos,
+2.797 en el radar, 242 seguidos, y según el escenario `hoy` (~4 días de muestras, 10 filas diarias por juego),
+`regimen` (9 días de muestras, 30 filas diarias) o `anio` (~1 M filas diarias y ~650.000 puestos). La semilla
+se hace una vez en `test/.filas/` (`--seed` la rehace) y es la base como estaba antes de la tabla `hist`
+(con `state.hist_agg`), así que la primera pasada (23:00, «calentamiento») hace la migración. Luego la
+pasada de las 00:00 y las de 01:00 a 03:00 (`--dia`: las 24 y la de las 00:00 del día siguiente), y
+`espacio()` del Almacén. Imprime las filas por pasada y por paso (`-v`: por consulta) y **falla** si una
+pasada pasa de su tope (`TOPES`, ~20 % sobre lo medido), si una consulta lee más de un 20 % (y más de
+10.000 filas) en `anio` que en `regimen` (recorre `daily` o `sort_hits` enteras) o si un cierre que falla
+siempre repite el meta o se intenta más de `DAILY_TRIES` veces («cascada»). Para comparar con otra versión:
+`--src=<carpeta con su src/>`, y `--salida=<carpeta>` guarda el export y `telegram.json` de cada pasada
+(`cmp -r` entre versiones). `test/export.bench.mjs` acepta `--config=test/filas.wrangler.toml
+--persist=<copia de test/.filas/<escenario>/semilla>` para medir solo el export sobre esa base.
 
 Fixtures de `cpu_steps.mjs`: `games_pages.json` y `votes_pages.json` (20 respuestas de 50 juegos),
 `explore_pages.json`, `search_pages.json`, `rolimons.json`, `ids.json`, `part-<i>.json` (partes del export,
 `wrangler r2 object get stonks-archivos/roblox-tracker/tmp/export/part-<i>.json --local …`) y `telegram.json`.
 
 ## Despliegue (lo hace el coordinador)
+
+**Al desplegar la rama `claude/optimizar-d1` (05/10/2026), en este orden:**
+
+1. `npx wrangler d1 execute roblox-tracker --remote --file=schema.sql`: solo añade la tabla `hist`
+   (`CREATE TABLE IF NOT EXISTS`; lo demás ya está aplicado y no cambia; no borra datos).
+2. `npx wrangler deploy`.
+3. Nada más: la primera pasada copia `state.hist_agg` a `hist` y borra la clave (en su paso `init`, en un
+   batch), y lee la marca vieja `day` mientras no exista `meta_day`, así que no repite el meta del día.
+   Si el código llegara antes que el esquema, `migrateHist` crea la tabla. Para comprobarlo:
+   `GET /api/admin/status` enseña `meta_day`, `maint_day` y `daily_tries`, y
+   `wrangler d1 execute roblox-tracker --remote --command "SELECT COUNT(*) FROM hist"` da los juegos con
+   filas diarias (~3.000) y `… "SELECT COUNT(*) FROM state WHERE key = 'hist_agg'"` da 0.
+
+Desde cero:
 
 ```sh
 cd cloudflare
@@ -123,6 +165,13 @@ parseo de la Games API (~1,1 ms por 100 juegos), por encima de ~60 juegos por pa
 El paso `telegram` se pasa de 10 ms cuando envía mensajes (alertas, diario, semanal): pasa como mucho unas
 pocas veces al día y Cloudflare tolera excesos ocasionales. Sin mensajes, ~6 ms.
 
+Cierre del día (`test/cierre.cpu.mjs`, datos sintéticos del tamaño de producción: 2.800 juegos × 8
+lecturas, 56 ficheros de votos; medido el 05/10/2026 en otra máquina, compartida y ~2 veces más lenta que la
+de la tabla, mediana de 11): el paso `close` de antes, que juntaba todas las lecturas con `JSON.parse`,
+costaba **~32–55 ms**. Ahora `close` (votos y meta) ~4–8 ms y cada `close-radar-<día>-<k>` (1 de 5 partes:
+una expresión regular saca del texto de los 8 ficheros los ids de su parte, y `radarDailyRows`) ~7–13 ms;
+en la máquina de la tabla, la mitad.
+
 ## D1: escrituras y lecturas
 
 Medido en local (`meta.rows_written`/`rows_read`, que en D1 cuenta también los índices y las tablas
@@ -145,6 +194,24 @@ filas al día (`export_d`).
 Lo demás (espacio para el Almacén, poda, radar, lista de seguidos): ver "Lecturas fuera del export" en
 `CONTRACT.md`. Para medir una consulta con datos reales, la base exportada (`wrangler d1 export`) se carga en
 el D1 local y se lee `meta.rows_read`.
+
+### Filas leídas por pasada (05/10/2026)
+
+`test/filas.bench.mjs --dia` (24 pasadas reales + `espacio()` una vez), antes (main) → ahora:
+
+| Escenario | Pasada de las 00:00 | Pasada normal (01:00 → 23:00) | Día | Escritas al día |
+|---|---|---|---|---|
+| `hoy` | 554.940 → 175.449 | 15.050 → 15.252 (21.586 a las 23:00) | 1.071.946 → 685.546 | 34.345 → 37.143 |
+| `regimen` | 617.225 → 205.869 | 15.050 → 15.252 (21.586) | 1.151.897 → 715.966 | 40.395 → 43.193 |
+| `anio` | 622.818 → 211.462 | 15.050 → 15.252 (21.586) | 1.157.490 → 721.559 | 43.192 → 45.990 |
+
+La pasada de las 00:00 en `regimen`, por pasos (antes → ahora): cierre 305.593 → 27.451 (`close` 13.309 +
+`close-radar` 5.594 + `close-hist` 8.548), select 85.711 → 46.541, maint 82.623 → 36.537 (sin la poda de
+huérfanas), relleno 44.727 → 2.176, `select-plan` 8.560 → 2.953. `espacio()` 89.245 → 60.024 (`samples`
+estimada). Un cierre que falla: antes ~266.000 filas cada hora (meta, cierre, select y maint otra vez);
+ahora se reintenta una vez (~16.000) y las pasadas siguientes son normales. Las escrituras suben ~2.800 al
+día (las filas de `hist`). Las pasadas normales son casi todo el export (~10.700–17.000: las muestras de
+48 h de los seguidos), explore (~2.900) y, cada 3 h, el radar; no cambian.
 
 ## Paridad con Python (comprobada)
 
