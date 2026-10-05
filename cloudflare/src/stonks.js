@@ -57,10 +57,9 @@ const MUESTRA_FILAS = 256;   // filas para estimar lo que ocupa una fila de una 
  * cada fila, sin índices ni páginas, como medirTablas() del contrato) se guarda
  * en state.espacio y se rehace como mucho una vez al día: contar y sumar cada
  * tabla las recorre enteras (~60.000 filas hoy, ~2 M dentro de un año) y el
- * plan gratis da 5 M filas leídas al día para todo. `daily` y `sort_hits`, que
- * crecen sin parar hasta el año de datos, se estiman (estimarFilas); las demás
- * se cuentan (`samples` no pasa de ~9 días de muestras). `exacto` las cuenta
- * todas, como antes (solo para el admin).
+ * plan gratis da 5 M filas leídas al día para todo. `daily`, `sort_hits` y
+ * `samples` se estiman (estimarFilas); las demás, pequeñas, se cuentan.
+ * `exacto` las cuenta todas, como antes (solo para el admin).
  */
 export async function espacioD1(db, { exacto = false } = {}) {
   const st = await db.prepare("SELECT value FROM state WHERE key = ?1").bind(ESPACIO_KEY).first().catch(() => null);
@@ -109,12 +108,16 @@ async function medirTablas(db, exacto) {
 }
 
 /**
- * Filas de las tablas que crecen cada día, sin recorrerlas:
+ * Filas de las tablas grandes, sin recorrerlas:
  * - `daily`: la suma de los días de `hist` (lo mantiene el cierre de cada día;
  *   es exacta salvo por lo que la poda del año ya ha borrado, que se descuenta
  *   acotando cada juego a sus días dentro de DATA_RETENTION_DAYS);
  * - `sort_hits`: filas de ayer × días desde el primer puesto guardado + las de
- *   hoy (buscando por clave primaria juego a juego: lee ~3 filas por juego).
+ *   hoy (buscando por clave primaria juego a juego: lee ~3 filas por juego);
+ * - `samples`: las muestras de las 24 h hasta la última × los días desde la
+ *   más vieja (por clave primaria juego a juego: ~3.000 + las de un día, y
+ *   no las ~50.000 de la tabla). Cada hora entran las de los ~240 seguidos,
+ *   cambie o no la selección, así que un día vale por cualquier otro.
  */
 async function estimarFilas(db, names) {
   const today = new Date().toISOString().slice(0, 10);
@@ -131,12 +134,22 @@ async function estimarFilas(db, names) {
             COALESCE(SUM(h.date = ?1), 0) AS ayer, COALESCE(SUM(h.date = ?2), 0) AS hoy
      FROM games g CROSS JOIN sort_hits h ON h.universe_id = g.universe_id AND h.date >= ?1`,
   ).bind(dia(-1), today)]);
+  // Desde la última muestra (y no desde ahora): si el muestreo se para, la estimación no baja
+  if (names.includes("samples")) stmts.push(["samples", db.prepare(
+    `SELECT (SELECT CAST(value AS INTEGER) FROM state WHERE key = 'last_sample_ts') AS last,
+            (SELECT COUNT(*) FROM games g CROSS JOIN samples s ON s.universe_id = g.universe_id
+               AND s.ts > (SELECT CAST(value AS INTEGER) FROM state WHERE key = 'last_sample_ts') - 1440) AS dia,
+            (SELECT MIN((SELECT MIN(ts) FROM samples s WHERE s.universe_id = g.universe_id)) FROM games g) AS primera`,
+  )]);
   if (!stmts.length) return out;
   const res = await db.batch(stmts.map(s => s[1]));
   stmts.forEach(([n], i) => {
     const r = res[i]?.results?.[0] || {};
     if (n === "daily") out.daily = Number(r.n) || 0;
-    else {
+    else if (n === "samples") {
+      const dias = r.primera != null && r.last != null ? Math.max(1, (Number(r.last) - Number(r.primera)) / 1440) : 1;
+      out.samples = Math.round((Number(r.dia) || 0) * dias);
+    } else {
       const dias = r.first ? Math.max(0, Math.round((Date.parse(dia(-1)) - Date.parse(r.first)) / 86400_000) + 1) : 0;
       out.sort_hits = (Number(r.ayer) || 0) * Math.min(dias, DATA_RETENTION_DAYS) + (Number(r.hoy) || 0);
     }

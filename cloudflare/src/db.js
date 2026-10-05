@@ -236,9 +236,12 @@ export async function radarPlaces(db, today) {
   return { map, ids: [...withPlace, ...nop] };
 }
 
-/** Cachés de state que dependen de tracked, sel o places: se borran al cambiarlos. */
+/** Cachés de state que dependen de tracked o places: se borran al cambiarlos. */
 export const radarStaleStmt = db =>
   db.prepare("DELETE FROM state WHERE key IN ('radar_places', 'radar_counts')");
+
+/** radar_counts también depende de sel (radar_places no): lo que borra select-apply si cambia algo. */
+export const radarCountsStaleStmt = db => db.prepare("DELETE FROM state WHERE key = 'radar_counts'");
 
 /** Mediana de una lista ORDENADA de enteros, con los .5 al par (round() de Python), como MEDIAN_SQL. */
 export function pyMedian(sorted) {
@@ -353,6 +356,8 @@ export function radarCloseStmt(db, date, rows) {
  * Datos para elegir los juegos seguidos: los del radar con universe_id en
  * [lo, hi], con las últimas `days` filas diarias hasta `before` (excluido).
  * → [[id, horror, sel, created, first_seen, first_day, sorts, d], …] (d como en el export)
+ * Las filas diarias salen de la clave primaria hacia atrás y se dan la vuelta
+ * aquí: ordenarlas otra vez en SQL contaba cada fila dos veces.
  */
 export async function radarSlice(db, { lo, hi, days, before, today }) {
   const { results } = await db.prepare(
@@ -361,12 +366,38 @@ export async function radarSlice(db, { lo, hi, days, before, today }) {
        json(COALESCE((SELECT json_group_object(k.sort_id, k.rank) FROM sort_hits k
               WHERE k.universe_id = g.universe_id AND k.date = ?5 AND k.sort_id NOT LIKE 'search:%'), '{}')),
        json(COALESCE((SELECT json_group_array(json_array(r.date, r.median, r.min, r.max, r.n, r.visits)) FROM (
-              SELECT * FROM (SELECT date, median, min, max, n, visits FROM daily
-                             WHERE universe_id = g.universe_id AND date < ?4 ORDER BY date DESC LIMIT ?3)
-              ORDER BY date) r), '[]'))) AS row
+              SELECT date, median, min, max, n, visits FROM daily
+              WHERE universe_id = g.universe_id AND date < ?4 ORDER BY date DESC LIMIT ?3) r), '[]'))) AS row
      FROM games g WHERE g.tracked = 1 AND g.universe_id BETWEEN ?1 AND ?2`,
   ).bind(lo, hi, days, before, today).all();
-  return results.map(r => JSON.parse(r.row));
+  return results.map(r => {
+    const row = JSON.parse(r.row);
+    row[7].reverse();
+    return row;
+  });
+}
+
+/**
+ * Ids del radar para repartir select en trozos: los de state.radar_places si
+ * es de hoy (la lectura del radar ya la ha hecho) y si no, de games (una
+ * pasada por la clave primaria; rehacer radar_places leería ~8.000 filas).
+ */
+export async function radarIds(db, today) {
+  const cached = await getState(db, "radar_places");
+  if (cached?.day === today && Array.isArray(cached.pairs) && Array.isArray(cached.nop)) {
+    return [...new Set([...cached.pairs.map(p => p[1]), ...cached.nop])];
+  }
+  return trackedIds(db);
+}
+
+/** Rangos [lo, hi] de ~`size` ids cada uno que cubren todos los universe_id (el primero desde 0, el último hasta el máximo). */
+export function idRanges(ids, size) {
+  const sorted = [...ids].sort((a, b) => a - b);
+  const los = [];
+  for (let i = 0; i < sorted.length; i += size) los.push(sorted[i]);
+  if (!los.length) return [[0, Number.MAX_SAFE_INTEGER]];
+  los[0] = 0;
+  return los.map((lo, i) => [lo, i + 1 < los.length ? los[i + 1] - 1 : Number.MAX_SAFE_INTEGER]);
 }
 
 /** sel = 1 para `ids` y 0 para el resto (solo escribe los que cambian). */

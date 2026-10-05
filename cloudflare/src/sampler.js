@@ -48,10 +48,11 @@ import {
 } from "./sources.js";
 import {
   DAY_MIN, addDays, applySelectionStmt, applyVotesStmt, backfillSamplesStmt, buildExportSlice, closeDayStmt, exportHeader,
-  exportPlan, getState, getStates, idPart, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs, lowSinceStmts,
-  mergeHistStmt, migrateHist, minuteOf, pruneHistStmt, pruneOldStmts, pruneSamplesStmt, radarCloseStmt, radarCounts,
-  radarDailyRows, radarPlayers, radarReadingsPart, radarSlice, radarStaleStmt, retrackPlacesStmt, setState, setStateStmt,
-  sortHitsStmt, trackedIds, unknownPlaces, untrackStmt, updateMetaStmt, upsertDiscoveredStmt, written,
+  exportPlan, getState, getStates, idPart, idRanges, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs,
+  lowSinceStmts, mergeHistStmt, migrateHist, minuteOf, pruneHistStmt, pruneOldStmts, pruneSamplesStmt, radarCloseStmt,
+  radarCounts, radarCountsStaleStmt, radarDailyRows, radarIds, radarPlayers, radarReadingsPart, radarSlice, radarStaleStmt,
+  retrackPlacesStmt, setState, setStateStmt, sortHitsStmt, trackedIds, unknownPlaces, untrackStmt, updateMetaStmt,
+  upsertDiscoveredStmt, written,
 } from "./db.js";
 import { classifyHorror } from "./horror.js";
 import { radarScore } from "./metrics.js";
@@ -509,9 +510,11 @@ export class Sampler extends WorkflowEntrypoint {
         const stmts = [
           pruneSamplesStmt(db, cutoff), untrackStmt(db, today),
           ...pruneOldStmts(db, oldDate), pruneHistStmt(db, oldDate),
-          radarStaleStmt(db), setStateStmt(db, "maint_day", today),
+          setStateStmt(db, "maint_day", today),
         ];
         const res = await db.batch(stmts);
+        // Las cachés del radar solo dependen de tracked aquí
+        if (res[1]?.meta?.changes) await radarStaleStmt(db).run();
         const old = `${RADAR_PREFIX}${addDays(today, -RADAR_KEEP_DAYS)}/`;
         const listed = await env.BUCKET.list({ prefix: RADAR_PREFIX, limit: 1000 });
         const keys = listed.objects.map(o => o.key).filter(k => k < old);
@@ -723,7 +726,8 @@ export function chooseSelection(rows, cfg = SELECTION) {
  */
 export async function runSelect(env, step, nowMs, today, safe, summary) {
   const db = env.DB;
-  const plan = await safe("select-plan", async () => ({ ranges: await exportPlan(db, SELECT_SLICE) }));
+  // Los rangos, de los ids del radar (radarIds): sin recorrer games con ROW_NUMBER()
+  const plan = await safe("select-plan", async () => ({ ranges: idRanges(await radarIds(db, today), SELECT_SLICE) }));
   if (!plan) return null;
   const now = new Date(nowMs).toISOString();
   const rows = [];
@@ -753,8 +757,8 @@ export async function runSelect(env, step, nowMs, today, safe, summary) {
       setStateStmt(db, "sel_ids", ids),
       setStateStmt(db, "sel_day", today),
       setStateStmt(db, "selection", { day: today, ...counts }),
-      radarStaleStmt(db),
     ]);
+    if (res[0]?.meta?.changes) await radarCountsStaleStmt(db).run();
     // Los que entran, con más jugadores primero (por si pasan de BACKFILL_MAX_GAMES)
     const was = new Map(rows.map(r => [r[0], r]));
     const added = ids.filter(id => !was.get(id)?.[2]).sort((a, b) => (was.get(b)?.[3] ?? 0) - (was.get(a)?.[3] ?? 0));
