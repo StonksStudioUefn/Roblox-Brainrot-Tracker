@@ -1,4 +1,4 @@
-# Solo para test/filas.bench.mjs: un D1 local (miniflare) para medir filas.
+# Un D1 local (miniflare) para las pruebas: test/filas.bench.mjs y test/cierre.parity.mjs.
 name = "filas-bench"
 compatibility_date = "2026-10-01"
 

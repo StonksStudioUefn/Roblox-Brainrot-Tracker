@@ -2,7 +2,7 @@
  * export.bench.mjs — Filas leídas del export (runExport de sampler.js) contra un
  * D1 local con datos reales, y su salida (data/export.json y data/telegram.json).
  *
- *   node --import ./test/cf_loader.mjs test/export.bench.mjs <src> <salida> [--persist=test/.state] [--now=ISO]
+ *   node --import ./test/cf_loader.mjs test/export.bench.mjs <src> <salida> [--persist=test/.state] [--now=ISO] [--config=wrangler.toml]
  *
  * <src> es la carpeta con sampler.js/db.js (la de ahora o una copia de otra
  * versión, p. ej. `git show main:cloudflare/src/db.js`), así se comparan dos
@@ -10,7 +10,9 @@
  * Para cargar el D1 local: `wrangler d1 export roblox-tracker --remote --output=x.sql`
  * y ejecutar sus INSERT con este mismo proxy (en Windows, `wrangler d1 execute
  * --file` con un volcado grande falla, y la ruta de --persist tiene que ser corta).
- * Por defecto `now` = 20 min después de state.last_sample_ts.
+ * Por defecto `now` = 20 min después de state.last_sample_ts. Con una versión
+ * que tiene la tabla `hist`, antes del export se pasa state.hist_agg a la tabla
+ * (como hace el init de cada pasada): así se compara con la base de antes.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -21,7 +23,8 @@ const arg = (name, dflt) => (process.argv.find(a => a.startsWith(`--${name}=`)) 
 const [srcdir, outdir] = process.argv.slice(2).filter(a => !a.startsWith("--"));
 if (!srcdir || !outdir) throw new Error("Uso: export.bench.mjs <src> <salida> [--persist=…] [--now=ISO]");
 
-const proxy = await getPlatformProxy({ persist: { path: resolve(arg("persist", "test/.state")) } });
+// --config: otro wrangler.toml (p. ej. test/filas.wrangler.toml para la base de test/filas.bench.mjs)
+const proxy = await getPlatformProxy({ configPath: arg("config", "wrangler.toml"), persist: { path: resolve(arg("persist", "test/.state")) } });
 const raw = proxy.env.DB;
 const log = [];
 const add = (sql, meta) => log.push({ sql: sql.replace(/\s+/g, " ").trim().slice(0, 60), read: meta?.rows_read ?? 0, written: meta?.rows_written ?? 0 });
@@ -52,6 +55,9 @@ const BUCKET = {
 globalThis.FixedLengthStream ??= class { constructor() { const t = new TransformStream(); this.readable = t.readable; this.writable = t.writable; } };
 
 const { runExport } = await import(pathToFileURL(resolve(srcdir, "sampler.js")).href);
+// Como el init de cada pasada: state.hist_agg → tabla hist (en versiones que la tienen)
+const dbmod = await import(pathToFileURL(resolve(srcdir, "db.js")).href);
+if (dbmod.migrateHist) await dbmod.migrateHist(DB);
 const steps = [];
 const step = { do: async (name, a, b) => { const i = log.length; const r = await (b || a)(); steps.push([name, log.slice(i).reduce((s, x) => s + x.read, 0)]); return r; } };
 const summary = { steps: {}, errors: [] };
