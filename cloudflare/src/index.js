@@ -12,11 +12,11 @@
  *   GET /api/game/<id>       ficha en vivo
  *
  * Admin (en cualquier host, "Authorization: Bearer <ADMIN_TOKEN>"):
- *   POST /api/admin/run      lanza un muestreo  {daily?, select?, skip?: [...], only?: [...], telegram_force?, now?}
+ *   POST /api/admin/run      lanza un muestreo  {daily? (true | ["meta", "close", "select", "maint"]), select?, skip?: [...], only?: [...], telegram_force?, now?}
  *   GET  /api/admin/status   estado (state + instancia) ?id=<instancia> &counts=1 (estimado) | &counts=exacto
  *   GET  /api/admin/espacio  lo que ocupa la base D1 (lo mismo que espacio() para el Almacén) ?exacto=1
  *   POST /api/admin/import   {table, columns, rows}  (migración, por lotes)
- *   POST /api/admin/rebuild  recalcula state.hist_agg desde daily y lanza un export
+ *   POST /api/admin/rebuild  recalcula la tabla hist desde daily y lanza un export
  *   POST /api/admin/export   lanza un Workflow que solo regenera el export
  *   POST /api/admin/backfill {ids?}  copia a samples las lecturas del radar de 48 h (por defecto, de los seguidos)
  *
@@ -39,7 +39,7 @@ import configSrc from "./config.js" with { type: "text" };
 import metricsSrc from "./metrics.js" with { type: "text" };
 import horrorSrc from "./horror.js" with { type: "text" };
 
-import { dropExportCacheStmt, getState, getStates, history, importStmt, isoDate, minuteOf, radarCounts, rebuildHistStmt, written } from "./db.js";
+import { dropExportCacheStmt, getState, getStates, history, importStmt, isoDate, minuteOf, radarCounts, rebuildHistStmts, written } from "./db.js";
 import { chunks, iconsUrl, thumbsUrl, URLS, UA } from "./sources.js";
 import { espacioD1, withApp } from "./stonks.js";
 import { backfillFromRadar } from "./sampler.js";
@@ -247,7 +247,9 @@ async function admin(req, env, url) {
     if (action === "run") {
       const body = await readBody(req);
       const params = {};
-      if (body.daily) params.daily = true;
+      // daily: true (todas las tareas del día) o una lista: ["close"], ["meta", "select"]…
+      if (Array.isArray(body.daily)) params.daily = body.daily.map(String);
+      else if (body.daily) params.daily = true;
       if (body.select) params.select = true;
       if (Array.isArray(body.skip)) params.skip = body.skip.map(String);
       if (body.telegram_force) params.telegram_force = String(body.telegram_force);
@@ -269,9 +271,9 @@ async function admin(req, env, url) {
     }
     // El export se hace por pasos (CPU): se lanza un Workflow que solo exporta
     if (action === "rebuild") {
-      const [res] = await env.DB.batch([rebuildHistStmt(env.DB), dropExportCacheStmt(env.DB)]);
+      const res = await env.DB.batch([...rebuildHistStmts(env.DB), dropExportCacheStmt(env.DB)]);
       const inst = await env.SAMPLER.create({ id: `export-${stamp()}`, params: { only: ["export"] } });
-      return json({ hist_written: written(res), export_instance: inst.id });
+      return json({ hist_written: written(res.slice(0, 2)), export_instance: inst.id });
     }
     if (action === "export") {
       const inst = await env.SAMPLER.create({ id: `export-${stamp()}`, params: { only: ["export"] } });
@@ -293,7 +295,7 @@ async function admin(req, env, url) {
 
 async function adminStatus(env, url) {
   const out = { now: new Date().toISOString() };
-  out.state = await getStates(env.DB, ["last_run", "last_partial_run", "run_current", "day", "closed_day", "search_cursor", "last_sample_ts", "sel_day", "selection"]);
+  out.state = await getStates(env.DB, ["last_run", "last_partial_run", "run_current", "meta_day", "closed_day", "sel_day", "maint_day", "daily_tries", "search_cursor", "last_sample_ts", "selection"]);
   // La pasada en curso va por ejecuciones encadenadas (<id>-sN): se enseña la actual
   const id = url.searchParams.get("id") || out.state.run_current?.id || out.state.last_run?.instance;
   if (id) {

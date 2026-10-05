@@ -61,3 +61,16 @@ CREATE TABLE IF NOT EXISTS sort_hits (    -- en qué listas oficiales de Roblox 
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);  -- Telegram, cursor de búsqueda…
+
+-- Agregados de toda la serie diaria por juego (antes, la clave state.hist_agg:
+-- un JSON de todos los juegos en una fila, que iba a pasar del tope de 2 MB
+-- por fila de D1). Lo mantiene el cierre de cada día; el código pasa solo los
+-- datos de state.hist_agg a esta tabla en la primera pasada tras crearla.
+-- Sin índices: se lee y se escribe por clave primaria.
+CREATE TABLE IF NOT EXISTS hist (
+  universe_id INTEGER PRIMARY KEY,
+  peak INTEGER, peak_date TEXT,      -- máximo de daily.max y su (primera) fecha
+  days INTEGER, first_day TEXT,      -- filas en daily y la primera fecha
+  favorites INTEGER, up INTEGER, down INTEGER,   -- últimos conocidos
+  last_date TEXT                     -- última fecha incorporada (la poda de un año mira esto)
+);

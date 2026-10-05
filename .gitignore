@@ -10,3 +10,4 @@ node_modules/
 cloudflare/test/.build/
 cloudflare/test/.state/
 dist/
+cloudflare/test/.filas/

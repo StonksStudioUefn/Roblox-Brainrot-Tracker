@@ -74,17 +74,28 @@ CREATE TABLE IF NOT EXISTS sort_hits (    -- listas de Roblox (sort_id) y búsqu
   PRIMARY KEY (universe_id, date, sort_id)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);  -- Telegram, cursor de búsqueda…
+CREATE TABLE IF NOT EXISTS hist (           -- agregados de toda la serie diaria (antes state.hist_agg)
+  universe_id INTEGER PRIMARY KEY,
+  peak INTEGER, peak_date TEXT, days INTEGER, first_day TEXT,
+  favorites INTEGER, up INTEGER, down INTEGER, last_date TEXT
+);
 ```
 
 - `daily` del **día en curso** no se escribe en cada muestreo: se calcula al vuelo desde `samples` en el
   export. El día anterior se cierra (INSERT … ON CONFLICT DO UPDATE) en el primer muestreo del día siguiente.
   La mediana se calcula en SQL con funciones de ventana (`ROW_NUMBER() OVER (PARTITION BY …)`).
 - `favorites`, `up` y `down` se guardan una vez al día, en el paso "meta diario".
-- `state` (claves): `telegram`, `search_cursor`, `day` (último día con la 1ª pasada hecha), `closed_day`
-  (último día cerrado en `daily`), `last_sample_ts`, `hist_agg` (agregados de toda la historia por juego:
-  `{id: [peak, peak_date, days, first_day, favorites, up, down, last_date]}`, se actualiza al cerrar cada día),
-  `last_run` y `last_partial_run` (resumen de la última pasada). Cachés para leer menos (ver "Lecturas fuera
-  del export"): `maint_day`, `radar_counts`, `radar_places` y `espacio`.
+- `state` (claves): `telegram`, `search_cursor`, `last_sample_ts`, `last_run` y `last_partial_run` (resumen
+  de la última pasada). Marcas de las tareas del día (ver "Tareas del día"): `meta_day` (antes `day`, que se
+  sigue leyendo si falta), `closed_day` (último día cerrado en `daily`), `sel_day`, `maint_day` y
+  `daily_tries` (`{day, meta, close, select, maint}`: intentos de hoy, contados al empezar cada tarea). Cachés para leer menos (ver "Lecturas
+  fuera del export"): `radar_counts`, `radar_places` y `espacio`. `hist_agg` ya no existe: era un JSON con
+  todos los juegos en una fila y crecía hacia el tope de 2 MB por fila de D1; ahora es la tabla `hist`
+  (la primera pasada tras desplegar pasa los datos y borra la clave).
+- `hist`: pico, fecha del pico, días, primer día, últimos favoritos y votos y último día de toda la serie
+  diaria de cada juego. La mantiene `close-hist` (UPSERT por juego desde el día cerrado: ~2.800 filas
+  escritas al día); la leen el export y select por clave primaria; `maint` borra los juegos sin filas
+  diarias desde hace `DATA_RETENTION_DAYS`.
 
 ## Presupuesto de escrituras D1 (por día)
 
@@ -96,7 +107,8 @@ CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);  -- Telegra
 | Meta y horror (solo las fichas que cambian) | ~1.200 |
 | `sort_hits` (explore + search) y juegos nuevos | ~2.500 |
 | `low_since`, `state` | ~500 |
-| **Total** | **~45.000–48.000** (medido en local: ~2.770 por pasada normal; el objetivo de 45.000 queda justo) |
+| `hist` (una fila por juego del radar al cerrar el día) | ~2.800 |
+| **Total** | **~45.000–50.000** (medido en local: ~2.770 por pasada normal; el objetivo de 45.000 queda justo) |
 
 Sin el índice `samples_ts` (D1 cuenta una fila más por índice): con él serían ~80.000.
 
@@ -110,9 +122,11 @@ medida: ver `README.md` ("CPU por paso").
 
 Nombres reales de los pasos: `init` → `explore-0..P` (una página de get-sorts por paso) → `explore-more`
 (get-sort-content) → `search-0..2` → `search-cursor` → [`rolimons` → `resolve-0..4`] → `sample-list` →
-`sample-0..M` (400 juegos; en la 1ª pasada del día 50 juegos con meta, horror y votos) → [`close`] → `maint` →
-`export-plan` → `export-0..E` → `export-join` → `tg-scan-i-j` → `tg-reduce` → `tg-pick-i` → `tg-write` →
-`telegram` → `finish`.
+`sample-0..M` (400 juegos; con el meta del día 50 juegos con meta, horror y votos) → [`meta-done`] →
+`radar-api` → [`close` → `close-radar-<día>-0..9` → `close-hist`] → [`select-plan` → `select-0..R` →
+`select-apply` → `select-backfill`] → [`maint`] → `export-plan` → `export-0..E` → `export-join` →
+`tg-scan-i-j` → `tg-reduce` → `tg-pick-i` → `tg-write` → `telegram` → `finish`. Entre corchetes, lo que no
+va en todas las pasadas (las tareas del día: ver "Tareas del día y filas leídas").
 
 1. **explore**: `apis.roblox.com/explore-api/v1/get-sorts` (con paginación `sortsPageToken`) y
    `get-sort-content` para las listas con `nextPageToken` (~9 llamadas). Se insertan los juegos nuevos
@@ -229,8 +243,8 @@ El dashboard calcula los días de evento con `flagEvents`.
 
 (Admin: `POST /api/admin/run` `{daily?, skip?, only?, telegram_force?, now?}`, `GET /api/admin/status?id=&counts=1`
 (filas del desglose de `espacio()`; `counts=exacto` las cuenta recorriendo las tablas), `GET /api/admin/espacio[?exacto=1]`,
-`POST /api/admin/import` `{table, columns, rows}`, `POST /api/admin/rebuild` (recalcula `hist_agg` y lanza un
-export), `POST /api/admin/export` (lanza un Workflow solo de export), `POST /api/admin/backfill` `{ids?}`
+`POST /api/admin/import` `{table, columns, rows}`, `POST /api/admin/rebuild` (recalcula la tabla `hist` desde
+`daily` y lanza un export), `POST /api/admin/export` (lanza un Workflow solo de export), `POST /api/admin/backfill` `{ids?}`
 (muestras desde el radar de 48 h; ver «Radar y juegos seguidos»). El esquema se aplica con
 `wrangler d1 execute`, no por la API.)
 
@@ -262,8 +276,9 @@ en D1 `state`, clave `telegram`. Los secrets son `TELEGRAM_TOKEN` y `TELEGRAM_CH
 1. **Sin índice `samples_ts`.** D1 cuenta una fila escrita más por cada índice: con él, las muestras (insertar
    + borrar) pasaban de ~37.000 a ~74.000 filas/día. Las consultas por tiempo recorren `games` y buscan en
    `samples` por la clave primaria (`CROSS JOIN`), así que leen solo las filas necesarias.
-2. **`state.hist_agg`**: pico, fecha del pico, días, primer día y últimos favoritos/votos de toda la historia,
-   mantenidos al cerrar cada día (1 fila escrita al día). Sin esto, cada export leería `daily` entera.
+2. **Tabla `hist`** (antes `state.hist_agg`): pico, fecha del pico, días, primer día y últimos favoritos/votos
+   de toda la historia, mantenidos al cerrar cada día (~2.800 filas escritas al día; con la clave era 1 fila,
+   pero crecía ~8 KB al día hacia el tope de 2 MB por fila). Sin esto, cada export leería `daily` entera.
 3. **Lecturas D1**: D1 cuenta cada fila que pasa por un cursor, también las de las CTE materializadas, las
    ordenaciones, las ventanas y `json_each` (comprobado en producción el 04/10/2026: el mismo SQL da casi las
    mismas filas que en local). Con el export cada hora era el ~57 % del día. Desde el 04/10/2026 cada
@@ -326,17 +341,26 @@ Se pasa de muestrear todo el catálogo (~2.500 juegos) a un **radar** de todo y
   (el paso escribe lo que ha recibido) y las muestras de los seguidos, que van antes, no se tocan.
 - `samples` y votos solo de los seguidos. El meta diario (Games API) sigue siendo de
   todo el radar: ficha, horror, y jugadores y visitas de los no seguidos, que van al
-  cierre por `tmp/run/<id>/votes-<i>.json` = `{v: votos de seguidos, r: {id: [playing, visits]}}`.
-- Cierre del día: `closeDayStmt` (desde samples) y después `radarCloseStmt`
-  (desde las lecturas del radar; mismas mediana y media). Si un juego tiene las
-  dos, se queda la que tiene más lecturas.
+  cierre por `tmp/run/<id>/votes-<i>.json` = `{v: votos de seguidos, r: [{id: [playing, visits]}, …]}`
+  (`r` ya repartido en las `RADAR_CLOSE_PARTS` partes de `close-radar`; el cierre acepta también el `r`
+  sin repartir de antes).
+- Cierre del día: `close` (`closeDayStmt`, desde samples: todos los juegos con muestras del día, que
+  un `EXISTS` por la clave primaria separa sin materializar los demás; no solo los seguidos de ahora,
+  porque los que salen en un select tienen muestras de antes de salir), `close-radar-<día>-0..9`
+  (`radarDailyRows` en el Worker, por partes según la última cifra del id, y `radarCloseStmt`
+  con las filas ya agregadas; mismas mediana y media; los 8 ficheros del día se leen de R2 y se
+  comprueban una vez por ejecución para todas las partes) y `close-hist` (`hist` y `closed_day`).
+  Si un juego tiene las dos, se queda la que tiene más lecturas. Antes de tocar `hist` (`close`,
+  `close-hist`, `select-plan`, `export-plan` e `init`), `migrateHist`: una ejecución encadenada que creó
+  el código de antes no pasa por el `init` nuevo.
 - `select`: `select-plan` → `select-<i>` (250 juegos por paso: últimas 14 filas
   diarias + `radarScore` de `metrics.js`, ≈ 5 ms en frío) → `select-apply`
   (`chooseSelection` de `sampler.js`). Top 10 por jugadores en general y en horror,
   150 mejores candidatos general y 50 de horror (completados por jugadores si no
   hay bastantes), y los ya seguidos dentro del 150 % de su lista.
-- Export: solo `sel = 1` (si aún no hay selección, todo el radar). La cabecera
-  añade `radar_games` y `selected_games`. `buildDashboard` añade `categories.*.top`
+- Export: solo los seguidos, de `state.sel_ids` (la última selección válida). Sin
+  ninguna selección no se reexporta (antes exportaba todo el radar: ~150.000 filas
+  por pasada) y se queda el export de antes. La cabecera añade `radar_games` y `selected_games`. `buildDashboard` añade `categories.*.top`
   (10 primeros por jugadores) y las dos categorías bajan `min_players` a 300.
 - Admin: `POST /api/admin/run {"only":["select"],"select":true}` rehace la selección.
 - Relleno de los que entran (`select-backfill`, `backfillFromRadar` de `sampler.js` +
@@ -402,5 +426,44 @@ Medido con la base de producción del 04/10 en local (`meta.rows_read`):
 - **Lo que tarda en verse**: un juego que explore añade o vuelve a seguir durante el día entra en
   `radar_games` y en las lecturas del radar al día siguiente (o antes, si se resuelven places o corre select).
 - **`espacio()`**: `base.bytes` (lo que cuenta para el tope) sale en cada llamada. Del desglose, `daily` se
-  estima con los días de `state.hist_agg` y `sort_hits` con las filas de ayer × días + las de hoy; las demás
-  tablas se cuentan (`samples` no pasa de ~9 días). `GET /api/admin/espacio?exacto=1` las cuenta todas.
+  estima con los días de `hist`, `sort_hits` con las filas de ayer × días + las de hoy y `samples` con las
+  de las 24 h hasta la última muestra × los días desde la más vieja (antes se contaba entera: ~50.000 filas);
+  las demás tablas, pequeñas, se cuentan. La forma de la respuesta no cambia.
+  `GET /api/admin/espacio?exacto=1` las cuenta todas.
+
+## Tareas del día y filas leídas (05/10/2026)
+
+El tracker iba a ~1,03 M filas leídas al día (~1,2 M en régimen) y la pasada de las 00:00 leía ~480.000.
+Medido con `test/filas.bench.mjs` (pasadas completas del Workflow sobre un D1 local del tamaño de
+producción; ver README): la pasada de las 00:00 pasa de ~555.000–620.000 a ~180.000–220.000 y el día, de
+~1,07–1,16 M a ~0,69–0,73 M.
+
+- **Tareas del día** (`DAILY_TASKS` de `sampler.js`): `meta` (meta, horror y votos de todo el radar, y los
+  places de Rolimons), `close`, `select` y `maint`, cada una con su marca (`meta_day`, `closed_day`,
+  `sel_day`, `maint_day`) y como mucho `DAILY_TRIES` = 2 intentos al día (`daily_tries`). `init` solo
+  decide cuáles tocan; el intento se cuenta en un paso `try-<tarea>` al empezar la tarea (el meta, al
+  empezar sus trozos de `sample-N`): una pasada que se corta antes no gasta intentos y repetir `init` no
+  cuenta dos veces. Antes había una sola marca (`day`) que escribía el cierre: si el cierre fallaba, cada
+  hora se repetían el meta de todo el radar, el cierre, select y maint (~450.000 filas por hora).
+  `{"daily": true}` en `/api/admin/run` las fuerza todas y `{"daily": ["close"]}` solo las de la lista.
+  Una tarea pendiente sin intentos sale en `last_run.pendiente`; el cierre recoge al día siguiente los días
+  que falten (hasta `SAMPLE_RETENTION_DAYS`). Si el cierre falla después del meta, al reintentarlo ya no
+  tiene los votos de ese día si el paso `close` no llegó a escribirlos (se quedan los últimos conocidos en
+  `hist`), ni el meta de los no seguidos para las partes de `close-radar` que faltaban.
+- **Cierre** en pasos (ver "Radar y juegos seguidos"): `radarCloseStmt` ya no ordena las lecturas en SQL
+  (~233.000 filas) sino que recibe las filas agregadas en el Worker (~5.600); `closeDayStmt` lee cada juego
+  con muestras del día una vez con su lista ordenada (`sortedMedian`) en vez de `ROW_NUMBER()`/`COUNT()
+  OVER` (~56.000 → ~19.000); `mergeHistStmt` es un UPSERT en `hist` (~28.000 → ~8.500).
+- **maint**: sin la poda de muestras huérfanas (recorría `samples` entera; nada deja huérfanas: `games` no
+  pierde filas y todo lo que inserta muestras sale de `games`; solo `/api/admin/import` podría), con la poda
+  de `hist`, y borra las cachés del radar solo si `untrack` cambia algo (en el mismo batch, con `changes()`:
+  si el paso se repite tras escribir, no se quedan sin borrar).
+- **select**: los rangos salen de los ids del radar (`radarIds`: `state.radar_places` si es de hoy, o una
+  pasada por `games`) en vez de `ROW_NUMBER()` sobre `games`; `radarSlice` da la vuelta a las filas diarias
+  en el Worker (ordenarlas otra vez en SQL contaba cada fila dos veces): ~86.000 → ~47.000. `select-apply`
+  borra `radar_counts` solo si cambia la selección (también con `changes()`, en el mismo batch; y ya no
+  `radar_places`, que no depende de `sel`).
+- **Relleno** (`backfillSamplesStmt`): busca en el texto del fichero solo los ids que entran, en vez de un
+  `json_each` del fichero entero (~45.000 → ~2.200).
+- **Export sin selección**: ver "Radar y juegos seguidos".
+
