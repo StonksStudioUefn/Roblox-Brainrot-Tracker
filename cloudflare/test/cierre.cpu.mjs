@@ -11,8 +11,12 @@
  *   juego y mandar a D1 el JSON de las lecturas y del meta enteros (la mediana la hacía SQL).
  * «close»: el paso close de ahora: votos y meta de los 56 ficheros (el meta ya
  *   viene repartido en RADAR_CLOSE_PARTS), un fichero por parte y los votos a D1.
- * «close-radar»: un paso close-radar-<día>-<k>: los 8 ficheros como texto
- *   (radarReadingsPart), su parte del meta y radarDailyRows.
+ * «close-radar»: un paso close-radar-<día>-<k> en frío (el primero de la
+ *   ejecución, o tras reanudarla): decodificar los 8 ficheros de R2, comprobar
+ *   su forma (radarPrepare), sacar su parte (radarReadingsPart), su parte del
+ *   meta y radarDailyRows.
+ * «close-radar-sig»: las partes siguientes en la misma ejecución, con los
+ *   ficheros ya leídos y comprobados (sampler.js los guarda por día).
  */
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -23,13 +27,15 @@ const cpu = () => { const u = process.cpuUsage(); return (u.user + u.system) / 1
 
 if (process.argv[2] === "--child") {
   const mode = process.argv[3];
-  const { idPart, radarDailyRows, radarReadingsPart } = await import("../src/db.js");
+  const { idPart, radarDailyRows, radarPrepare, radarReadingsPart } = await import("../src/db.js");
   const { RADAR_CLOSE_PARTS } = await import("../src/sampler.js");
   let seed = 7;
   const R = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
   const ids = Array.from({ length: 2800 }, () => 1_000_000 + Math.floor(R() * 1e10));
   // Lo que llega de R2 (texto): 8 ficheros del radar y 56 de votos
   const radarFiles = Array.from({ length: 8 }, () => JSON.stringify(Object.fromEntries(ids.map(id => [id, 150 + Math.floor(R() * 20000)]))));
+  const radarBytes = radarFiles.map(t => new TextEncoder().encode(t));   // como llegan de R2
+  const prepared = mode === "close-radar-sig" ? radarPrepare(radarFiles) : null;
   const sel = ids.slice(0, 242);
   const split = r => {
     const out = Array.from({ length: RADAR_CLOSE_PARTS }, () => ({}));
@@ -58,7 +64,8 @@ if (process.argv[2] === "--child") {
     for (const t of voteFiles) { const part = JSON.parse(t.ahora); Object.assign(votes, part.v); part.r.forEach((m, k) => Object.assign(parts[k], m)); }
     bytes = parts.reduce((a, m) => a + JSON.stringify(m).length, 0) + JSON.stringify(votes).length;
   } else {
-    const rows = radarDailyRows(radarReadingsPart(radarFiles, 0, RADAR_CLOSE_PARTS), JSON.parse(metaText), 0, RADAR_CLOSE_PARTS);
+    const files = prepared || radarPrepare(radarBytes.map(b => new TextDecoder().decode(b)));
+    const rows = radarDailyRows(radarReadingsPart(files, 0, RADAR_CLOSE_PARTS), JSON.parse(metaText), 0, RADAR_CLOSE_PARTS);
     bytes = JSON.stringify(rows).length;
   }
   console.log(JSON.stringify({ ms: cpu() - c0, bytes }));
@@ -66,7 +73,8 @@ if (process.argv[2] === "--child") {
 }
 
 const runs = Number((process.argv.find(a => a.startsWith("--runs=")) || "=7").split("=")[1]);
-for (const mode of ["antes", "close", "close-radar"]) {
+console.log(`RADAR_CLOSE_PARTS = ${(await import("../src/sampler.js")).RADAR_CLOSE_PARTS}`);
+for (const mode of ["antes", "close", "close-radar", "close-radar-sig"]) {
   const ms = [];
   let bytes = 0;
   for (let i = 0; i < runs; i++) {
@@ -75,5 +83,5 @@ for (const mode of ["antes", "close", "close-radar"]) {
     ms.push(j.ms); bytes = j.bytes;
   }
   ms.sort((a, b) => a - b);
-  console.log(`${mode.padEnd(12)} mediana ${ms[runs >> 1].toFixed(2)} ms  (min ${ms[0].toFixed(2)} · max ${ms[runs - 1].toFixed(2)})  · ${Math.round(bytes / 1024)} KB a D1`);
+  console.log(`${mode.padEnd(15)} mediana ${ms[runs >> 1].toFixed(2)} ms  (min ${ms[0].toFixed(2)} · max ${ms[runs - 1].toFixed(2)})  · ${Math.round(bytes / 1024)} KB a D1`);
 }

@@ -4,11 +4,13 @@
  * local (miniflare) con datos aleatorios:
  *   - radarDailyRows (JS, también por partes desde el texto de los ficheros con
  *     radarReadingsPart) + radarCloseStmt  ==  radarCloseStmt de antes (SQL con ROW_NUMBER)
- *   - closeDayStmt (sortedMedian; todos o solo los seguidos)  ==  closeDayStmt de antes
+ *   - closeDayStmt (sortedMedian; muestras de los seguidos o de todos)  ==  closeDayStmt de antes
  *   - mergeHistStmt (tabla hist) y migrateHist  ==  mergeHistStmt de antes (state.hist_agg)
  *   - rebuildHistStmts  ==  rebuildHistStmt de antes
  * Mediana y media con los .5 al par (round() de Python), muestras repetidas,
- * nulos, juegos solo en el meta y filas que ya existían.
+ * nulos, juegos solo en el meta y filas que ya existían. Y además: ids que son
+ * prefijo de otros, ficheros vacíos o solo con null, migrateHist repetido,
+ * countTryStmt y las cachés que se borran solo si cambia algo (changes()).
  *
  *   node --import ./test/cf_loader.mjs test/cierre.parity.mjs [--seed=N] [--rondas=N]
  *
@@ -20,9 +22,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getPlatformProxy } from "wrangler";
 import {
-  DAY_MIN, MEAN_SQL, MEDIAN_SQL, addDays, closeDayStmt, dayStart, mergeHistStmt, migrateHist, radarCloseStmt, radarDailyRows,
-  radarReadingsPart, rebuildHistStmts,
+  DAY_MIN, MEAN_SQL, MEDIAN_SQL, addDays, closeDayStmt, countTryStmt, dayStart, getState, mergeHistStmt, migrateHist, radarCloseStmt,
+  radarCountsStaleStmt, radarDailyRows, radarPrepare, radarReadingsPart, radarStaleStmt, rebuildHistStmts,
 } from "../src/db.js";
+import { RADAR_CLOSE_PARTS } from "../src/sampler.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const arg = (name, dflt) => Number((process.argv.find(a => a.startsWith(`--${name}=`)) || `=${dflt}`).split("=")[1]);
@@ -240,17 +243,18 @@ for (let round = 0; round < ROUNDS; round++) {
       await db.prepare("DELETE FROM daily").run(); await insert("daily", cols, pre);
       await old_closeDayStmt(db, DATE, v).run();
       const want = await dailyRows();
-      for (const selected of onlySel ? [true, false] : [false]) {
-        await db.prepare("DELETE FROM daily").run(); await insert("daily", cols, pre);
-        await closeDayStmt(db, DATE, v, { selected }).run();
-        same(`closeDayStmt ronda ${round} (${onlySel ? "muestras de seguidos" : "de todos"}, selected=${selected}, votos=${!!v})`, want, await dailyRows());
-      }
+      await db.prepare("DELETE FROM daily").run(); await insert("daily", cols, pre);
+      await closeDayStmt(db, DATE, v).run();
+      same(`closeDayStmt ronda ${round} (${onlySel ? "muestras de seguidos" : "de todos"}, votos=${!!v})`, want, await dailyRows());
     }
   }
 
   // ── radarCloseStmt ────────────────────────────────────────────────────────
   {
-    const pool = [...ids, ...Array.from({ length: 20 }, () => int(9_100_000, 9_200_000)), 12_345_678_901];   // algunos no están en games
+    // Algunos no están en games, y ids que son prefijo o sufijo de otros (12 → 123 → 1234…)
+    const nested = [12, 123, 1234, 12345, 23, 2345, 345];
+    await insert("games", ["universe_id", "tracked", "sel"], nested.filter(id => !ids.includes(id)).map(id => [id, 1, 0]));
+    const pool = [...ids, ...nested, ...Array.from({ length: 20 }, () => int(9_100_000, 9_200_000)), 12_345_678_901];
     // Los ficheros del día (radar/<día>/<ts>.json) y las lecturas por juego, como las juntaba el cierre de antes
     const files = Array.from({ length: 8 }, () => Object.fromEntries(pool.filter(() => R() < 0.6).map(id => [id, R() < 0.05 ? null : p()])));
     const readings = {}, meta = {};
@@ -259,6 +263,8 @@ for (let round = 0; round < ROUNDS; round++) {
     const texts = files.map(f => JSON.stringify(f));
     texts.push(JSON.stringify({ [pool[0]]: 400 }, null, 1));   // otra forma: se parsea entero
     readings[pool[0]] = [...(readings[pool[0]] || []), 400];
+    texts.push("{}", JSON.stringify({ [pool[1]]: null, [pool[2]]: null }));   // vacío y solo con null
+    (readings[pool[1]] ||= []).push(null); (readings[pool[2]] ||= []).push(null);
     const cols = ["universe_id", "date", "n", "median", "mean", "min", "max", "visits"];
     const pre = ids.filter(() => R() < 0.3).map(id => [id, DATE, int(1, 9), p(), p(), p(), p(), R() < 0.5 ? null : int(1e6, 9e9)]);
     for (const [r, m] of [[readings, meta], [readings, null], [null, meta], [{}, {}]]) {
@@ -269,13 +275,16 @@ for (let round = 0; round < ROUNDS; round++) {
       await radarCloseStmt(db, DATE, radarDailyRows(r, m)).run();
       same(`radarCloseStmt ronda ${round} (lecturas=${!!r}, meta=${!!m})`, want, await dailyRows());
       // Por partes desde el texto de los ficheros, como el paso close-radar-<día>-<k>
-      for (const parts of [1, 4]) {
-        await db.prepare("DELETE FROM daily").run(); await insert("daily", cols, pre);
-        for (let k = 0; k < parts; k++) {
-          const rows = radarDailyRows(r === readings ? radarReadingsPart(texts, k, parts) : r && new Map(), m, k, parts);
-          if (rows.length) await radarCloseStmt(db, DATE, rows).run();
+      for (const parts of [1, 4, 5, RADAR_CLOSE_PARTS]) {
+        for (const prepared of [false, true]) {   // el texto tal cual o ya pasado por radarPrepare (como en sampler.js)
+          await db.prepare("DELETE FROM daily").run(); await insert("daily", cols, pre);
+          const files = prepared ? radarPrepare(texts) : texts;
+          for (let k = 0; k < parts; k++) {
+            const rows = radarDailyRows(r === readings ? radarReadingsPart(files, k, parts) : r && new Map(), m, k, parts);
+            if (rows.length) await radarCloseStmt(db, DATE, rows).run();
+          }
+          same(`radarCloseStmt ronda ${round} por ${parts} partes${prepared ? " (radarPrepare)" : ""} (lecturas=${!!r}, meta=${!!m})`, want, await dailyRows());
         }
-        same(`radarCloseStmt ronda ${round} por ${parts} partes (lecturas=${!!r}, meta=${!!m})`, want, await dailyRows());
       }
     }
   }
@@ -333,6 +342,30 @@ await db.prepare("DROP TABLE hist").run();
 await db.prepare("INSERT INTO state (key, value) VALUES ('hist_agg', '{\"7\":[10,\"2026-10-01\",3,\"2026-09-29\",5,6,7,\"2026-10-01\"]}')").run();
 await migrateHist(db);
 same("migrateHist sin la tabla hist", { 7: [10, "2026-10-01", 3, "2026-09-29", 5, 6, 7, "2026-10-01"] }, await histJson());
+// Repetirla (otra pasada, o dos a la vez) no cambia nada: ya no hay clave que pasar
+const again = await migrateHist(db);
+same("migrateHist repetida no escribe", 0, again.reduce((a, r) => a + (r.meta?.changes ?? 0), 0));
+same("migrateHist repetida", { 7: [10, "2026-10-01", 3, "2026-09-29", 5, 6, 7, "2026-10-01"] }, await histJson());
+
+// countTryStmt: cuenta por tarea y vuelve a cero al cambiar de día
+await db.prepare("DELETE FROM state").run();
+for (const [day, task] of [["2026-10-05", "close"], ["2026-10-05", "close"], ["2026-10-05", "meta"], ["2026-10-06", "close"]]) {
+  await countTryStmt(db, day, task).run();
+  if (day === "2026-10-05" && task === "meta") same("countTryStmt mismo día", { day: "2026-10-05", close: 2, meta: 1 }, await getState(db, "daily_tries"));
+}
+same("countTryStmt otro día", { day: "2026-10-06", close: 1 }, await getState(db, "daily_tries"));
+
+// Las cachés del radar se borran en el mismo batch solo si la sentencia de antes cambia filas
+const caches = async () => (await db.prepare("SELECT key FROM state WHERE key IN ('radar_places', 'radar_counts') ORDER BY key").all()).results.map(r => r.key);
+const putCaches = () => db.batch(["radar_places", "radar_counts"].map(k => db.prepare("INSERT OR REPLACE INTO state (key, value) VALUES (?1, '{}')").bind(k)));
+await putCaches();
+await db.batch([db.prepare("UPDATE games SET tracked = 0 WHERE universe_id < 0"), radarStaleStmt(db, { ifChanged: true }), radarCountsStaleStmt(db)]);
+same("cachés sin cambios", ["radar_counts", "radar_places"], await caches());
+await db.batch([db.prepare("UPDATE games SET sel = 1 - sel WHERE universe_id IN (SELECT universe_id FROM games LIMIT 2)"), radarCountsStaleStmt(db)]);
+same("radar_counts con cambios", ["radar_places"], await caches());
+await putCaches();
+await db.batch([db.prepare("UPDATE games SET tracked = 1 - tracked WHERE universe_id IN (SELECT universe_id FROM games LIMIT 2)"), radarStaleStmt(db, { ifChanged: true })]);
+same("radar_places y radar_counts con cambios", [], await caches());
 
 await proxy.dispose();
 rmSync(dir, { recursive: true, force: true });
