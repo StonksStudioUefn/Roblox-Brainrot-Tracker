@@ -26,8 +26,8 @@
  *         search-0..N → search-cursor → rolimons (radar; con el meta del día, también
  *         places nuevos) → [resolve-0..K] → sample-list → sample-0..M (seguidos; con
  *         el meta del día todo el radar con meta y horror, y votos de los
- *         seguidos) → [meta-done] → radar-api → [close (+ filas del radar)] →
- *         [select-plan → select-0..R → select-apply] → [maint] →
+ *         seguidos) → [meta-done] → radar-api → [close → close-radar-<día>-0..4 →
+ *         close-hist] → [select-plan → select-0..R → select-apply] → [maint] →
  *         export-plan → export-0..E → export-join → telegram → finish
  * Lo que va entre corchetes son tareas del día: cada una con su marca y como
  * mucho DAILY_TRIES intentos al día (ver DAILY_TASKS).
@@ -48,10 +48,10 @@ import {
 } from "./sources.js";
 import {
   DAY_MIN, addDays, applySelectionStmt, applyVotesStmt, backfillSamplesStmt, buildExportSlice, closeDayStmt, exportHeader,
-  exportPlan, getState, getStates, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs, lowSinceStmts,
+  exportPlan, getState, getStates, idPart, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs, lowSinceStmts,
   mergeHistStmt, migrateHist, minuteOf, pruneHistStmt, pruneOldStmts, pruneOrphansStmt, pruneSamplesStmt, radarCloseStmt,
-  radarCounts, radarPlayers, radarSlice, radarStaleStmt, retrackPlacesStmt, setState, setStateStmt, sortHitsStmt, trackedIds,
-  unknownPlaces, untrackStmt, updateMetaStmt, upsertDiscoveredStmt, written,
+  radarCounts, radarDailyRows, radarPlayers, radarReadingsPart, radarSlice, radarStaleStmt, retrackPlacesStmt, setState,
+  setStateStmt, sortHitsStmt, trackedIds, unknownPlaces, untrackStmt, updateMetaStmt, upsertDiscoveredStmt, written,
 } from "./db.js";
 import { classifyHorror } from "./horror.js";
 import { radarScore } from "./metrics.js";
@@ -85,6 +85,9 @@ export const SELECT_SLICE = 250;             // juegos del radar por paso de sel
 export const BACKFILL_HOURS = 48;
 export const BACKFILL_FILES = 16;            // 48 h con el radar cada 3 h: tope de lecturas de R2 por paso
 export const BACKFILL_MAX_GAMES = 150;       // tope de escrituras: 150 × 16 = 2.400 filas (y otras tantas al podarlas)
+// Las filas del radar al cerrar el día, en partes (por la última cifra del id):
+// con ~2.800 juegos × 8 lecturas, de una vez costaba ~30 ms de CPU en frío
+export const RADAR_CLOSE_PARTS = 5;
 
 // Peticiones externas: el plan gratis da 50 por invocación. Se deja margen.
 export const INVOCATION_BUDGET = 46;
@@ -359,8 +362,13 @@ export class Sampler extends WorkflowEntrypoint {
         try {
           r = await step.do(name, STEP, async () => {
             const out = await sampleChunk(db, parts[i], { ts, today, meta, budget: sub(need), sel: selSet });
-            // Votos y datos del radar se aplican en el cierre del día, que puede ir en otra ejecución
-            if (out.votes) await env.BUCKET.put(`${tmp}votes-${i}.json`, JSON.stringify({ v: out.votes, r: out.radar }));
+            // Votos y datos del radar se aplican en el cierre del día, que puede ir en otra ejecución.
+            // Los del radar ya repartidos como las partes de close-radar (el cierre solo los junta)
+            if (out.votes) {
+              const r = Array.from({ length: RADAR_CLOSE_PARTS }, () => ({}));
+              for (const id in out.radar) r[idPart(id, RADAR_CLOSE_PARTS)][id] = out.radar[id];
+              await env.BUCKET.put(`${tmp}votes-${i}.json`, JSON.stringify({ v: out.votes, r }));
+            }
             return { stats: out.stats };
           });
         } catch (e) {
@@ -413,11 +421,15 @@ export class Sampler extends WorkflowEntrypoint {
     if (inv.left < TELEGRAM_NEED && want("telegram") && p.phase !== "finalize") return await next("finalize");
 
     const yesterday = addDays(today, -1);
-    // Con el meta del día también: sus votos van a la fila de ayer aunque ya esté cerrada
+    // Cierre en tres tiempos: `close` (filas desde samples, con los votos),
+    // `close-radar-<día>-<k>` (filas del radar, por partes: CPU) y `close-hist`
+    // (hist y closed_day). Cada uno se puede repetir; si algo falla, closed_day
+    // no avanza y la pasada siguiente lo repite (como mucho DAILY_TRIES al día).
+    // Con el meta del día también: sus votos van a la fila de ayer aunque ya esté cerrada.
     if (want("close") && (daily.close || daily.meta)) {
-      await safe("close", async () => {
-        // Votos guardados por los pasos sample-N con meta
-        const votes = {}, radarMeta = {};
+      const plan = await safe("close", async () => {
+        // Votos y meta de los no seguidos, guardados por los pasos sample-N con meta
+        const votes = {}, metaParts = Array.from({ length: RADAR_CLOSE_PARTS }, () => ({}));
         if (daily.meta) {
           const listed = await env.BUCKET.list({ prefix: `${tmp}votes-` });
           for (const o of listed.objects) {
@@ -425,33 +437,54 @@ export class Sampler extends WorkflowEntrypoint {
             if (!obj) continue;
             const part = await obj.json();
             Object.assign(votes, part.v || {});
-            Object.assign(radarMeta, part.r || {});
+            if (Array.isArray(part.r)) part.r.forEach((m, k) => Object.assign(metaParts[k], m));
+            else for (const id in part.r || {}) metaParts[idPart(id, RADAR_CLOSE_PARTS)][id] = part.r[id];   // de una ejecución de antes
           }
         }
         const oldest = addDays(today, -SAMPLE_RETENTION_DAYS);
         let from = init.closedDay ? addDays(init.closedDay, 1) : yesterday;
         if (from < oldest) from = oldest;
-        const stmts = [];
         const dates = [];
-        let radarRows = 0;
-        for (let d = from; d <= yesterday; d = addDays(d, 1)) {
-          dates.push(d);
-          // Radar: lecturas de Rolimons del día y, para ayer, jugadores y visitas del meta de hoy
-          const readings = await radarReadings(env.BUCKET, d);
-          const rm = d === yesterday ? radarMeta : null;
-          radarRows += readings ? Object.keys(readings).length : 0;
-          stmts.push(closeDayStmt(db, d, d === yesterday ? votes : null));
-          if (readings || (rm && Object.keys(rm).length)) stmts.push(radarCloseStmt(db, d, readings, rm));
-          stmts.push(mergeHistStmt(db, d));
+        for (let d = from; d <= yesterday; d = addDays(d, 1)) dates.push(d);
+        const stats = { dates, votes: Object.keys(votes).length, radar_meta: metaParts.reduce((a, m) => a + Object.keys(m).length, 0) };
+        if (!dates.length) {
+          // Ya cerrado: solo los votos y el meta de hoy en la fila de ayer
+          const rows = metaParts.flatMap((m, k) => radarDailyRows(null, m, k, RADAR_CLOSE_PARTS));
+          const res = await db.batch([
+            applyVotesStmt(db, yesterday, votes), ...(rows.length ? [radarCloseStmt(db, yesterday, rows)] : []),
+            mergeHistStmt(db, yesterday),
+          ]);
+          return { ...stats, written: written(res) };
         }
-        if (!dates.length && Object.keys(votes).length) {
-          stmts.push(applyVotesStmt(db, yesterday, votes), mergeHistStmt(db, yesterday));
+        if (stats.radar_meta) {
+          await Promise.all(metaParts.map((m, k) => env.BUCKET.put(`${tmp}close-meta-${k}.json`, JSON.stringify(m))));
         }
-        const closed = init.closedDay && init.closedDay > yesterday ? init.closedDay : yesterday;
-        stmts.push(setStateStmt(db, "closed_day", closed));
-        const res = await db.batch(stmts);
-        return { dates, votes: Object.keys(votes).length, radar: radarRows, radar_meta: Object.keys(radarMeta).length, written: written(res) };
+        // Ayer, con la selección aún sin cambiar (select va después), solo los
+        // seguidos tienen muestras; un día más viejo se cierra con todos los juegos
+        const res = await db.batch(dates.map(d =>
+          closeDayStmt(db, d, d === yesterday ? votes : null, { selected: d === yesterday && init.selDay !== today })));
+        return { ...stats, meta: stats.radar_meta > 0, written: written(res) };
       });
+      let ok = !!plan?.dates?.length;
+      for (const d of plan?.dates || []) {
+        for (let k = 0; ok && k < RADAR_CLOSE_PARTS; k++) {
+          ok = !!await safe(`close-radar-${d}-${k}`, async () => {
+            const texts = await radarTexts(env.BUCKET, d);
+            let rm = null;
+            if (d === yesterday && plan.meta) rm = await (await env.BUCKET.get(`${tmp}close-meta-${k}.json`))?.json() ?? null;
+            const rows = radarDailyRows(radarReadingsPart(texts, k, RADAR_CLOSE_PARTS), rm, k, RADAR_CLOSE_PARTS);
+            const res = rows.length ? await radarCloseStmt(db, d, rows).run() : null;
+            return { files: texts.length, rows: rows.length, written: written(res) };
+          });
+        }
+      }
+      if (ok) {
+        await safe("close-hist", async () => {
+          const closed = init.closedDay && init.closedDay > yesterday ? init.closedDay : yesterday;
+          const res = await db.batch([...plan.dates.map(d => mergeHistStmt(db, d)), setStateStmt(db, "closed_day", closed)]);
+          return { closed, written: written(res) };
+        });
+      }
     }
 
     // ── select: los juegos seguidos (una vez al día, con el día de ayer cerrado)
@@ -531,7 +564,7 @@ function compact(summary) {
   const out = { ...summary, errors: (summary.errors || []).slice(-30) };
   const steps = {};
   for (const [k, v] of Object.entries(summary.steps || {})) {
-    if (/^(explore-\d+|resolve-\d+|search-\d+|export-\d+|select-\d+|tg-scan-|tg-pick-)/.test(k)) continue;   // demasiados: van en el total
+    if (/^(explore-\d+|resolve-\d+|search-\d+|export-\d+|select-\d+|tg-scan-|tg-pick-|close-radar-)/.test(k)) continue;   // demasiados: van en el total
     steps[k] = v;
   }
   out.steps = steps;
@@ -639,18 +672,11 @@ export function processGames(ids, games, vts, meta, sel = null) {
   return { samples, low, metaRows, votes, radar };
 }
 
-/** Lecturas del radar de un día: {universe_id: [jugadores de cada muestreo…]}, o null. */
-export async function radarReadings(bucket, date) {
+/** Texto de los ficheros del radar de un día (radar/<día>/<ts>.json). */
+export async function radarTexts(bucket, date) {
   const listed = await bucket.list({ prefix: `${RADAR_PREFIX}${date}/` });
-  if (!listed.objects.length) return null;
-  const out = {};
-  for (const o of listed.objects) {
-    const obj = await bucket.get(o.key);
-    if (!obj) continue;
-    const players = await obj.json();
-    for (const id in players) (out[id] ||= []).push(players[id]);
-  }
-  return out;
+  const texts = await Promise.all(listed.objects.map(async o => (await bucket.get(o.key))?.text() ?? null));
+  return texts.filter(t => t != null);
 }
 
 /**

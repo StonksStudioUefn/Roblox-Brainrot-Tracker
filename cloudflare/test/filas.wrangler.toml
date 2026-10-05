@@ -1,0 +1,8 @@
+# Solo para test/filas.bench.mjs: un D1 local (miniflare) para medir filas.
+name = "filas-bench"
+compatibility_date = "2026-10-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "filas-bench"
+database_id = "00000000-0000-0000-0000-000000000000"

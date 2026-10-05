@@ -43,6 +43,16 @@ export const MEAN_SQL = `(CASE
   WHEN 2 * (SUM(p) % COUNT(*)) > COUNT(*) THEN SUM(p) / COUNT(*) + 1
   WHEN 2 * (SUM(p) % COUNT(*)) < COUNT(*) THEN SUM(p) / COUNT(*)
   ELSE SUM(p) / COUNT(*) + (SUM(p) / COUNT(*)) % 2 END)`;
+/** Lo mismo con la suma y el nº ya calculados (expresiones SQL). */
+export const MEAN_OF = (sum, n) => `(CASE
+  WHEN 2 * (${sum} % ${n}) > ${n} THEN ${sum} / ${n} + 1
+  WHEN 2 * (${sum} % ${n}) < ${n} THEN ${sum} / ${n}
+  ELSE ${sum} / ${n} + (${sum} / ${n}) % 2 END)`;
+/** Mediana redondeada como Python de los `n` elementos ORDENADOS del array JSON `a` que empiezan en `f`. */
+export const sortedMedian = (a, f, n) => {
+  const mid = `(CASE WHEN ${n} % 2 = 1 THEN ${a} ->> (${f} + ${n} / 2) ELSE (${a} ->> (${f} + ${n} / 2 - 1)) + (${a} ->> (${f} + ${n} / 2)) END)`;
+  return `(CASE WHEN ${n} % 2 = 1 THEN ${mid} ELSE ${mid} / 2 + (${mid} % 2) * ((${mid} / 2) % 2) END)`;
+};
 
 // ─── Estado (tabla state, valores JSON) ──────────────────────────────────────
 export async function getState(db, key, fallback = null) {
@@ -230,40 +240,104 @@ export async function radarPlaces(db, today) {
 export const radarStaleStmt = db =>
   db.prepare("DELETE FROM state WHERE key IN ('radar_places', 'radar_counts')");
 
+/** Mediana de una lista ORDENADA de enteros, con los .5 al par (round() de Python), como MEDIAN_SQL. */
+export function pyMedian(sorted) {
+  const n = sorted.length;
+  if (n % 2) return sorted[(n - 1) / 2];
+  const s = sorted[n / 2 - 1] + sorted[n / 2], h = Math.trunc(s / 2);
+  return h + (s % 2) * (h % 2);
+}
+
+/** round(fmean) de Python con enteros, como MEAN_SQL. */
+export function pyMean(sum, n) {
+  const q = Math.trunc(sum / n), r2 = 2 * (sum % n);
+  return r2 > n ? q + 1 : r2 < n ? q : q + (q % 2);
+}
+
+/** Parte (0..parts-1) de un universe_id escrito como texto: por su última cifra, sin pasarlo a número. */
+export const idPart = (key, parts) => key.charCodeAt(key.length - 1) % parts;
+
+// Un fichero del radar tal como lo escribe JSON.stringify de {universe_id: jugadores}
+const RADAR_TEXT = /^\{(?:"\d+":(?:-?\d+(?:\.\d+)?|null),)*"\d+":(?:-?\d+(?:\.\d+)?|null)\}$/;
+
 /**
- * Filas diarias del radar para `date`: `readings` = {universe_id: [jugadores
- * de cada muestreo (o null)…]} (Rolimons) y `meta` = {universe_id: [playing,
- * visits]} (Games API del meta diario, de los juegos no seguidos). Mediana,
- * media, mín y máx como el cierre desde samples. Un juego que ya tiene fila
- * del día (de sus muestras) solo la cambia si el radar tiene más lecturas; las
- * visitas solo se rellenan si faltaban.
+ * Lecturas del radar de un día desde el texto de sus ficheros
+ * (radar/<día>/<ts>.json), solo de los juegos de la parte `part` de `parts`.
+ * → Map universe_id (texto) → [jugadores de cada fichero…] (sin los null)
+ * Una expresión regular (código nativo) saca solo los juegos de la parte, por
+ * la última cifra del id: JSON.parse y recorrer los objetos (~2.800 juegos ×
+ * 8 ficheros) costaba ~30 ms de CPU en frío. Un fichero con otra forma se
+ * parsea entero.
  */
-export function radarCloseStmt(db, date, readings, meta) {
+export function radarReadingsPart(texts, part = 0, parts = 1) {
+  const digits = [..."0123456789"].filter(d => idPart(d, parts) === part).join("");
+  const rx = new RegExp(`"(\\d*[${digits}])":(-?\\d+(?:\\.\\d+)?)[,}]`, "g");
+  const out = new Map();
+  const add = (k, v) => {
+    const a = out.get(k);
+    if (a) a.push(v); else out.set(k, [v]);
+  };
+  for (const text of texts) {
+    if (!RADAR_TEXT.test(text)) {
+      if (text.trim() === "{}") continue;
+      for (const [k, v] of Object.entries(JSON.parse(text))) if (v != null && idPart(k, parts) === part) add(k, v);
+      continue;
+    }
+    rx.lastIndex = 0;
+    for (let m; (m = rx.exec(text));) add(m[1], +m[2]);
+  }
+  return out;
+}
+
+/**
+ * Filas diarias del radar: `readings` = lecturas por juego (Map de
+ * radarReadingsPart u objeto {universe_id: [jugadores (o null)…]}) y `meta` =
+ * {universe_id: [playing, visits]} (Games API del meta diario, de los juegos
+ * no seguidos). Con `parts`, del meta solo los de la parte `part`.
+ * → [[id, n, mediana, media, mín, máx, visitas], …]
+ * Se calcula aquí y no en SQL: desmontar las lecturas con json_each y
+ * ordenarlas con ROW_NUMBER leía ~230.000 filas (~10 por lectura) para
+ * escribir ~2.800. Mismo redondeo que el cierre desde samples.
+ */
+export function radarDailyRows(readings, meta, part = 0, parts = 1) {
+  const rows = [], seen = new Set();
+  const mt = meta || {};
+  const own = readings instanceof Map;
+  for (const [key, vals] of own ? readings : Object.entries(readings || {})) {
+    const ps = own ? vals : vals.filter(p => p != null);
+    const n = ps.length;
+    if (!n) continue;
+    // Por inserción: son ≤ 8 lecturas, y sin llamar a un comparador por cada par
+    let sum = ps[0];
+    for (let i = 1; i < n; i++) {
+      const x = ps[i];
+      sum += x;
+      let j = i - 1;
+      while (j >= 0 && ps[j] > x) { ps[j + 1] = ps[j]; j--; }
+      ps[j + 1] = x;
+    }
+    seen.add(key);
+    rows.push([Number(key), n, pyMedian(ps), pyMean(sum, n), ps[0], ps[n - 1], mt[key]?.[1] ?? null]);
+  }
+  for (const key in mt) {
+    const p = mt[key]?.[0];
+    if (p == null || seen.has(key) || idPart(key, parts) !== part) continue;
+    rows.push([Number(key), 1, p, p, p, p, mt[key][1] ?? null]);
+  }
+  return rows;
+}
+
+/**
+ * Escribe las filas de radarDailyRows en `daily` de `date`. Un juego que ya
+ * tiene fila del día (de sus muestras) solo la cambia si el radar tiene más
+ * lecturas; las visitas solo se rellenan si faltaban.
+ */
+export function radarCloseStmt(db, date, rows) {
   return db.prepare(
-    `WITH r AS (
-       SELECT CAST(o.key AS INTEGER) AS id, i.value AS p
-       FROM json_each(?1) o, json_each(o.value) i WHERE i.value IS NOT NULL
-     ),
-     s AS (
-       SELECT id, p, ROW_NUMBER() OVER (PARTITION BY id ORDER BY p) AS rn, COUNT(*) OVER (PARTITION BY id) AS cnt
-       FROM r
-     ),
-     a AS (
-       SELECT id, MAX(cnt) AS n, ${MEDIAN_SQL} AS median, ${MEAN_SQL} AS mean, MIN(p) AS mn, MAX(p) AS mx
-       FROM s GROUP BY id
-     ),
-     mt AS MATERIALIZED (
-       SELECT CAST(key AS INTEGER) AS id, value ->> 0 AS p, value ->> 1 AS v FROM json_each(?2)
-     ),
-     u AS (
-       SELECT a.id, a.n, a.median, a.mean, a.mn, a.mx, mt.v FROM a LEFT JOIN mt ON mt.id = a.id
-       UNION ALL
-       SELECT mt.id, 1, mt.p, mt.p, mt.p, mt.p, mt.v FROM mt
-       WHERE mt.p IS NOT NULL AND mt.id NOT IN (SELECT id FROM a)
-     )
-     INSERT INTO daily (universe_id, date, n, median, mean, min, max, visits)
-     SELECT u.id, ?3, u.n, u.median, u.mean, u.mn, u.mx, u.v FROM u
-     WHERE EXISTS (SELECT 1 FROM games g WHERE g.universe_id = u.id)
+    `INSERT INTO daily (universe_id, date, n, median, mean, min, max, visits)
+     SELECT j.value ->> 0, ?2, j.value ->> 1, j.value ->> 2, j.value ->> 3, j.value ->> 4, j.value ->> 5, j.value ->> 6
+     FROM json_each(?1) j
+     WHERE EXISTS (SELECT 1 FROM games g WHERE g.universe_id = (j.value ->> 0))
      ON CONFLICT (universe_id, date) DO UPDATE SET
        n = CASE WHEN excluded.n > daily.n THEN excluded.n ELSE daily.n END,
        median = CASE WHEN excluded.n > daily.n THEN excluded.median ELSE daily.median END,
@@ -272,7 +346,7 @@ export function radarCloseStmt(db, date, readings, meta) {
        max = CASE WHEN excluded.n > daily.n THEN excluded.max ELSE daily.max END,
        visits = COALESCE(daily.visits, excluded.visits)
      WHERE excluded.n > daily.n OR (daily.visits IS NULL AND excluded.visits IS NOT NULL)`,
-  ).bind(JSON.stringify(readings || {}), JSON.stringify(meta || {}), date);
+  ).bind(JSON.stringify(rows || []), date);
 }
 
 /**
@@ -387,24 +461,28 @@ export function updateMetaStmt(db, rows, today) {
 
 // ─── Cierre del día ───────────────────────────────────────────────────────────
 /**
- * Cierra `date` desde samples: n, mediana (ROW_NUMBER), media, min, max y
- * visitas. `votes` = {universe_id: [favorites, up, down]} (o null) del meta
- * diario. ON CONFLICT DO UPDATE sin pisar los favoritos/votos ya guardados.
+ * Cierra `date` desde samples: n, mediana, media, min, max y visitas.
+ * `votes` = {universe_id: [favorites, up, down]} (o null) del meta diario. ON
+ * CONFLICT DO UPDATE sin pisar los favoritos/votos ya guardados.
+ * Con `selected` recorre solo los seguidos (índice games_sel): son los únicos
+ * con muestras mientras la selección sea la del día que se cierra. Cada juego
+ * lee sus muestras una vez, ya ordenadas por jugadores, y la mediana sale de
+ * esa lista (sortedMedian): con ROW_NUMBER() y COUNT() OVER D1 contaba cada
+ * muestra varias veces más.
  */
-export function closeDayStmt(db, date, votes) {
+export function closeDayStmt(db, date, votes, { selected = false } = {}) {
   const start = dayStart(date);
   return db.prepare(
-    `WITH s AS (
-       SELECT s.universe_id AS id, s.playing AS p, s.visits AS v,
-              ROW_NUMBER() OVER (PARTITION BY s.universe_id ORDER BY s.playing) AS rn,
-              COUNT(*) OVER (PARTITION BY s.universe_id) AS cnt
-       FROM games g CROSS JOIN samples s ON s.universe_id = g.universe_id AND s.ts >= ?1 AND s.ts < ?2
+    `WITH x AS MATERIALIZED (
+       SELECT g.universe_id AS id, (SELECT json_array(COUNT(*), MIN(playing), MAX(playing), SUM(playing), MAX(visits),
+                                                      json_group_array(playing ORDER BY playing))
+                                    FROM samples s WHERE s.universe_id = g.universe_id AND s.ts >= ?1 AND s.ts < ?2) AS x
+       FROM games g ${selected ? "WHERE g.sel = 1" : ""}
      ),
      a AS (
-       SELECT id, MAX(cnt) AS n,
-              ${MEDIAN_SQL} AS median,
-              ${MEAN_SQL} AS mean, MIN(p) AS mn, MAX(p) AS mx, MAX(v) AS v
-       FROM s GROUP BY id
+       SELECT id, x ->> 0 AS n, ${sortedMedian("(x -> 5)", "0", "(x ->> 0)")} AS median,
+              ${MEAN_OF("(x ->> 3)", "(x ->> 0)")} AS mean, x ->> 1 AS mn, x ->> 2 AS mx, x ->> 4 AS v
+       FROM x WHERE x ->> 0 > 0
      ),
      vt AS MATERIALIZED (
        SELECT CAST(key AS INTEGER) AS id, value ->> 0 AS fav, value ->> 1 AS up, value ->> 2 AS down
@@ -687,12 +765,6 @@ const SLICE_GAMES = `g0 AS (
       UNION ALL
       SELECT value FROM json_each(?13) WHERE ?13 IS NOT NULL
     )`;
-
-/** Mediana redondeada como Python de los `n` elementos ORDENADOS de `a` que empiezan en `f`. */
-const sortedMedian = (a, f, n) => {
-  const mid = `(CASE WHEN ${n} % 2 = 1 THEN ${a} ->> (${f} + ${n} / 2) ELSE (${a} ->> (${f} + ${n} / 2 - 1)) + (${a} ->> (${f} + ${n} / 2)) END)`;
-  return `(CASE WHEN ${n} % 2 = 1 THEN ${mid} ELSE ${mid} / 2 + (${mid} % 2) * ((${mid} / 2) % 2) END)`;
-};
 
 /**
  * Un trozo del export: los juegos con universe_id en [lo, hi] o los de `ids`
