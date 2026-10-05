@@ -293,7 +293,7 @@ async function admin(req, env, url) {
 
 async function adminStatus(env, url) {
   const out = { now: new Date().toISOString() };
-  out.state = await getStates(env.DB, ["last_run", "last_partial_run", "run_current", "day", "closed_day", "search_cursor", "last_sample_ts", "sel_day", "selection"]);
+  out.state = await getStates(env.DB, ["last_run", "last_partial_run", "run_current", "meta_day", "closed_day", "sel_day", "maint_day", "daily_tries", "search_cursor", "last_sample_ts", "selection"]);
   // La pasada en curso va por ejecuciones encadenadas (<id>-sN): se enseña la actual
   const id = url.searchParams.get("id") || out.state.run_current?.id || out.state.last_run?.instance;
   if (id) {
