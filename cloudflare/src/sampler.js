@@ -45,11 +45,11 @@ import {
   resolvePlaces,
 } from "./sources.js";
 import {
-  DAY_MIN, addDays, applySelectionStmt, applyVotesStmt, backfillSamplesStmt, buildExportSlice, closeDayStmt, exportHeader, exportPlan,
-  getState, getStates, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs, lowSinceStmts,
-  mergeHistStmt, minuteOf, pruneOldStmts, pruneOrphansStmt, pruneSamplesStmt, radarCloseStmt, radarCounts, radarPlayers,
-  radarSlice, radarStaleStmt, retrackPlacesStmt, setState, setStateStmt, sortHitsStmt, trackedIds, unknownPlaces,
-  untrackStmt, updateMetaStmt, upsertDiscoveredStmt, written,
+  DAY_MIN, addDays, applySelectionStmt, applyVotesStmt, backfillSamplesStmt, buildExportSlice, closeDayStmt, exportHeader,
+  exportPlan, getState, getStates, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs, lowSinceStmts,
+  mergeHistStmt, migrateHist, minuteOf, pruneHistStmt, pruneOldStmts, pruneOrphansStmt, pruneSamplesStmt, radarCloseStmt,
+  radarCounts, radarPlayers, radarSlice, radarStaleStmt, retrackPlacesStmt, setState, setStateStmt, sortHitsStmt, trackedIds,
+  unknownPlaces, untrackStmt, updateMetaStmt, upsertDiscoveredStmt, written,
 } from "./db.js";
 import { classifyHorror } from "./horror.js";
 import { radarScore } from "./metrics.js";
@@ -149,6 +149,8 @@ export class Sampler extends WorkflowEntrypoint {
       const today = isoDate(ts);
       const st = await getStates(db, ["day", "closed_day", "search_cursor", "sel_day"]);
       await setState(db, "run_current", { base, seg, id: base, phase: "discover", cursor: 0 });
+      // state.hist_agg → tabla hist (solo la primera vez; luego no hay clave que pasar)
+      await migrateHist(db);
       return {
         ts, today,
         firstOfDay: !!p.daily || st.day !== today,
@@ -433,9 +435,10 @@ export class Sampler extends WorkflowEntrypoint {
       await safe("maint", async () => {
         if (!init.firstOfDay && (await getState(db, "maint_day")) === today) return { skipped: true };
         const cutoff = ts - SAMPLE_RETENTION_DAYS * DAY_MIN;
+        const oldDate = addDays(today, -DATA_RETENTION_DAYS);
         const stmts = [
           pruneSamplesStmt(db, cutoff), untrackStmt(db, today),
-          pruneOrphansStmt(db, cutoff), ...pruneOldStmts(db, addDays(today, -DATA_RETENTION_DAYS)),
+          pruneOrphansStmt(db, cutoff), ...pruneOldStmts(db, oldDate), pruneHistStmt(db, oldDate),
           radarStaleStmt(db), setStateStmt(db, "maint_day", today),
         ];
         const res = await db.batch(stmts);
@@ -444,7 +447,10 @@ export class Sampler extends WorkflowEntrypoint {
         const keys = listed.objects.map(o => o.key).filter(k => k < old);
         if (keys.length) await env.BUCKET.delete(keys);
         const oldRows = (res[3]?.meta?.changes ?? 0) + (res[4]?.meta?.changes ?? 0);
-        return { pruned: res[0]?.meta?.changes ?? 0, untracked: res[1]?.meta?.changes ?? 0, old_rows: oldRows, radar_files: keys.length, written: written(res) };
+        return {
+          pruned: res[0]?.meta?.changes ?? 0, untracked: res[1]?.meta?.changes ?? 0, old_rows: oldRows,
+          old_hist: res[5]?.meta?.changes ?? 0, radar_files: keys.length, written: written(res),
+        };
       });
     }
 

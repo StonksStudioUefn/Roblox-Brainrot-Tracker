@@ -110,9 +110,9 @@ async function medirTablas(db, exacto) {
 
 /**
  * Filas de las tablas que crecen cada día, sin recorrerlas:
- * - `daily`: la suma de los días de state.hist_agg (lo mantiene el cierre de
- *   cada día; es exacta salvo por lo que la poda del año ya ha borrado, que se
- *   descuenta acotando cada juego a sus días dentro de DATA_RETENTION_DAYS);
+ * - `daily`: la suma de los días de `hist` (lo mantiene el cierre de cada día;
+ *   es exacta salvo por lo que la poda del año ya ha borrado, que se descuenta
+ *   acotando cada juego a sus días dentro de DATA_RETENTION_DAYS);
  * - `sort_hits`: filas de ayer × días desde el primer puesto guardado + las de
  *   hoy (buscando por clave primaria juego a juego: lee ~3 filas por juego).
  */
@@ -121,10 +121,10 @@ async function estimarFilas(db, names) {
   const dia = n => new Date(Date.parse(`${today}T00:00:00Z`) + n * 86400_000).toISOString().slice(0, 10);
   const out = {};
   const stmts = [];
-  if (names.includes("daily")) stmts.push(["daily", db.prepare(
-    `SELECT COALESCE(SUM(MAX(0, MIN(value ->> 2,
-       CAST(julianday(value ->> 7) - julianday(MAX(COALESCE(value ->> 3, ?1), ?1)) AS INTEGER) + 1))), 0) AS n
-     FROM json_each(COALESCE((SELECT value FROM state WHERE key = 'hist_agg'), '{}'))`,
+  if (names.includes("daily") && names.includes("hist")) stmts.push(["daily", db.prepare(
+    `SELECT COALESCE(SUM(MAX(0, MIN(days,
+       CAST(julianday(last_date) - julianday(MAX(COALESCE(first_day, ?1), ?1)) AS INTEGER) + 1))), 0) AS n
+     FROM hist`,
   ).bind(dia(-DATA_RETENTION_DAYS))]);
   if (names.includes("sort_hits")) stmts.push(["sort_hits", db.prepare(
     `SELECT (SELECT MIN((SELECT MIN(h.date) FROM sort_hits h WHERE h.universe_id = g.universe_id)) FROM games g) AS first,

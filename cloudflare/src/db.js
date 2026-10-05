@@ -282,16 +282,15 @@ export function radarCloseStmt(db, date, readings, meta) {
  */
 export async function radarSlice(db, { lo, hi, days, before, today }) {
   const { results } = await db.prepare(
-    `WITH hj AS (SELECT COALESCE((SELECT value FROM state WHERE key = 'hist_agg'), '{}') AS j)
-     SELECT json_array(g.universe_id, COALESCE(g.horror, 0), COALESCE(g.sel, 0), g.created, g.first_seen,
-       json_extract(hj.j, '$."' || g.universe_id || '"[3]'),
+    `SELECT json_array(g.universe_id, COALESCE(g.horror, 0), COALESCE(g.sel, 0), g.created, g.first_seen,
+       (SELECT first_day FROM hist WHERE universe_id = g.universe_id),
        json(COALESCE((SELECT json_group_object(k.sort_id, k.rank) FROM sort_hits k
               WHERE k.universe_id = g.universe_id AND k.date = ?5 AND k.sort_id NOT LIKE 'search:%'), '{}')),
        json(COALESCE((SELECT json_group_array(json_array(r.date, r.median, r.min, r.max, r.n, r.visits)) FROM (
               SELECT * FROM (SELECT date, median, min, max, n, visits FROM daily
                              WHERE universe_id = g.universe_id AND date < ?4 ORDER BY date DESC LIMIT ?3)
               ORDER BY date) r), '[]'))) AS row
-     FROM games g CROSS JOIN hj WHERE g.tracked = 1 AND g.universe_id BETWEEN ?1 AND ?2`,
+     FROM games g WHERE g.tracked = 1 AND g.universe_id BETWEEN ?1 AND ?2`,
   ).bind(lo, hi, days, before, today).all();
   return results.map(r => JSON.parse(r.row));
 }
@@ -443,82 +442,119 @@ export function applyVotesStmt(db, date, votes) {
 }
 
 /**
- * state.hist_agg = {universe_id: [peak, peak_date, days, first_day, favorites, up, down, last_date]}
- * de TODA la serie diaria. Se mantiene de forma incremental (1 fila escrita y
- * ~nº de juegos filas leídas al día) para que el export no tenga que leer
- * toda `daily` 8 veces al día (crecería a millones de filas leídas).
- * `mergeHistStmt(date)` incorpora un día cerrado; `rebuildHistStmt` lo
- * recalcula entero (tras importar datos o por /api/admin/rebuild).
+ * Tabla `hist`: pico, fecha del pico, días, primer día, últimos favoritos y
+ * votos y último día de TODA la serie diaria de cada juego. Se mantiene al
+ * cerrar cada día para que el export y select no lean `daily` entera.
+ * Antes era la clave state.hist_agg (un JSON con todos los juegos en una
+ * fila): crecía ~8 KB al día y chocaba con el tope de 2 MB por fila de D1.
+ * `mergeHistStmt(date)` incorpora un día cerrado (UPSERT por juego, solo los
+ * que cambian); `rebuildHistStmts` la recalcula entera (tras importar datos o
+ * por /api/admin/rebuild).
  */
+const HIST_COLS = "universe_id, peak, peak_date, days, first_day, favorites, up, down, last_date";
+
 export function mergeHistStmt(db, date) {
+  const isnew = "excluded.last_date > COALESCE(hist.last_date, '')";
+  const touch = `(${isnew} OR excluded.last_date = hist.last_date)`;
+  const higher = `${isnew} AND excluded.peak > COALESCE(hist.peak, -1)`;
   return db.prepare(
-    `WITH prev AS MATERIALIZED (
-       SELECT CAST(key AS INTEGER) AS id, value ->> 0 AS peak, value ->> 1 AS peak_date,
-              value ->> 2 AS days, value ->> 3 AS first_day, value ->> 4 AS fav,
-              value ->> 5 AS up, value ->> 6 AS down, value ->> 7 AS last
-       FROM json_each(COALESCE((SELECT value FROM state WHERE key = 'hist_agg'), '{}'))
-     ),
-     nw AS MATERIALIZED (
-       SELECT d.universe_id AS id, d.date AS nd, d.max AS nmax, d.favorites AS nfav, d.up AS nup, d.down AS ndown
-       FROM games g CROSS JOIN daily d ON d.universe_id = g.universe_id AND d.date = ?1
-     ),
-     m AS (
-       SELECT p.*, n.nd, n.nmax, n.nfav, n.nup, n.ndown,
-              (n.nd IS NOT NULL AND n.nd > COALESCE(p.last, '')) AS isnew,
-              (n.nd IS NOT NULL AND n.nd = p.last) AS issame
-       FROM prev p LEFT JOIN nw n ON n.id = p.id
-       UNION ALL
-       SELECT n.id, NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, n.nd, n.nmax, n.nfav, n.nup, n.ndown, 1, 0
-       FROM nw n WHERE n.id NOT IN (SELECT id FROM prev)
-     )
-     INSERT INTO state (key, value)
-     SELECT 'hist_agg', json_group_object(id, json_array(
-       CASE WHEN isnew AND nmax > COALESCE(peak, -1) THEN nmax ELSE peak END,
-       CASE WHEN isnew AND nmax > COALESCE(peak, -1) THEN nd ELSE peak_date END,
-       COALESCE(days, 0) + isnew,
-       COALESCE(first_day, CASE WHEN isnew THEN nd END),
-       CASE WHEN (isnew OR issame) AND nfav > 0 THEN nfav ELSE fav END,
-       CASE WHEN (isnew OR issame) AND nup IS NOT NULL THEN nup ELSE up END,
-       CASE WHEN (isnew OR issame) AND ndown IS NOT NULL THEN ndown ELSE down END,
-       CASE WHEN isnew THEN nd ELSE last END))
-     FROM m WHERE true
-     ON CONFLICT (key) DO UPDATE SET value = excluded.value WHERE state.value IS NOT excluded.value`,
+    `INSERT INTO hist (${HIST_COLS})
+     SELECT d.universe_id, CASE WHEN d.max > -1 THEN d.max END, CASE WHEN d.max > -1 THEN d.date END, 1, d.date,
+            CASE WHEN d.favorites > 0 THEN d.favorites END, d.up, d.down, d.date
+     FROM games g CROSS JOIN daily d ON d.universe_id = g.universe_id AND d.date = ?1
+     WHERE true
+     ON CONFLICT (universe_id) DO UPDATE SET
+       peak = CASE WHEN ${higher} THEN excluded.peak ELSE hist.peak END,
+       peak_date = CASE WHEN ${higher} THEN excluded.peak_date ELSE hist.peak_date END,
+       days = COALESCE(hist.days, 0) + (${isnew}),
+       first_day = COALESCE(hist.first_day, CASE WHEN ${isnew} THEN excluded.first_day END),
+       favorites = CASE WHEN ${touch} AND excluded.favorites IS NOT NULL THEN excluded.favorites ELSE hist.favorites END,
+       up = CASE WHEN ${touch} AND excluded.up IS NOT NULL THEN excluded.up ELSE hist.up END,
+       down = CASE WHEN ${touch} AND excluded.down IS NOT NULL THEN excluded.down ELSE hist.down END,
+       last_date = CASE WHEN ${isnew} THEN excluded.last_date ELSE hist.last_date END
+     WHERE ${isnew}
+        OR (excluded.last_date = hist.last_date
+            AND ((excluded.favorites IS NOT NULL AND excluded.favorites IS NOT hist.favorites)
+              OR (excluded.up IS NOT NULL AND excluded.up IS NOT hist.up)
+              OR (excluded.down IS NOT NULL AND excluded.down IS NOT hist.down)))`,
   ).bind(date);
 }
 
-export function rebuildHistStmt(db) {
-  return db.prepare(
-    `WITH a AS (
-       SELECT universe_id AS id, MAX(max) AS peak, MIN(date) AS first_day, COUNT(*) AS days, MAX(date) AS last
-       FROM daily GROUP BY universe_id
-     ),
-     pk AS (
-       SELECT d.universe_id AS id, MIN(d.date) AS pd FROM daily d JOIN a ON a.id = d.universe_id AND d.max = a.peak
-       GROUP BY d.universe_id
-     ),
-     fv AS (
-       SELECT id, fav FROM (SELECT universe_id AS id, favorites AS fav,
-              ROW_NUMBER() OVER (PARTITION BY universe_id ORDER BY date DESC) AS rn
-              FROM daily WHERE favorites > 0) WHERE rn = 1
-     ),
-     vu AS (
-       SELECT id, up FROM (SELECT universe_id AS id, up,
-              ROW_NUMBER() OVER (PARTITION BY universe_id ORDER BY date DESC) AS rn
-              FROM daily WHERE up IS NOT NULL) WHERE rn = 1
-     ),
-     vd AS (
-       SELECT id, down FROM (SELECT universe_id AS id, down,
-              ROW_NUMBER() OVER (PARTITION BY universe_id ORDER BY date DESC) AS rn
-              FROM daily WHERE down IS NOT NULL) WHERE rn = 1
-     )
-     INSERT INTO state (key, value)
-     SELECT 'hist_agg', COALESCE(json_group_object(a.id,
-              json_array(a.peak, pk.pd, a.days, a.first_day, fv.fav, vu.up, vd.down, a.last)), '{}')
-     FROM a LEFT JOIN pk ON pk.id = a.id LEFT JOIN fv ON fv.id = a.id
-            LEFT JOIN vu ON vu.id = a.id LEFT JOIN vd ON vd.id = a.id
-     WHERE true
-     ON CONFLICT (key) DO UPDATE SET value = excluded.value WHERE state.value IS NOT excluded.value`,
-  );
+// La misma que en schema.sql: si se despliega el código antes de aplicar el
+// esquema, la crea migrateHist (sin ella fallarían el cierre y el export).
+const HIST_DDL = `CREATE TABLE IF NOT EXISTS hist (
+  universe_id INTEGER PRIMARY KEY, peak INTEGER, peak_date TEXT, days INTEGER, first_day TEXT,
+  favorites INTEGER, up INTEGER, down INTEGER, last_date TEXT)`;
+
+/**
+ * Pasa state.hist_agg (la forma de antes) a la tabla `hist` y borra la clave,
+ * en un batch (las dos o ninguna). Va en el init de cada pasada: sin la
+ * clave, no lee más que esa fila de state. Si la tabla ya tiene un juego, se
+ * queda lo de la tabla.
+ */
+export async function migrateHist(db) {
+  try {
+    return await db.batch(migrateHistStmts(db));
+  } catch (e) {
+    if (!/no such table: hist/i.test(String(e?.message || e))) throw e;
+    await db.prepare(HIST_DDL).run();
+    return await db.batch(migrateHistStmts(db));
+  }
+}
+
+export function migrateHistStmts(db) {
+  return [
+    db.prepare(
+      `INSERT INTO hist (${HIST_COLS})
+       SELECT CAST(key AS INTEGER), value ->> 0, value ->> 1, value ->> 2, value ->> 3, value ->> 4, value ->> 5, value ->> 6, value ->> 7
+       FROM json_each((SELECT value FROM state WHERE key = 'hist_agg')) WHERE true
+       ON CONFLICT (universe_id) DO NOTHING`,
+    ),
+    db.prepare("DELETE FROM state WHERE key = 'hist_agg'"),
+  ];
+}
+
+/** Recalcula `hist` desde `daily` (lee daily entera: solo para el admin). */
+export function rebuildHistStmts(db) {
+  return [
+    db.prepare("DELETE FROM hist"),
+    db.prepare(
+      `WITH a AS (
+         SELECT universe_id AS id, MAX(max) AS peak, MIN(date) AS first_day, COUNT(*) AS days, MAX(date) AS last
+         FROM daily GROUP BY universe_id
+       ),
+       pk AS (
+         SELECT d.universe_id AS id, MIN(d.date) AS pd FROM daily d JOIN a ON a.id = d.universe_id AND d.max = a.peak
+         GROUP BY d.universe_id
+       ),
+       fv AS (
+         SELECT id, fav FROM (SELECT universe_id AS id, favorites AS fav,
+                ROW_NUMBER() OVER (PARTITION BY universe_id ORDER BY date DESC) AS rn
+                FROM daily WHERE favorites > 0) WHERE rn = 1
+       ),
+       vu AS (
+         SELECT id, up FROM (SELECT universe_id AS id, up,
+                ROW_NUMBER() OVER (PARTITION BY universe_id ORDER BY date DESC) AS rn
+                FROM daily WHERE up IS NOT NULL) WHERE rn = 1
+       ),
+       vd AS (
+         SELECT id, down FROM (SELECT universe_id AS id, down,
+                ROW_NUMBER() OVER (PARTITION BY universe_id ORDER BY date DESC) AS rn
+                FROM daily WHERE down IS NOT NULL) WHERE rn = 1
+       )
+       INSERT INTO hist (${HIST_COLS})
+       SELECT a.id, a.peak, pk.pd, a.days, a.first_day, fv.fav, vu.up, vd.down, a.last
+       FROM a LEFT JOIN pk ON pk.id = a.id LEFT JOIN fv ON fv.id = a.id
+              LEFT JOIN vu ON vu.id = a.id LEFT JOIN vd ON vd.id = a.id
+       WHERE true`,
+    ),
+    db.prepare("DELETE FROM state WHERE key = 'hist_agg'"),
+  ];
+}
+
+/** Juegos que no salen en `daily` desde antes de `cutoffDate` (sus filas ya se han podado). */
+export function pruneHistStmt(db, cutoffDate) {
+  return db.prepare("DELETE FROM hist WHERE last_date < ?1").bind(cutoffDate);
 }
 
 // ─── Poda y untrack ───────────────────────────────────────────────────────────
@@ -734,8 +770,12 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
       FROM g2
     ),
     st AS (SELECT id, t1, x, x ->> 1 AS max24, x ->> 2 AS visits FROM a WHERE x ->> 0 IS NOT NULL),
+    -- hv: la fila de hist del juego, aquí (MATERIALIZED) para leerla una vez
+    -- por juego y no en cada uso de games_json
     sel AS MATERIALIZED (
-      SELECT g.*, st.max24, st.t1, st.x
+      SELECT g.*, st.max24, st.t1, st.x,
+             (SELECT json_array(peak, peak_date, days, first_day, favorites, up, down) FROM hist
+              WHERE universe_id = g.universe_id) AS hv
       FROM st CROSS JOIN games g ON g.universe_id = st.id
       WHERE ?16 = 0
          OR st.max24 >= ?3
@@ -756,8 +796,7 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
     ),
     s4 AS (
       SELECT s.*, CASE ${K.map(k => `WHEN ${k.has} AND ${k.mx} = s.pmx THEN ${k.day}`).join(" ")} END AS pday,
-             MAX(0, json_array_length(s.ce -> 0) + s.pdays - ?9) AS dropn,
-             json_extract((SELECT value FROM state WHERE key = 'hist_agg'), '$."' || s.universe_id || '"') AS hv
+             MAX(0, json_array_length(s.ce -> 0) + s.pdays - ?9) AS dropn
       FROM s3 s
     ),
     games_json AS (

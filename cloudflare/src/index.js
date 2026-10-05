@@ -16,7 +16,7 @@
  *   GET  /api/admin/status   estado (state + instancia) ?id=<instancia> &counts=1 (estimado) | &counts=exacto
  *   GET  /api/admin/espacio  lo que ocupa la base D1 (lo mismo que espacio() para el Almacén) ?exacto=1
  *   POST /api/admin/import   {table, columns, rows}  (migración, por lotes)
- *   POST /api/admin/rebuild  recalcula state.hist_agg desde daily y lanza un export
+ *   POST /api/admin/rebuild  recalcula la tabla hist desde daily y lanza un export
  *   POST /api/admin/export   lanza un Workflow que solo regenera el export
  *   POST /api/admin/backfill {ids?}  copia a samples las lecturas del radar de 48 h (por defecto, de los seguidos)
  *
@@ -39,7 +39,7 @@ import configSrc from "./config.js" with { type: "text" };
 import metricsSrc from "./metrics.js" with { type: "text" };
 import horrorSrc from "./horror.js" with { type: "text" };
 
-import { dropExportCacheStmt, getState, getStates, history, importStmt, isoDate, minuteOf, radarCounts, rebuildHistStmt, written } from "./db.js";
+import { dropExportCacheStmt, getState, getStates, history, importStmt, isoDate, minuteOf, radarCounts, rebuildHistStmts, written } from "./db.js";
 import { chunks, iconsUrl, thumbsUrl, URLS, UA } from "./sources.js";
 import { espacioD1, withApp } from "./stonks.js";
 import { backfillFromRadar } from "./sampler.js";
@@ -269,9 +269,9 @@ async function admin(req, env, url) {
     }
     // El export se hace por pasos (CPU): se lanza un Workflow que solo exporta
     if (action === "rebuild") {
-      const [res] = await env.DB.batch([rebuildHistStmt(env.DB), dropExportCacheStmt(env.DB)]);
+      const res = await env.DB.batch([...rebuildHistStmts(env.DB), dropExportCacheStmt(env.DB)]);
       const inst = await env.SAMPLER.create({ id: `export-${stamp()}`, params: { only: ["export"] } });
-      return json({ hist_written: written(res), export_instance: inst.id });
+      return json({ hist_written: written(res.slice(0, 2)), export_instance: inst.id });
     }
     if (action === "export") {
       const inst = await env.SAMPLER.create({ id: `export-${stamp()}`, params: { only: ["export"] } });
