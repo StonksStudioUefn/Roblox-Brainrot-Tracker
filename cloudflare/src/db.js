@@ -405,18 +405,19 @@ export function insertSamplesStmt(db, rows, ts) {
 
 /**
  * Relleno de muestras con una lectura del radar: `text` es el fichero
- * radar/<día>/<ts>.json tal cual ({universe_id: jugadores}); lo desmonta
- * SQLite, porque parsear en el Worker los 16 ficheros de 48 h (~40 KB cada
- * uno) se comería los 10 ms del paso. Solo `ids` y, como en el muestreo,
- * desde TRACK_MIN_PLAYERS. Sin visitas: el radar no las tiene (el export y
- * el cierre toman el máximo, que ignora los NULL). OR IGNORE: una muestra que
- * ya existe nunca se pisa, y repetirlo no escribe nada.
+ * radar/<día>/<ts>.json tal cual ({universe_id: jugadores}); lo lee SQLite,
+ * porque parsear en el Worker los 16 ficheros de 48 h (~40 KB cada uno) se
+ * comería los 10 ms del paso. Solo `ids` (cada uno buscado en el texto: un
+ * json_each del fichero entero contaba sus ~2.800 juegos como filas leídas) y,
+ * como en el muestreo, desde TRACK_MIN_PLAYERS. Sin visitas: el radar no las
+ * tiene (el export y el cierre toman el máximo, que ignora los NULL). OR
+ * IGNORE: una muestra que ya existe nunca se pisa, y repetirlo no escribe nada.
  */
 export function backfillSamplesStmt(db, text, ts, ids) {
   return db.prepare(
     `INSERT OR IGNORE INTO samples (universe_id, ts, playing, visits)
-     SELECT CAST(r.key AS INTEGER), ?2, r.value, NULL FROM json_each(?1) r
-     WHERE r.value >= ?4 AND CAST(r.key AS INTEGER) IN (SELECT value FROM json_each(?3))`,
+     SELECT j.value, ?2, ?1 ->> ('$."' || j.value || '"'), NULL FROM json_each(?3) j
+     WHERE (?1 ->> ('$."' || j.value || '"')) >= ?4`,
   ).bind(text, ts, JSON.stringify(ids), TRACK_MIN_PLAYERS);
 }
 
@@ -653,13 +654,6 @@ export function pruneOldStmts(db, cutoffDate) {
     db.prepare(`DELETE FROM daily WHERE date < ?1 AND universe_id IN (SELECT universe_id FROM games)`).bind(cutoffDate),
     db.prepare(`DELETE FROM sort_hits WHERE date < ?1 AND universe_id IN (SELECT universe_id FROM games)`).bind(cutoffDate),
   ];
-}
-
-/** Muestras huérfanas (juegos que ya no existen en games): casi nunca hay. */
-export function pruneOrphansStmt(db, cutoffTs) {
-  return db.prepare(
-    `DELETE FROM samples WHERE ts < ?1 AND universe_id NOT IN (SELECT universe_id FROM games)`,
-  ).bind(cutoffTs);
 }
 
 /**

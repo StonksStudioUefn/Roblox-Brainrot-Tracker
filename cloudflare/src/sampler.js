@@ -49,9 +49,9 @@ import {
 import {
   DAY_MIN, addDays, applySelectionStmt, applyVotesStmt, backfillSamplesStmt, buildExportSlice, closeDayStmt, exportHeader,
   exportPlan, getState, getStates, idPart, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs, lowSinceStmts,
-  mergeHistStmt, migrateHist, minuteOf, pruneHistStmt, pruneOldStmts, pruneOrphansStmt, pruneSamplesStmt, radarCloseStmt,
-  radarCounts, radarDailyRows, radarPlayers, radarReadingsPart, radarSlice, radarStaleStmt, retrackPlacesStmt, setState,
-  setStateStmt, sortHitsStmt, trackedIds, unknownPlaces, untrackStmt, updateMetaStmt, upsertDiscoveredStmt, written,
+  mergeHistStmt, migrateHist, minuteOf, pruneHistStmt, pruneOldStmts, pruneSamplesStmt, radarCloseStmt, radarCounts,
+  radarDailyRows, radarPlayers, radarReadingsPart, radarSlice, radarStaleStmt, retrackPlacesStmt, setState, setStateStmt,
+  sortHitsStmt, trackedIds, unknownPlaces, untrackStmt, updateMetaStmt, upsertDiscoveredStmt, written,
 } from "./db.js";
 import { classifyHorror } from "./horror.js";
 import { radarScore } from "./metrics.js";
@@ -499,13 +499,16 @@ export class Sampler extends WorkflowEntrypoint {
     // que SAMPLE_RETENTION_DAYS, y nada lee muestras tan viejas. untrack mira
     // fechas (low_since, puestos de hoy o ayer) y solo puede cambiar al cambiar
     // el día: repetirlo cada hora no quitaba ningún juego más.
+    // Sin poda de muestras huérfanas: games no pierde filas y todo lo que
+    // inserta muestras sale de games (solo /api/admin/import podría dejarlas),
+    // y buscarlas recorría `samples` entera (~50.000 filas al día).
     if (want("maint") && daily.maint) {
       await safe("maint", async () => {
         const cutoff = ts - SAMPLE_RETENTION_DAYS * DAY_MIN;
         const oldDate = addDays(today, -DATA_RETENTION_DAYS);
         const stmts = [
           pruneSamplesStmt(db, cutoff), untrackStmt(db, today),
-          pruneOrphansStmt(db, cutoff), ...pruneOldStmts(db, oldDate), pruneHistStmt(db, oldDate),
+          ...pruneOldStmts(db, oldDate), pruneHistStmt(db, oldDate),
           radarStaleStmt(db), setStateStmt(db, "maint_day", today),
         ];
         const res = await db.batch(stmts);
@@ -513,10 +516,10 @@ export class Sampler extends WorkflowEntrypoint {
         const listed = await env.BUCKET.list({ prefix: RADAR_PREFIX, limit: 1000 });
         const keys = listed.objects.map(o => o.key).filter(k => k < old);
         if (keys.length) await env.BUCKET.delete(keys);
-        const oldRows = (res[3]?.meta?.changes ?? 0) + (res[4]?.meta?.changes ?? 0);
+        const oldRows = (res[2]?.meta?.changes ?? 0) + (res[3]?.meta?.changes ?? 0);
         return {
           pruned: res[0]?.meta?.changes ?? 0, untracked: res[1]?.meta?.changes ?? 0, old_rows: oldRows,
-          old_hist: res[5]?.meta?.changes ?? 0, radar_files: keys.length, written: written(res),
+          old_hist: res[4]?.meta?.changes ?? 0, radar_files: keys.length, written: written(res),
         };
       });
     }
