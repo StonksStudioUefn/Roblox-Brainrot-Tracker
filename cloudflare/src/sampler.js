@@ -26,7 +26,7 @@
  *         search-0..N → search-cursor → rolimons (radar; con el meta del día, también
  *         places nuevos) → [resolve-0..K] → sample-list → sample-0..M (seguidos; con
  *         el meta del día todo el radar con meta y horror, y votos de los
- *         seguidos) → [meta-done] → radar-api → [close → close-radar-<día>-0..4 →
+ *         seguidos) → [meta-done] → radar-api → [close → close-radar-<día>-0..9 →
  *         close-hist] → [select-plan → select-0..R → select-apply] → [maint] →
  *         export-plan → export-0..E → export-join → telegram → finish
  * Lo que va entre corchetes son tareas del día: cada una con su marca y como
@@ -47,10 +47,10 @@ import {
   resolvePlaces,
 } from "./sources.js";
 import {
-  DAY_MIN, addDays, applySelectionStmt, applyVotesStmt, backfillSamplesStmt, buildExportSlice, closeDayStmt, exportHeader,
+  DAY_MIN, addDays, applySelectionStmt, applyVotesStmt, backfillSamplesStmt, buildExportSlice, closeDayStmt, countTryStmt, exportHeader,
   exportPlan, getState, getStates, idPart, idRanges, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs,
   lowSinceStmts, mergeHistStmt, migrateHist, minuteOf, pruneHistStmt, pruneOldStmts, pruneSamplesStmt, radarCloseStmt,
-  radarCounts, radarCountsStaleStmt, radarDailyRows, radarIds, radarPlayers, radarReadingsPart, radarSlice, radarStaleStmt,
+  radarCounts, radarCountsStaleStmt, radarDailyRows, radarIds, radarPlayers, radarPrepare, radarReadingsPart, radarSlice, radarStaleStmt,
   retrackPlacesStmt, setState, setStateStmt, sortHitsStmt, trackedIds, unknownPlaces, untrackStmt, updateMetaStmt,
   upsertDiscoveredStmt, written,
 } from "./db.js";
@@ -87,8 +87,9 @@ export const BACKFILL_HOURS = 48;
 export const BACKFILL_FILES = 16;            // 48 h con el radar cada 3 h: tope de lecturas de R2 por paso
 export const BACKFILL_MAX_GAMES = 150;       // tope de escrituras: 150 × 16 = 2.400 filas (y otras tantas al podarlas)
 // Las filas del radar al cerrar el día, en partes (por la última cifra del id):
-// con ~2.800 juegos × 8 lecturas, de una vez costaba ~30 ms de CPU en frío
-export const RADAR_CLOSE_PARTS = 5;
+// con ~2.800 juegos × 8 lecturas, de una vez costaba ~30 ms de CPU en frío, y
+// en 5 partes ~7–13 ms cada una en una máquina lenta (tope: 10 ms por paso)
+export const RADAR_CLOSE_PARTS = 10;
 
 // Peticiones externas: el plan gratis da 50 por invocación. Se deja margen.
 export const INVOCATION_BUDGET = 46;
@@ -100,9 +101,10 @@ export const TELEGRAM_NEED = 30;       // miniaturas + envíos (peor caso medido
 
 // Tareas de una vez al día, cada una con su marca en state (meta_day,
 // closed_day, sel_day, maint_day) y como mucho DAILY_TRIES intentos al día
-// (state.daily_tries): con una sola marca para todo, un cierre que fallaba
-// repetía cada hora el meta de todo el radar, el cierre, select y maint
-// (~450.000 filas leídas por hora: el tope de 5 M del día en ~10 horas).
+// (state.daily_tries, que se cuenta al empezar cada tarea): con una sola
+// marca para todo, un cierre que fallaba repetía cada hora el meta de todo el
+// radar, el cierre, select y maint (~450.000 filas leídas por hora: el tope
+// de 5 M del día en ~10 horas).
 export const DAILY_TASKS = ["meta", "close", "select", "maint"];
 export const DAILY_TRIES = 2;
 const TASK_STEP = { meta: "sample", close: "close", select: "select", maint: "maint" };
@@ -162,28 +164,28 @@ export class Sampler extends WorkflowEntrypoint {
       const ms = p.now ? Date.parse(p.now) : new Date(event.timestamp || Date.now()).getTime();
       const ts = minuteOf(ms);
       const today = isoDate(ts);
+      // state.hist_agg → tabla hist (solo la primera vez; luego no hay clave que pasar)
+      await migrateHist(db);
       const st = await getStates(db, ["day", "meta_day", "closed_day", "search_cursor", "sel_day", "maint_day", "daily_tries"]);
-      // Qué tareas del día tocan en esta pasada (p.daily las fuerza todas)
-      const tries = st.daily_tries?.day === today ? { ...st.daily_tries } : { day: today };
+      // Qué tareas del día tocan en esta pasada. p.daily las fuerza: true, todas;
+      // una lista (["close"]), esas. Los intentos se cuentan al empezar cada una
+      // (tryTask): aquí solo se leen, así que repetir init no gasta ninguno.
+      const tries = st.daily_tries?.day === today ? st.daily_tries : {};
+      const forced = t => p.daily === true || (Array.isArray(p.daily) && p.daily.includes(t));
       const due = {
         meta: (st.meta_day ?? st.day) !== today,   // `day`: la marca de antes de meta_day
         close: !st.closed_day || st.closed_day < addDays(today, -1),
         select: st.sel_day !== today,
         maint: st.maint_day !== today,
       };
-      const daily = {};
+      const daily = {}, spent = [];
       for (const t of DAILY_TASKS) {
-        daily[t] = want(TASK_STEP[t]) && (!!p.daily || (due[t] && (tries[t] || 0) < DAILY_TRIES));
-        if (daily[t] && due[t]) tries[t] = (tries[t] || 0) + 1;
+        daily[t] = want(TASK_STEP[t]) && (forced(t) || (due[t] && (tries[t] || 0) < DAILY_TRIES));
+        if (due[t] && !daily[t] && want(TASK_STEP[t])) spent.push(t);
       }
-      await db.batch([
-        setStateStmt(db, "run_current", { base, seg, id: base, phase: "discover", cursor: 0 }),
-        setStateStmt(db, "daily_tries", tries),
-      ]);
-      // state.hist_agg → tabla hist (solo la primera vez; luego no hay clave que pasar)
-      await migrateHist(db);
+      await setState(db, "run_current", { base, seg, id: base, phase: "discover", cursor: 0 });
       return {
-        ts, today, daily,
+        ts, today, daily, due, spent,
         firstOfDay: daily.meta,
         closedDay: st.closed_day || null,
         selDay: st.sel_day || null,
@@ -198,6 +200,19 @@ export class Sampler extends WorkflowEntrypoint {
     summary.ts = firstSeen;
     summary.first_of_day = daily.meta;
     summary.daily = daily;
+    // Tareas del día pendientes que ya han gastado sus intentos: se repiten
+    // mañana (el cierre recoge los días que falten) o con {"daily": ["close"]}
+    if (init.spent?.length) summary.pendiente = init.spent;
+    // Un intento de una tarea del día, en un paso propio (no se cuenta dos veces)
+    const tryTask = t => (daily[t] && init.due?.[t]
+      ? safe(`try-${t}`, async () => { await countTryStmt(db, today, t).run(); return { task: t }; })
+      : null);
+    // Ficheros del radar de cada día, leídos una vez por ejecución para todas las partes de close-radar
+    const radarDays = new Map();
+    const radarDay = async d => {
+      if (!radarDays.has(d)) radarDays.set(d, radarPrepare(await radarTexts(env.BUCKET, d)));
+      return radarDays.get(d);
+    };
     const order = ["discover", "search", "rolimons", "resolve", "sample", "radar-api", "finalize"];
     const at = order.indexOf(p.phase || "discover");
     const reach = ph => order.indexOf(ph) >= at;
@@ -351,6 +366,8 @@ export class Sampler extends WorkflowEntrypoint {
         await env.BUCKET.put(key, JSON.stringify(list));
         return list;
       });
+      // El intento del meta cuenta al empezar sus trozos (no en las ejecuciones que los siguen)
+      if (meta && p.phase !== "sample") await tryTask("meta");
       const selSet = sel ? new Set(sel) : null;
       const size = meta ? META_CHUNK : SAMPLE_CHUNK;
       const need = meta ? META_NEED : SAMPLE_NEED;
@@ -381,7 +398,11 @@ export class Sampler extends WorkflowEntrypoint {
       summary.steps.sample = agg;   // un resumen (con meta son ~45 pasos)
       // El meta del día queda hecho si se ha perdido menos de la mitad de los trozos
       if (meta && (agg.lost || 0) * 2 < parts.length) {
-        await safe("meta-done", () => setState(db, "meta_day", today).then(() => ({ day: today })));
+        await safe("meta-done", async () => {
+          // `day` era la marca de antes de meta_day (init la lee si falta esta)
+          await db.batch([setStateStmt(db, "meta_day", today), db.prepare("DELETE FROM state WHERE key = 'day'")]);
+          return { day: today };
+        });
       }
     }
 
@@ -428,7 +449,10 @@ export class Sampler extends WorkflowEntrypoint {
     // no avanza y la pasada siguiente lo repite (como mucho DAILY_TRIES al día).
     // Con el meta del día también: sus votos van a la fila de ayer aunque ya esté cerrada.
     if (want("close") && (daily.close || daily.meta)) {
+      await tryTask("close");
       const plan = await safe("close", async () => {
+        // Antes de escribir en hist (una ejecución encadenada de antes de desplegar no ha pasado por init)
+        await migrateHist(db);
         // Votos y meta de los no seguidos, guardados por los pasos sample-N con meta
         const votes = {}, metaParts = Array.from({ length: RADAR_CLOSE_PARTS }, () => ({}));
         if (daily.meta) {
@@ -438,8 +462,13 @@ export class Sampler extends WorkflowEntrypoint {
             if (!obj) continue;
             const part = await obj.json();
             Object.assign(votes, part.v || {});
-            if (Array.isArray(part.r)) part.r.forEach((m, k) => Object.assign(metaParts[k], m));
-            else for (const id in part.r || {}) metaParts[idPart(id, RADAR_CLOSE_PARTS)][id] = part.r[id];   // de una ejecución de antes
+            if (Array.isArray(part.r) && part.r.length === RADAR_CLOSE_PARTS) part.r.forEach((m, k) => Object.assign(metaParts[k], m));
+            else {
+              // De una ejecución de antes: el meta sin repartir, o en otro nº de partes
+              for (const m of Array.isArray(part.r) ? part.r : [part.r || {}]) {
+                for (const id in m) metaParts[idPart(id, RADAR_CLOSE_PARTS)][id] = m[id];
+              }
+            }
           }
         }
         const oldest = addDays(today, -SAMPLE_RETENTION_DAYS);
@@ -460,27 +489,27 @@ export class Sampler extends WorkflowEntrypoint {
         if (stats.radar_meta) {
           await Promise.all(metaParts.map((m, k) => env.BUCKET.put(`${tmp}close-meta-${k}.json`, JSON.stringify(m))));
         }
-        // Ayer, con la selección aún sin cambiar (select va después), solo los
-        // seguidos tienen muestras; un día más viejo se cierra con todos los juegos
-        const res = await db.batch(dates.map(d =>
-          closeDayStmt(db, d, d === yesterday ? votes : null, { selected: d === yesterday && init.selDay !== today })));
+        // Todos los juegos con muestras del día: no solo los seguidos de hoy (los
+        // que salieron en el select de ayer tienen muestras de antes de salir)
+        const res = await db.batch(dates.map(d => closeDayStmt(db, d, d === yesterday ? votes : null)));
         return { ...stats, meta: stats.radar_meta > 0, written: written(res) };
       });
       let ok = !!plan?.dates?.length;
       for (const d of plan?.dates || []) {
         for (let k = 0; ok && k < RADAR_CLOSE_PARTS; k++) {
           ok = !!await safe(`close-radar-${d}-${k}`, async () => {
-            const texts = await radarTexts(env.BUCKET, d);
+            const files = await radarDay(d);
             let rm = null;
             if (d === yesterday && plan.meta) rm = await (await env.BUCKET.get(`${tmp}close-meta-${k}.json`))?.json() ?? null;
-            const rows = radarDailyRows(radarReadingsPart(texts, k, RADAR_CLOSE_PARTS), rm, k, RADAR_CLOSE_PARTS);
+            const rows = radarDailyRows(radarReadingsPart(files, k, RADAR_CLOSE_PARTS), rm, k, RADAR_CLOSE_PARTS);
             const res = rows.length ? await radarCloseStmt(db, d, rows).run() : null;
-            return { files: texts.length, rows: rows.length, written: written(res) };
+            return { files: files.length, rows: rows.length, written: written(res) };
           });
         }
       }
       if (ok) {
         await safe("close-hist", async () => {
+          await migrateHist(db);
           const closed = init.closedDay && init.closedDay > yesterday ? init.closedDay : yesterday;
           const res = await db.batch([...plan.dates.map(d => mergeHistStmt(db, d)), setStateStmt(db, "closed_day", closed)]);
           return { closed, written: written(res) };
@@ -490,6 +519,7 @@ export class Sampler extends WorkflowEntrypoint {
 
     // ── select: los juegos seguidos (una vez al día, con el día de ayer cerrado)
     if (want("select") && (daily.select || p.select)) {
+      await tryTask("select");
       await runSelect(env, step, ts * 60000, today, safe, summary);
     }
 
@@ -504,25 +534,26 @@ export class Sampler extends WorkflowEntrypoint {
     // inserta muestras sale de games (solo /api/admin/import podría dejarlas),
     // y buscarlas recorría `samples` entera (~50.000 filas al día).
     if (want("maint") && daily.maint) {
+      await tryTask("maint");
       await safe("maint", async () => {
         const cutoff = ts - SAMPLE_RETENTION_DAYS * DAY_MIN;
         const oldDate = addDays(today, -DATA_RETENTION_DAYS);
         const stmts = [
           pruneSamplesStmt(db, cutoff), untrackStmt(db, today),
+          // Las cachés del radar solo dependen de tracked aquí: justo detrás de untrack
+          radarStaleStmt(db, { ifChanged: true }),
           ...pruneOldStmts(db, oldDate), pruneHistStmt(db, oldDate),
           setStateStmt(db, "maint_day", today),
         ];
         const res = await db.batch(stmts);
-        // Las cachés del radar solo dependen de tracked aquí
-        if (res[1]?.meta?.changes) await radarStaleStmt(db).run();
         const old = `${RADAR_PREFIX}${addDays(today, -RADAR_KEEP_DAYS)}/`;
         const listed = await env.BUCKET.list({ prefix: RADAR_PREFIX, limit: 1000 });
         const keys = listed.objects.map(o => o.key).filter(k => k < old);
         if (keys.length) await env.BUCKET.delete(keys);
-        const oldRows = (res[2]?.meta?.changes ?? 0) + (res[3]?.meta?.changes ?? 0);
+        const oldRows = (res[3]?.meta?.changes ?? 0) + (res[4]?.meta?.changes ?? 0);
         return {
           pruned: res[0]?.meta?.changes ?? 0, untracked: res[1]?.meta?.changes ?? 0, old_rows: oldRows,
-          old_hist: res[4]?.meta?.changes ?? 0, radar_files: keys.length, written: written(res),
+          old_hist: res[5]?.meta?.changes ?? 0, radar_files: keys.length, written: written(res),
         };
       });
     }
@@ -727,7 +758,10 @@ export function chooseSelection(rows, cfg = SELECTION) {
 export async function runSelect(env, step, nowMs, today, safe, summary) {
   const db = env.DB;
   // Los rangos, de los ids del radar (radarIds): sin recorrer games con ROW_NUMBER()
-  const plan = await safe("select-plan", async () => ({ ranges: idRanges(await radarIds(db, today), SELECT_SLICE) }));
+  const plan = await safe("select-plan", async () => {
+    await migrateHist(db);   // radarSlice lee hist (por si esta ejecución no ha pasado por init)
+    return { ranges: idRanges(await radarIds(db, today), SELECT_SLICE) };
+  });
   if (!plan) return null;
   const now = new Date(nowMs).toISOString();
   const rows = [];
@@ -753,12 +787,12 @@ export async function runSelect(env, step, nowMs, today, safe, summary) {
     if (!ids.length) throw new Error("La selección ha salido vacía");
     const res = await db.batch([
       applySelectionStmt(db, ids),
+      radarCountsStaleStmt(db),   // solo si applySelectionStmt ha cambiado algo
       // La lista va también a state para que el export no tenga que recorrer games
       setStateStmt(db, "sel_ids", ids),
       setStateStmt(db, "sel_day", today),
       setStateStmt(db, "selection", { day: today, ...counts }),
     ]);
-    if (res[0]?.meta?.changes) await radarCountsStaleStmt(db).run();
     // Los que entran, con más jugadores primero (por si pasan de BACKFILL_MAX_GAMES)
     const was = new Map(rows.map(r => [r[0], r]));
     const added = ids.filter(id => !was.get(id)?.[2]).sort((a, b) => (was.get(b)?.[3] ?? 0) - (was.get(a)?.[3] ?? 0));
@@ -814,6 +848,7 @@ export async function backfillFromRadar(env, ids, nowTs, { maxGames = BACKFILL_M
 export async function runExport(env, step, nowMs, safe, summary) {
   const db = env.DB;
   const plan = await safe("export-plan", async () => {
+    await migrateHist(db);   // el export lee hist (por si esta ejecución no ha pasado por init)
     const [lastTs, closed, radar, selIds] = await Promise.all([
       lastSampleTs(db), getState(db, "closed_day"), radarCounts(db), getState(db, "sel_ids"),
     ]);

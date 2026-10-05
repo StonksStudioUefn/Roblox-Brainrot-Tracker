@@ -236,12 +236,33 @@ export async function radarPlaces(db, today) {
   return { map, ids: [...withPlace, ...nop] };
 }
 
-/** Cachés de state que dependen de tracked o places: se borran al cambiarlos. */
-export const radarStaleStmt = db =>
-  db.prepare("DELETE FROM state WHERE key IN ('radar_places', 'radar_counts')");
+/**
+ * Cachés de state que dependen de tracked o places: se borran al cambiarlos.
+ * Con `ifChanged`, solo si la sentencia de justo antes en el mismo batch ha
+ * cambiado alguna fila (changes()): así va en la misma transacción, y si el
+ * paso se repite tras escribir, no se queda sin borrar.
+ */
+export const radarStaleStmt = (db, { ifChanged = false } = {}) =>
+  db.prepare(`DELETE FROM state WHERE key IN ('radar_places', 'radar_counts')${ifChanged ? " AND changes() > 0" : ""}`);
 
-/** radar_counts también depende de sel (radar_places no): lo que borra select-apply si cambia algo. */
-export const radarCountsStaleStmt = db => db.prepare("DELETE FROM state WHERE key = 'radar_counts'");
+/** radar_counts también depende de sel (radar_places no): lo que borra select-apply si cambia algo (justo después de applySelectionStmt). */
+export const radarCountsStaleStmt = db => db.prepare("DELETE FROM state WHERE key = 'radar_counts' AND changes() > 0");
+
+/**
+ * Un intento más de la tarea del día `task` en state.daily_tries
+ * ({day, meta, close, select, maint}); otro día empieza de cero. Se escribe
+ * al empezar la tarea (y no en init): una pasada que se corta antes no gasta
+ * el intento, y repetir init no lo cuenta dos veces.
+ */
+export function countTryStmt(db, day, task) {
+  return db.prepare(
+    `INSERT INTO state (key, value) VALUES ('daily_tries', json_object('day', ?1, ?2, 1))
+     ON CONFLICT (key) DO UPDATE SET value = CASE
+       WHEN json_valid(state.value) AND state.value ->> '$.day' = ?1
+         THEN json_set(state.value, '$.' || ?2, COALESCE(state.value ->> ('$.' || ?2), 0) + 1)
+       ELSE json_object('day', ?1, ?2, 1) END`,
+  ).bind(day, task);
+}
 
 /** Mediana de una lista ORDENADA de enteros, con los .5 al par (round() de Python), como MEDIAN_SQL. */
 export function pyMedian(sorted) {
@@ -264,8 +285,26 @@ export const idPart = (key, parts) => key.charCodeAt(key.length - 1) % parts;
 const RADAR_TEXT = /^\{(?:"\d+":(?:-?\d+(?:\.\d+)?|null),)*"\d+":(?:-?\d+(?:\.\d+)?|null)\}$/;
 
 /**
+ * Los ficheros del radar de un día (texto) listos para radarReadingsPart: el
+ * texto si tiene la forma de JSON.stringify (lo comprueba RADAR_TEXT entero,
+ * así la expresión regular de cada parte no puede leer otra cosa que claves
+ * y valores), el objeto si tiene otra forma, y nada si está vacío. Se hace
+ * una vez por día y ejecución (sampler.js lo guarda para las partes).
+ */
+export function radarPrepare(texts) {
+  const out = [];
+  for (const text of texts) {
+    if (RADAR_TEXT.test(text)) out.push(text);
+    else if (text.trim() !== "{}") out.push(JSON.parse(text));
+  }
+  out.checked = true;
+  return out;
+}
+
+/**
  * Lecturas del radar de un día desde el texto de sus ficheros
- * (radar/<día>/<ts>.json), solo de los juegos de la parte `part` de `parts`.
+ * (radar/<día>/<ts>.json, o lo que da radarPrepare), solo de los juegos de la
+ * parte `part` de `parts`.
  * → Map universe_id (texto) → [jugadores de cada fichero…] (sin los null)
  * Una expresión regular (código nativo) saca solo los juegos de la parte, por
  * la última cifra del id: JSON.parse y recorrer los objetos (~2.800 juegos ×
@@ -273,6 +312,7 @@ const RADAR_TEXT = /^\{(?:"\d+":(?:-?\d+(?:\.\d+)?|null),)*"\d+":(?:-?\d+(?:\.\d
  * parsea entero.
  */
 export function radarReadingsPart(texts, part = 0, parts = 1) {
+  const files = texts.checked ? texts : radarPrepare(texts);
   const digits = [..."0123456789"].filter(d => idPart(d, parts) === part).join("");
   const rx = new RegExp(`"(\\d*[${digits}])":(-?\\d+(?:\\.\\d+)?)[,}]`, "g");
   const out = new Map();
@@ -280,14 +320,13 @@ export function radarReadingsPart(texts, part = 0, parts = 1) {
     const a = out.get(k);
     if (a) a.push(v); else out.set(k, [v]);
   };
-  for (const text of texts) {
-    if (!RADAR_TEXT.test(text)) {
-      if (text.trim() === "{}") continue;
-      for (const [k, v] of Object.entries(JSON.parse(text))) if (v != null && idPart(k, parts) === part) add(k, v);
+  for (const f of files) {
+    if (typeof f !== "string") {
+      for (const k in f) if (f[k] != null && idPart(k, parts) === part) add(k, f[k]);
       continue;
     }
     rx.lastIndex = 0;
-    for (let m; (m = rx.exec(text));) add(m[1], +m[2]);
+    for (let m; (m = rx.exec(f));) add(m[1], +m[2]);
   }
   return out;
 }
@@ -496,20 +535,22 @@ export function updateMetaStmt(db, rows, today) {
  * Cierra `date` desde samples: n, mediana, media, min, max y visitas.
  * `votes` = {universe_id: [favorites, up, down]} (o null) del meta diario. ON
  * CONFLICT DO UPDATE sin pisar los favoritos/votos ya guardados.
- * Con `selected` recorre solo los seguidos (índice games_sel): son los únicos
- * con muestras mientras la selección sea la del día que se cierra. Cada juego
- * lee sus muestras una vez, ya ordenadas por jugadores, y la mediana sale de
- * esa lista (sortedMedian): con ROW_NUMBER() y COUNT() OVER D1 contaba cada
- * muestra varias veces más.
+ * Todos los juegos con muestras del día (no solo los seguidos de ahora: los
+ * que salen de la selección tienen muestras de antes de salir). El EXISTS
+ * descarta por la clave primaria los que no tienen, sin materializarlos. Cada
+ * juego lee sus muestras una vez, ya ordenadas por jugadores, y la mediana
+ * sale de esa lista (sortedMedian): con ROW_NUMBER() y COUNT() OVER D1
+ * contaba cada muestra varias veces más.
  */
-export function closeDayStmt(db, date, votes, { selected = false } = {}) {
+export function closeDayStmt(db, date, votes) {
   const start = dayStart(date);
   return db.prepare(
     `WITH x AS MATERIALIZED (
        SELECT g.universe_id AS id, (SELECT json_array(COUNT(*), MIN(playing), MAX(playing), SUM(playing), MAX(visits),
                                                       json_group_array(playing ORDER BY playing))
                                     FROM samples s WHERE s.universe_id = g.universe_id AND s.ts >= ?1 AND s.ts < ?2) AS x
-       FROM games g ${selected ? "WHERE g.sel = 1" : ""}
+       FROM games g
+       WHERE EXISTS (SELECT 1 FROM samples s WHERE s.universe_id = g.universe_id AND s.ts >= ?1 AND s.ts < ?2)
      ),
      a AS (
        SELECT id, x ->> 0 AS n, ${sortedMedian("(x -> 5)", "0", "(x ->> 0)")} AS median,

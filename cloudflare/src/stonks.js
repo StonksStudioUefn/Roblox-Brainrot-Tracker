@@ -145,7 +145,9 @@ async function estimarFilas(db, names) {
   const res = await db.batch(stmts.map(s => s[1]));
   stmts.forEach(([n], i) => {
     const r = res[i]?.results?.[0] || {};
-    if (n === "daily") out.daily = Number(r.n) || 0;
+    // hist vacía con daily llena (recién creada, antes de que la primera pasada pase
+    // state.hist_agg): sin estimación, daily se cuenta
+    if (n === "daily") { if (Number(r.n) > 0) out.daily = Number(r.n); }
     else if (n === "samples") {
       const dias = r.primera != null && r.last != null ? Math.max(1, (Number(r.last) - Number(r.primera)) / 1440) : 1;
       out.samples = Math.round((Number(r.dia) || 0) * dias);

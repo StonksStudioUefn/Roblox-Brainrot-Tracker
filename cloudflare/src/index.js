@@ -12,7 +12,7 @@
  *   GET /api/game/<id>       ficha en vivo
  *
  * Admin (en cualquier host, "Authorization: Bearer <ADMIN_TOKEN>"):
- *   POST /api/admin/run      lanza un muestreo  {daily?, select?, skip?: [...], only?: [...], telegram_force?, now?}
+ *   POST /api/admin/run      lanza un muestreo  {daily? (true | ["meta", "close", "select", "maint"]), select?, skip?: [...], only?: [...], telegram_force?, now?}
  *   GET  /api/admin/status   estado (state + instancia) ?id=<instancia> &counts=1 (estimado) | &counts=exacto
  *   GET  /api/admin/espacio  lo que ocupa la base D1 (lo mismo que espacio() para el Almacén) ?exacto=1
  *   POST /api/admin/import   {table, columns, rows}  (migración, por lotes)
@@ -247,7 +247,9 @@ async function admin(req, env, url) {
     if (action === "run") {
       const body = await readBody(req);
       const params = {};
-      if (body.daily) params.daily = true;
+      // daily: true (todas las tareas del día) o una lista: ["close"], ["meta", "select"]…
+      if (Array.isArray(body.daily)) params.daily = body.daily.map(String);
+      else if (body.daily) params.daily = true;
       if (body.select) params.select = true;
       if (Array.isArray(body.skip)) params.skip = body.skip.map(String);
       if (body.telegram_force) params.telegram_force = String(body.telegram_force);
