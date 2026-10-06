@@ -12,7 +12,7 @@ La interfaz entre piezas está en [`CONTRACT.md`](CONTRACT.md).
 | `src/sources.js` | Clientes de Rolimons, Explore, Search, Games, Votes, place→universe, iconos |
 | `src/db.js` | SQL: inserciones (`json_each`), cierre diario, tabla `hist`, export por trozos, historial, import |
 | `scripts/migrate_from_git.py` | Sube los datos actuales del repo (git o carpeta) a D1 por `/api/admin/import` |
-| `test/` | `dev.sh`/`sync.sh` (servidor local), `cpu_steps.mjs` (CPU por paso), `bench_rolimons.mjs`, `cf_loader.mjs`, `export.bench.mjs` (filas leídas y salida del export contra un D1 local), `filas.bench.mjs` (filas de D1 de pasadas completas, con topes), `cierre.parity.mjs` y `cierre.cpu.mjs` (el cierre del día: mismo resultado que antes y su CPU) |
+| `test/` | `dev.sh`/`sync.sh` (servidor local), `cpu_steps.mjs` (CPU por paso), `bench_rolimons.mjs`, `cf_loader.mjs`, `export.bench.mjs` (filas leídas y salida del export contra un D1 local), `filas.bench.mjs` (filas de D1 de pasadas completas, con topes), `cierre.parity.mjs` y `cierre.cpu.mjs` (el cierre del día: mismo resultado que antes y su CPU), `sources.test.mjs` (tope de tiempo de cada petición) |
 
 ## Desarrollo y pruebas en local
 
@@ -50,6 +50,7 @@ node --import ./test/cf_loader.mjs test/cierre.cpu.mjs       # close y close-rad
 cd cloudflare
 node --import ./test/cf_loader.mjs test/filas.bench.mjs todos     # filas de D1 por pasada: falla si se pasa de los topes
 node --import ./test/cf_loader.mjs test/cierre.parity.mjs         # el cierre da lo mismo que las consultas de antes
+node --test test/sources.test.mjs                                 # getJson: una petición colgada acaba en su tope (20 s)
 node --test test/telegram.test.mjs                                # necesitan data/ en la raíz del repo (los datos del
 node test/metrics.parity.mjs --quick                              #  03/10: git archive 99d2ee9 data | tar -x) y python3
 node test/horror.parity.mjs                                       # descarga de la Games API (o usa su caché)

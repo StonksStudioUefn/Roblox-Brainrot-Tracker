@@ -30,6 +30,11 @@ export const VOTES_BATCH = 50;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// Tope de cada intento (cabeceras y cuerpo). Sin él, una petición que se
+// queda colgada bloqueaba su paso hasta el timeout del Workflow (10 min, y
+// otra vez en cada reintento del paso)
+export const FETCH_TIMEOUT_MS = 20_000;
+
 /** Cuenta las peticiones externas de una invocación y corta antes del límite. */
 export class Budget {
   constructor(max = 45) { this.max = max; this.used = 0; }
@@ -64,14 +69,16 @@ export class SubBudget extends Budget {
  *  - otros 4xx: null sin reintentar.
  *  - `empty(data)`: si devuelve true, la respuesta cuenta como fallida y se
  *    reintenta (la Search API devuelve 200 vacío cuando se le pide mucho).
+ *  - cada intento, como mucho `timeout` ms: si se pasa, es un fallo más (se
+ *    reintenta y, si no hay datos, null).
  */
-export async function getJson(url, { budget, retries = 3, base = 800, text = false, empty, cf } = {}) {
+export async function getJson(url, { budget, retries = 3, base = 800, text = false, empty, cf, timeout = FETCH_TIMEOUT_MS } = {}) {
   let last = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (budget && budget.left <= 0) break;
     budget?.take();
     try {
-      const init = { headers: { "user-agent": UA, accept: "application/json" } };
+      const init = { headers: { "user-agent": UA, accept: "application/json" }, signal: AbortSignal.timeout(timeout) };
       if (cf) init.cf = cf;
       const r = await fetch(url, init);
       if (r.ok) {
