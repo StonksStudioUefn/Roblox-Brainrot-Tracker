@@ -31,8 +31,8 @@
  * Y con `regimen` (salvo --sin-cascada): «cascada» (un cierre que falla
  * siempre), «cortes» (dos pasadas que se cortan antes de las tareas del día
  * no les gastan los intentos, y maint borra lo que deja en tmp/run/ una pasada
- * cortada hace más de un día) y «despliegue» (una ejecución encadenada del
- * código de antes hace el cierre de las 00:00: hist tiene que acabar igual que
+ * cortada hace más de un día) y «migración» (la primera pasada tras desplegar,
+ * con state.hist_agg, es la de las 00:00: hist tiene que acabar igual que
  * recalculada desde daily, con y sin el esquema aplicado).
  * --src=<carpeta> mide otra versión del código (p. ej. una copia de main) con
  * los mismos datos: así se compara antes y después. --salida=<carpeta> guarda
@@ -277,9 +277,9 @@ function counting(raw, log, tagRef, fallos = new Set()) {
 }
 
 // ─── Una pasada: la cadena de ejecuciones del Workflow ─────────────────────
-async function pasada(env, tagRef, iso, params = null) {
+async function pasada(env, tagRef, iso) {
   NOW_TS = D.minuteOf(Date.parse(iso));
-  const queue = [{ id: `cron-${iso.slice(0, 16)}`, params: params || { now: iso } }];
+  const queue = [{ id: `cron-${iso.slice(0, 16)}`, params: { now: iso } }];
   env.SAMPLER = { create: async ({ id, params }) => { queue.push({ id, params }); return { id }; }, get: async () => ({ status: async () => ({}) }) };
   const errors = [];
   let summary = null;
@@ -303,7 +303,7 @@ async function pasada(env, tagRef, iso, params = null) {
 const sum = (list, k) => list.reduce((a, x) => a + x[k], 0);
 const fmt = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
 
-async function scenario(name, { hours, fallos = new Set(), cortes = {}, primera = null, work = "trabajo", espacio = false, alPrincipio = null, alFinal = null } = {}) {
+async function scenario(name, { hours, fallos = new Set(), cortes = {}, work = "trabajo", espacio = false, alPrincipio = null, alFinal = null } = {}) {
   const dir = resolve(HERE, ".filas", name);
   const seedDir = resolve(dir, "semilla"), workDir = resolve(dir, work);
   if ((flag("--seed") && !seeded.has(name)) || !existsSync(resolve(seedDir, "ok"))) {
@@ -328,7 +328,7 @@ async function scenario(name, { hours, fallos = new Set(), cortes = {}, primera 
     const hh = k === 0 ? "cal" : iso.slice(0, 10) > D.addDays(DAY0, 1) ? "00+1" : iso.slice(11, 13);
     const i = log.length;
     tagRef.corte = cortes[hh] || null;
-    const { errors, summary } = await pasada(env, tagRef, iso, k === 0 ? primera?.(iso) : null);
+    const { errors, summary } = await pasada(env, tagRef, iso);
     tagRef.corte = null;
     const q = log.slice(i);
     const st = await D.getStates(proxy.env.DB, ["meta_day", "closed_day", "sel_day", "maint_day", "daily_tries"]);
@@ -470,25 +470,20 @@ if (scens.includes("regimen") && !flag("--sin-cascada")) {
   } else out(`✓ tmp/run: maint borra lo de una pasada cortada hace 2 días y deja lo de las de hace 1–2 h (${extra.cortadas} ficheros)`);
 }
 
-// Desplegar a media pasada: una ejecución encadenada que creó el código de
-// antes (init sin `daily`, sin pasar por el init nuevo ni por la migración)
-// hace el cierre de las 00:00 y el export. La tabla hist tiene que acabar
-// igual que recalculada desde daily (con state.hist_agg migrado antes de
-// escribir en ella) y el export no puede salir sin los datos de hist.
-// Con el esquema aplicado antes (tabla hist vacía) y sin él (la crea migrateHist).
+// La primera pasada tras desplegar sobre una base con state.hist_agg es la de
+// las 00:00 (cierre, select y export): init pasa hist_agg a la tabla hist antes
+// de que nada la lea o escriba. hist tiene que acabar igual que recalculada
+// desde daily y el export no puede salir sin los datos de hist. Con el esquema
+// aplicado antes (tabla hist vacía) y sin él (la crea migrateHist).
 if (scens.includes("regimen") && !flag("--sin-cascada")) for (const esquema of [true, false]) {
   const iso0 = new Date((D.dayStart(D.addDays(DAY0, 1))) * 60000).toISOString();
   const schema = readFileSync(resolve(ROOT, "schema.sql"), "utf8").replace(/--.*$/gm, "");
   const { runs, extra } = await scenario("regimen", {
-    hours: [iso0, new Date((D.dayStart(D.addDays(DAY0, 1)) + 60) * 60000).toISOString()], work: "despliegue",
+    hours: [iso0, new Date((D.dayStart(D.addDays(DAY0, 1)) + 60) * 60000).toISOString()], work: "migracion",
     alPrincipio: async db => {
       await db.prepare("DROP TABLE IF EXISTS hist").run();
       if (esquema) for (const q of schema.split(";").map(x => x.trim()).filter(Boolean)) await db.prepare(q).run();
     },
-    primera: iso => ({
-      now: iso, seg: 2, base: "cron-antes", phase: "finalize",
-      init: { ts: D.minuteOf(Date.parse(iso)), today: iso.slice(0, 10), firstOfDay: true, closedDay: D.addDays(DAY0, -1), selDay: DAY0, cursor: 0, session: "x" },
-    }),
     alFinal: async (db, bucket) => {
       const exp = JSON.parse(bucket.store.get("roblox-tracker/data/export.json") || "{}");
       const hist = async () => (await db.prepare("SELECT * FROM hist ORDER BY universe_id").all()).results;
@@ -497,10 +492,10 @@ if (scens.includes("regimen") && !flag("--sin-cascada")) for (const esquema of [
       return { igual: JSON.stringify(now) === JSON.stringify(await hist()), filas: now.length, sinPico: (exp.games || []).filter(g => g.peak == null || g.days_tracked == null).length, juegos: (exp.games || []).length };
     },
   });
-  out(`\n══ despliegue (${esquema ? "con el esquema aplicado" : "el código antes que el esquema"}): el cierre de las 00:00 lo hace una ejecución encadenada del código de antes (regimen) ══`);
+  out(`\n══ migración (${esquema ? "con el esquema aplicado" : "el código antes que el esquema"}): la primera pasada tras desplegar es la de las 00:00 (regimen) ══`);
   for (const r of runs) printRun(r);
-  if (!extra.igual || extra.sinPico || !extra.juegos) { fail = true; out(`✗ despliegue: hist ${extra.igual ? "bien" : "distinta de la recalculada desde daily"} (${extra.filas} filas); export: ${extra.sinPico} de ${extra.juegos} juegos sin pico o días`); }
-  else out(`✓ despliegue: hist igual que recalculada desde daily (${extra.filas} juegos) y export con pico y días en sus ${extra.juegos} juegos`);
+  if (!extra.igual || extra.sinPico || !extra.juegos) { fail = true; out(`✗ migración: hist ${extra.igual ? "bien" : "distinta de la recalculada desde daily"} (${extra.filas} filas); export: ${extra.sinPico} de ${extra.juegos} juegos sin pico o días`); }
+  else out(`✓ migración: hist igual que recalculada desde daily (${extra.filas} juegos) y export con pico y días en sus ${extra.juegos} juegos`);
 }
 
 // Una consulta que lee más en `anio` que en `regimen` crece con la base

@@ -186,16 +186,12 @@ export class Sampler extends WorkflowEntrypoint {
       await setState(db, "run_current", { base, seg, id: base, phase: "discover", cursor: 0 });
       return {
         ts, today, daily, due, spent,
-        firstOfDay: daily.meta,
         closedDay: st.closed_day || null,
-        selDay: st.sel_day || null,
         cursor: Number(st.search_cursor) || 0,
         session: crypto.randomUUID(),
       };
     });
-    const { ts, today } = init;
-    // Una ejecución encadenada que creó el código de antes trae init sin `daily`
-    const daily = init.daily || Object.fromEntries(DAILY_TASKS.map(t => [t, !!init.firstOfDay]));
+    const { ts, today, daily } = init;
     const firstSeen = isoMinute(ts);
     summary.ts = firstSeen;
     summary.first_of_day = daily.meta;
@@ -204,7 +200,7 @@ export class Sampler extends WorkflowEntrypoint {
     // mañana (el cierre recoge los días que falten) o con {"daily": ["close"]}
     if (init.spent?.length) summary.pendiente = init.spent;
     // Un intento de una tarea del día, en un paso propio (no se cuenta dos veces)
-    const tryTask = t => (daily[t] && init.due?.[t]
+    const tryTask = t => (daily[t] && init.due[t]
       ? safe(`try-${t}`, async () => { await countTryStmt(db, today, t).run(); return { task: t }; })
       : null);
     // Ficheros del radar de cada día, leídos una vez por ejecución para todas las partes de close-radar
@@ -451,8 +447,6 @@ export class Sampler extends WorkflowEntrypoint {
     if (want("close") && (daily.close || daily.meta)) {
       await tryTask("close");
       const plan = await safe("close", async () => {
-        // Antes de escribir en hist (una ejecución encadenada de antes de desplegar no ha pasado por init)
-        await migrateHist(db);
         // Votos y meta de los no seguidos, guardados por los pasos sample-N con meta
         const votes = {}, metaParts = Array.from({ length: RADAR_CLOSE_PARTS }, () => ({}));
         if (daily.meta) {
@@ -509,7 +503,6 @@ export class Sampler extends WorkflowEntrypoint {
       }
       if (ok) {
         await safe("close-hist", async () => {
-          await migrateHist(db);
           const closed = init.closedDay && init.closedDay > yesterday ? init.closedDay : yesterday;
           const res = await db.batch([...plan.dates.map(d => mergeHistStmt(db, d)), setStateStmt(db, "closed_day", closed)]);
           return { closed, written: written(res) };
@@ -766,10 +759,7 @@ export function chooseSelection(rows, cfg = SELECTION) {
 export async function runSelect(env, step, nowMs, today, safe, summary) {
   const db = env.DB;
   // Los rangos, de los ids del radar (radarIds): sin recorrer games con ROW_NUMBER()
-  const plan = await safe("select-plan", async () => {
-    await migrateHist(db);   // radarSlice lee hist (por si esta ejecución no ha pasado por init)
-    return { ranges: idRanges(await radarIds(db, today), SELECT_SLICE) };
-  });
+  const plan = await safe("select-plan", async () => ({ ranges: idRanges(await radarIds(db, today), SELECT_SLICE) }));
   if (!plan) return null;
   const now = new Date(nowMs).toISOString();
   const rows = [];
@@ -856,7 +846,6 @@ export async function backfillFromRadar(env, ids, nowTs, { maxGames = BACKFILL_M
 export async function runExport(env, step, nowMs, safe, summary) {
   const db = env.DB;
   const plan = await safe("export-plan", async () => {
-    await migrateHist(db);   // el export lee hist (por si esta ejecución no ha pasado por init)
     const [lastTs, closed, radar, selIds] = await Promise.all([
       lastSampleTs(db), getState(db, "closed_day"), radarCounts(db), getState(db, "sel_ids"),
     ]);

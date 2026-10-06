@@ -351,9 +351,8 @@ Se pasa de muestrear todo el catálogo (~2.500 juegos) a un **radar** de todo y
   (`radarDailyRows` en el Worker, por partes según la última cifra del id, y `radarCloseStmt`
   con las filas ya agregadas; mismas mediana y media; los 8 ficheros del día se leen de R2 y se
   comprueban una vez por ejecución para todas las partes) y `close-hist` (`hist` y `closed_day`).
-  Si un juego tiene las dos, se queda la que tiene más lecturas. Antes de tocar `hist` (`close`,
-  `close-hist`, `select-plan`, `export-plan` e `init`), `migrateHist`: una ejecución encadenada que creó
-  el código de antes no pasa por el `init` nuevo.
+  Si un juego tiene las dos, se queda la que tiene más lecturas. `init` llama a `migrateHist` antes
+  de que nada lea o escriba `hist`.
 - `select`: `select-plan` → `select-<i>` (250 juegos por paso: últimas 14 filas
   diarias + `radarScore` de `metrics.js`, ≈ 5 ms en frío) → `select-apply`
   (`chooseSelection` de `sampler.js`). Top 10 por jugadores en general y en horror,

@@ -68,9 +68,9 @@ pasada pasa de su tope (`TOPES`, ~20 % sobre lo medido), si una consulta lee má
 10.000 filas) en `anio` que en `regimen` (recorre `daily` o `sort_hits` enteras), si un cierre que falla
 siempre repite el meta o se intenta más de `DAILY_TRIES` veces («cascada»), si dos pasadas que se cortan
 antes de las tareas del día les gastan los intentos o si `maint` no borra lo que una pasada cortada hace
-más de un día dejó en `tmp/run/` («cortes»), o si, al desplegar a media pasada, una
-ejecución encadenada del código de antes escribe en `hist` antes de migrar `state.hist_agg` o exporta sin
-sus datos («despliegue», con y sin el esquema aplicado). Para comparar con otra versión:
+más de un día dejó en `tmp/run/` («cortes»), o si la primera pasada tras desplegar sobre una base con
+`state.hist_agg` deja `hist` distinta de la recalculada desde `daily` o exporta sin sus datos
+(«migración», con y sin el esquema aplicado). Para comparar con otra versión:
 `--src=<carpeta con su src/>`, y `--salida=<carpeta>` guarda el export y `telegram.json` de cada pasada
 (`cmp -r` entre versiones). `test/export.bench.mjs` acepta `--config=test/filas.wrangler.toml
 --persist=<copia de test/.filas/<escenario>/semilla>` para medir solo el export sobre esa base.
@@ -89,10 +89,8 @@ Fixtures de `cpu_steps.mjs`: `games_pages.json` y `votes_pages.json` (20 respues
 3. Nada más: la primera pasada copia `state.hist_agg` a `hist` y borra la clave (en su paso `init`, en un
    batch: las dos cosas o ninguna; repetirla no hace nada), y lee la marca vieja `day` mientras no exista
    `meta_day`, así que el día del despliegue no repite el meta, ni el cierre, ni select ni maint (sus marcas
-   ya son de hoy) y a las 00:00 los hace todos. Si al desplegar hay una pasada en marcha, sus ejecuciones
-   encadenadas pueden seguir con el código nuevo y el `init` de antes: migran antes de tocar `hist` (`close`, `close-hist`,
-   `select-plan` y `export-plan` también llaman a `migrateHist`). Si el código llegara antes que el esquema,
-   `migrateHist` crea la tabla. Mejor no desplegar entre las :00 y las :05 (cuando corre la pasada).
+   ya son de hoy) y a las 00:00 los hace todos. Si el código llegara antes que el esquema, `migrateHist`
+   crea la tabla. Mejor no desplegar entre las :00 y las :05 (cuando corre la pasada).
    Para comprobarlo: `GET /api/admin/status` enseña `meta_day`, `closed_day`, `maint_day` y `daily_tries`
    (y `last_run.pendiente`, si alguna tarea del día se ha quedado sin intentos), y
    `wrangler d1 execute roblox-tracker --remote --command "SELECT COUNT(*) FROM hist"` da los juegos con
