@@ -176,14 +176,6 @@ export async function trackedIds(db, { selected = false } = {}) {
   return results.map(r => r.id);
 }
 
-/** Ids seguidos (sel = 1) dentro de `ids`. */
-export async function selectedAmong(db, ids) {
-  const { results } = await db.prepare(
-    `SELECT g.universe_id AS id FROM json_each(?1) j JOIN games g ON g.universe_id = j.value WHERE g.sel = 1`,
-  ).bind(JSON.stringify(ids)).all();
-  return results.map(r => r.id);
-}
-
 // ─── Radar ────────────────────────────────────────────────────────────────────
 /**
  * Lecturas de Rolimons [[placeId, name, players], …] → `players` =

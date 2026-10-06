@@ -216,24 +216,6 @@ export async function fetchSortContent(budget, sessionId, sortId, token, maxPage
   return out;
 }
 
-/** Todas las listas de una vez (para pruebas; el Workflow va página a página). */
-export async function fetchExplore(budget, { maxSortPages = 8, maxContentPages = 6 } = {}) {
-  const sid = crypto.randomUUID();
-  const sorts = {};
-  const pending = [];
-  let token = null, pages = 0;
-  do {
-    const r = await fetchSortsPage(budget, sid, token);
-    if (!r) break;
-    pages++;
-    Object.assign(sorts, r.sorts);
-    pending.push(...r.pending);
-    token = r.next;
-  } while (token && pages < maxSortPages && budget.left > 2);
-  for (const [sortId, t] of pending) sorts[sortId].push(...await fetchSortContent(budget, sid, sortId, t, maxContentPages));
-  return sorts;
-}
-
 function gameTuple(g) {
   return [g.universeId, g.rootPlaceId || null, g.name || null, g.playerCount ?? null];
 }

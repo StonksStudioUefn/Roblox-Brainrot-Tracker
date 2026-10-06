@@ -1,7 +1,6 @@
 -- schema.sql — Esquema D1 de roblox-tracker (ver CONTRACT.md).
 -- Idempotente: se puede ejecutar varias veces.
 --   npx wrangler d1 execute roblox-tracker --remote --file=schema.sql
---   (o POST /api/admin/schema)
 
 CREATE TABLE IF NOT EXISTS games (
   universe_id INTEGER PRIMARY KEY,
@@ -23,7 +22,7 @@ CREATE TABLE IF NOT EXISTS games (
   tracked INTEGER DEFAULT 1,     -- 1 = se muestrea en cada pasada
   low_since TEXT,                -- fecha desde la que está por debajo de TRACK_MIN_PLAYERS
   meta_date TEXT,                -- último día en que se refrescaron meta + horror + votos
-  sel INTEGER DEFAULT 0          -- 1 = seguido (muestras cada 3 h, votos, export); lo elige `select` cada día
+  sel INTEGER DEFAULT 0          -- 1 = seguido (muestras cada hora, votos, export); lo elige `select` cada día
 );
 -- En una base anterior a `sel`: ALTER TABLE games ADD COLUMN sel INTEGER DEFAULT 0;
 
