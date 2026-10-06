@@ -30,8 +30,10 @@
  *     sort_hits enteras, que crecen con los días.
  * Y con `regimen` (salvo --sin-cascada): «cascada» (un cierre que falla
  * siempre), «cortes» (dos pasadas que se cortan antes de las tareas del día
- * no les gastan los intentos) y «despliegue» (una ejecución encadenada del
- * código de antes hace el cierre de las 00:00: hist tiene que acabar igual que
+ * no les gastan los intentos, y maint borra lo que deja en tmp/run/ una pasada
+ * cortada hace más de un día), «sin intento» (si no se puede apuntar el
+ * intento de una tarea del día, no se hace) y «migración» (la primera pasada tras desplegar,
+ * con state.hist_agg, es la de las 00:00: hist tiene que acabar igual que
  * recalculada desde daily, con y sin el esquema aplicado).
  * --src=<carpeta> mide otra versión del código (p. ej. una copia de main) con
  * los mismos datos: así se compara antes y después. --salida=<carpeta> guarda
@@ -162,19 +164,20 @@ function gameTuple(id) {
 
 // ─── R2 en memoria ──────────────────────────────────────────────────────────
 function memBucket() {
-  const store = new Map();
+  const store = new Map(), uploaded = new Map();   // uploaded: con la hora simulada
   const text = async v => typeof v === "string" ? v : v instanceof ReadableStream ? new Response(v).text() : new TextDecoder().decode(v);
   const obj = (k, t) => ({ key: k, size: Buffer.byteLength(t), text: async () => t, json: async () => JSON.parse(t), get body() { return new Response(t).body; }, httpEtag: "x" });
   return {
     store,
-    async put(k, v) { const t = await text(v); store.set(k, t); return { key: k, size: Buffer.byteLength(t) }; },
+    seed(k, t, date) { store.set(k, t); uploaded.set(k, date); },
+    async put(k, v) { const t = await text(v); store.set(k, t); uploaded.set(k, new Date(NOW_TS * 60000)); return { key: k, size: Buffer.byteLength(t) }; },
     async get(k) { return store.has(k) ? obj(k, store.get(k)) : null; },
     async head(k) { return store.has(k) ? obj(k, store.get(k)) : null; },
     async list({ prefix = "", limit = 1000 } = {}) {
       const keys = [...store.keys()].filter(k => k.startsWith(prefix)).sort().slice(0, limit);
-      return { objects: keys.map(key => ({ key, size: Buffer.byteLength(store.get(key)) })), truncated: false, delimitedPrefixes: [] };
+      return { objects: keys.map(key => ({ key, size: Buffer.byteLength(store.get(key)), uploaded: uploaded.get(key) })), truncated: false, delimitedPrefixes: [] };
     },
-    async delete(keys) { for (const k of [].concat(keys)) store.delete(k); },
+    async delete(keys) { for (const k of [].concat(keys)) { store.delete(k); uploaded.delete(k); } },
   };
 }
 globalThis.FixedLengthStream ??= class { constructor() { const t = new TransformStream(); this.readable = t.readable; this.writable = t.writable; } };
@@ -250,13 +253,17 @@ function seedRadar(bucket) {
 // ─── Contador de filas ──────────────────────────────────────────────────────
 function counting(raw, log, tagRef, fallos = new Set()) {
   const add = (sql, meta) => log.push({ tag: tagRef.tag, sql: sql.replace(/\s+/g, " ").trim().slice(0, 80), read: meta?.rows_read ?? 0, written: meta?.rows_written ?? 0 });
-  // fallos: pasos cuyos batch fallan; tagRef.corte: un paso en el que falla todo (la ejecución se corta)
+  // fallos: pasos cuyas escrituras (batch y run) fallan; tagRef.corte: un paso en el que falla todo (la ejecución se corta)
   const corte = () => { if (tagRef.corte && tagRef.tag === tagRef.corte) throw new Error(`corte simulado en ${tagRef.tag}`); };
   class Stmt {
     constructor(s, sql) { this.s = s; this.sql = sql; }
     bind(...a) { return new Stmt(this.s.bind(...a), this.sql); }
     async all() { corte(); const r = await this.s.all(); add(this.sql, r.meta); return r; }
-    async run() { corte(); const r = await this.s.run(); add(this.sql, r.meta); return r; }
+    async run() {
+      corte();
+      if (fallos.has(tagRef.tag)) throw new Error(`fallo simulado en ${tagRef.tag}`);
+      const r = await this.s.run(); add(this.sql, r.meta); return r;
+    }
     async raw(o) { return this.s.raw(o); }
     // first() de D1 no devuelve meta: se hace con all() para contar sus filas
     async first(col) { const row = (await this.all()).results[0]; return row ? (col ? row[col] : row) : null; }
@@ -275,9 +282,9 @@ function counting(raw, log, tagRef, fallos = new Set()) {
 }
 
 // ─── Una pasada: la cadena de ejecuciones del Workflow ─────────────────────
-async function pasada(env, tagRef, iso, params = null) {
+async function pasada(env, tagRef, iso) {
   NOW_TS = D.minuteOf(Date.parse(iso));
-  const queue = [{ id: `cron-${iso.slice(0, 16)}`, params: params || { now: iso } }];
+  const queue = [{ id: `cron-${iso.slice(0, 16)}`, params: { now: iso } }];
   env.SAMPLER = { create: async ({ id, params }) => { queue.push({ id, params }); return { id }; }, get: async () => ({ status: async () => ({}) }) };
   const errors = [];
   let summary = null;
@@ -301,7 +308,7 @@ async function pasada(env, tagRef, iso, params = null) {
 const sum = (list, k) => list.reduce((a, x) => a + x[k], 0);
 const fmt = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
 
-async function scenario(name, { hours, fallos = new Set(), cortes = {}, primera = null, work = "trabajo", espacio = false, alPrincipio = null, alFinal = null } = {}) {
+async function scenario(name, { hours, fallos = new Set(), cortes = {}, work = "trabajo", espacio = false, alPrincipio = null, alFinal = null } = {}) {
   const dir = resolve(HERE, ".filas", name);
   const seedDir = resolve(dir, "semilla"), workDir = resolve(dir, work);
   if ((flag("--seed") && !seeded.has(name)) || !existsSync(resolve(seedDir, "ok"))) {
@@ -320,13 +327,13 @@ async function scenario(name, { hours, fallos = new Set(), cortes = {}, primera 
   const bucket = memBucket();
   seedRadar(bucket);
   const env = { DB: counting(proxy.env.DB, log, tagRef, fallos), BUCKET: bucket };
-  if (alPrincipio) await alPrincipio(proxy.env.DB);
+  if (alPrincipio) await alPrincipio(proxy.env.DB, bucket);
   const runs = [];
   for (const [k, iso] of hours.entries()) {
     const hh = k === 0 ? "cal" : iso.slice(0, 10) > D.addDays(DAY0, 1) ? "00+1" : iso.slice(11, 13);
     const i = log.length;
     tagRef.corte = cortes[hh] || null;
-    const { errors, summary } = await pasada(env, tagRef, iso, k === 0 ? primera?.(iso) : null);
+    const { errors, summary } = await pasada(env, tagRef, iso);
     tagRef.corte = null;
     const q = log.slice(i);
     const st = await D.getStates(proxy.env.DB, ["meta_day", "closed_day", "sel_day", "maint_day", "daily_tries"]);
@@ -442,35 +449,71 @@ if (scens.includes("regimen") && !flag("--sin-cascada")) {
 // Una pasada que se corta antes de las tareas del día no gasta sus intentos:
 // a las 00:00 y a la 01:00 falla sample-list (sin safe(): la ejecución se
 // corta antes del meta, el cierre, select y maint) y a las 02:00 se hacen todas
+// Y lo que una pasada cortada deja en tmp/run/ (no llega a su `finish`) lo
+// borra maint cuando tiene más de un día; lo de las cortadas de hace 1–2 h se
+// queda (podría ser una pasada que sigue en marcha)
 if (scens.includes("regimen") && !flag("--sin-cascada")) {
-  const { runs } = await scenario("regimen", { hours: horas(3), cortes: { "00": "sample-list-#", "01": "sample-list-#" }, work: "cortes" });
+  const VIEJO = "roblox-tracker/tmp/run/cron-2026-10-04T05:00/ids.json";
+  const { runs, extra } = await scenario("regimen", {
+    hours: horas(3), cortes: { "00": "sample-list-#", "01": "sample-list-#" }, work: "cortes",
+    alPrincipio: async (db, bucket) => bucket.seed(VIEJO, "{}", new Date(D.dayStart("2026-10-04") * 60000 + 5 * 3600_000)),
+    alFinal: async (db, bucket) => ({
+      viejo: bucket.store.has(VIEJO),
+      cortadas: [...bucket.store.keys()].filter(k => /\/tmp\/run\/cron-2026-10-06T0[01]:00\//.test(k)).length,
+      ultima: [...bucket.store.keys()].filter(k => k.includes("/tmp/run/cron-2026-10-06T02:00")).length,
+    }),
+  });
   out("\n══ cortes: las pasadas de las 00:00 y la 01:00 se cortan antes de las tareas del día (regimen) ══");
   for (const r of runs) out(`${r.iso.slice(0, 16)}  ${fmt(r.read).padStart(10)} leídas  ${JSON.stringify(r.st)}${r.errors.length ? `  ${r.errors.join(" | ").slice(0, 120)}` : ""}`);
   const last = runs[runs.length - 1], today = last.iso.slice(0, 10);
   const done = last.st.meta_day === today && last.st.closed_day === D.addDays(today, -1) && last.st.sel_day === today && last.st.maint_day === today;
   if (!done || last.errors.length) { fail = true; out("✗ cortes: a las 02:00 no se han hecho las tareas del día"); }
   else out("✓ cortes: las pasadas cortadas no gastan intentos; a las 02:00 se hacen meta, cierre, select y maint");
+  if (extra.viejo || !extra.cortadas || extra.ultima) {
+    fail = true;
+    out(`✗ tmp/run: ${extra.viejo ? "lo de una pasada cortada hace 2 días sigue ahí" : "bien lo viejo"}; ${extra.cortadas} ficheros de las cortadas de hoy (tienen que quedarse); ${extra.ultima} de la de las 02:00 (finish los borra)`);
+  } else out(`✓ tmp/run: maint borra lo de una pasada cortada hace 2 días y deja lo de las de hace 1–2 h (${extra.cortadas} ficheros)`);
 }
 
-// Desplegar a media pasada: una ejecución encadenada que creó el código de
-// antes (init sin `daily`, sin pasar por el init nuevo ni por la migración)
-// hace el cierre de las 00:00 y el export. La tabla hist tiene que acabar
-// igual que recalculada desde daily (con state.hist_agg migrado antes de
-// escribir en ella) y el export no puede salir sin los datos de hist.
-// Con el esquema aplicado antes (tabla hist vacía) y sin él (la crea migrateHist).
+// Si no se puede apuntar el intento de una tarea del día (try-<tarea>), la
+// tarea no se hace en esa pasada: hecha sin apuntar no tiene tope. Aquí fallan
+// siempre los cuatro try-… y el cierre: antes se hacían las cuatro a las 00:00
+// y el cierre (que falla) se repetía cada hora, sin tope; ahora ninguna
+if (scens.includes("regimen") && !flag("--sin-cascada")) {
+  const tries = ["try-meta", "try-close", "try-select", "try-maint"];
+  const { runs } = await scenario("regimen", { hours: horas(4), fallos: new Set([...tries, "close"]), work: "sin-intento" });
+  out("\n══ sin intento: apuntar el intento falla siempre, y el cierre también (regimen) ══");
+  const did = r => [
+    r.q.some(x => x.sql.startsWith("UPDATE games SET place_id")) && "meta",
+    (r.q.some(x => x.tag === "close") || r.errors.some(e => e.startsWith("close:"))) && "cierre",
+    (r.q.some(x => x.tag === "select-plan") || r.errors.some(e => e.startsWith("select-plan:"))) && "select",
+    (r.q.some(x => x.tag === "maint") || r.errors.some(e => e.startsWith("maint:"))) && "maint",
+  ].filter(Boolean);
+  const day = runs.filter(r => r.hh !== "cal");
+  for (const r of runs) { out(`${r.iso.slice(0, 16)}  ${fmt(r.read).padStart(10)} leídas  ${did(r).join(" ") || "-"}`); if (VERBOSE) printRun(r); }
+  const hechas = day.flatMap(did);
+  const otros = day.flatMap(r => r.errors).filter(e => !tries.some(t => e.startsWith(`${t}:`)) && !e.startsWith("close:"));
+  const marcas = day.some(r => r.st.meta_day || r.st.daily_tries || r.st.closed_day !== D.addDays(DAY0, -1) || r.st.sel_day !== DAY0 || r.st.maint_day !== DAY0);
+  if (hechas.length || otros.length || marcas) {
+    fail = true;
+    out(`✗ sin intento: tareas hechas sin apuntar su intento: ${hechas.join(", ") || "ninguna"} (cierre en ${hechas.filter(x => x === "cierre").length} pasadas)${marcas ? "; marcas cambiadas" : ""}${otros.length ? `; ${otros.join(" | ").slice(0, 160)}` : ""}`);
+  } else out(`✓ sin intento: ninguna tarea del día sin su intento apuntado (${day.map(r => fmt(r.read)).join(" / ")} leídas)`);
+}
+
+// La primera pasada tras desplegar sobre una base con state.hist_agg es la de
+// las 00:00 (cierre, select y export): init pasa hist_agg a la tabla hist antes
+// de que nada la lea o escriba. hist tiene que acabar igual que recalculada
+// desde daily y el export no puede salir sin los datos de hist. Con el esquema
+// aplicado antes (tabla hist vacía) y sin él (la crea migrateHist).
 if (scens.includes("regimen") && !flag("--sin-cascada")) for (const esquema of [true, false]) {
   const iso0 = new Date((D.dayStart(D.addDays(DAY0, 1))) * 60000).toISOString();
   const schema = readFileSync(resolve(ROOT, "schema.sql"), "utf8").replace(/--.*$/gm, "");
   const { runs, extra } = await scenario("regimen", {
-    hours: [iso0, new Date((D.dayStart(D.addDays(DAY0, 1)) + 60) * 60000).toISOString()], work: "despliegue",
+    hours: [iso0, new Date((D.dayStart(D.addDays(DAY0, 1)) + 60) * 60000).toISOString()], work: "migracion",
     alPrincipio: async db => {
       await db.prepare("DROP TABLE IF EXISTS hist").run();
       if (esquema) for (const q of schema.split(";").map(x => x.trim()).filter(Boolean)) await db.prepare(q).run();
     },
-    primera: iso => ({
-      now: iso, seg: 2, base: "cron-antes", phase: "finalize",
-      init: { ts: D.minuteOf(Date.parse(iso)), today: iso.slice(0, 10), firstOfDay: true, closedDay: D.addDays(DAY0, -1), selDay: DAY0, cursor: 0, session: "x" },
-    }),
     alFinal: async (db, bucket) => {
       const exp = JSON.parse(bucket.store.get("roblox-tracker/data/export.json") || "{}");
       const hist = async () => (await db.prepare("SELECT * FROM hist ORDER BY universe_id").all()).results;
@@ -479,10 +522,10 @@ if (scens.includes("regimen") && !flag("--sin-cascada")) for (const esquema of [
       return { igual: JSON.stringify(now) === JSON.stringify(await hist()), filas: now.length, sinPico: (exp.games || []).filter(g => g.peak == null || g.days_tracked == null).length, juegos: (exp.games || []).length };
     },
   });
-  out(`\n══ despliegue (${esquema ? "con el esquema aplicado" : "el código antes que el esquema"}): el cierre de las 00:00 lo hace una ejecución encadenada del código de antes (regimen) ══`);
+  out(`\n══ migración (${esquema ? "con el esquema aplicado" : "el código antes que el esquema"}): la primera pasada tras desplegar es la de las 00:00 (regimen) ══`);
   for (const r of runs) printRun(r);
-  if (!extra.igual || extra.sinPico || !extra.juegos) { fail = true; out(`✗ despliegue: hist ${extra.igual ? "bien" : "distinta de la recalculada desde daily"} (${extra.filas} filas); export: ${extra.sinPico} de ${extra.juegos} juegos sin pico o días`); }
-  else out(`✓ despliegue: hist igual que recalculada desde daily (${extra.filas} juegos) y export con pico y días en sus ${extra.juegos} juegos`);
+  if (!extra.igual || extra.sinPico || !extra.juegos) { fail = true; out(`✗ migración: hist ${extra.igual ? "bien" : "distinta de la recalculada desde daily"} (${extra.filas} filas); export: ${extra.sinPico} de ${extra.juegos} juegos sin pico o días`); }
+  else out(`✓ migración: hist igual que recalculada desde daily (${extra.filas} juegos) y export con pico y días en sus ${extra.juegos} juegos`);
 }
 
 // Una consulta que lee más en `anio` que en `regimen` crece con la base

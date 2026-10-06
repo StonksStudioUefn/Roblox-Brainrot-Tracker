@@ -309,7 +309,8 @@ Solución (`sampler.js`):
   peticiones. Si no caben, se crea la siguiente ejecución (`<id>-s<N>`) con `phase` y `cursor`, y la
   actual termina. Las fases son discover → search → rolimons → resolve → sample → radar-api → finalize.
 - **Datos entre ejecuciones.** Las listas que necesita la siguiente ejecución (ids, places por resolver y
-  votos) van a R2 `tmp/run/<id>/` y se borran en `finish`.
+  votos) van a R2 `tmp/run/<id>/` y se borran en `finish` (lo de una pasada que se corta antes, en
+  `maint`, cuando tiene más de un día).
 - **Estado.** D1 `state.run_current` dice qué ejecución va ahora; `/api/admin/status` la enseña.
 
 Medido en producción:
@@ -350,9 +351,8 @@ Se pasa de muestrear todo el catálogo (~2.500 juegos) a un **radar** de todo y
   (`radarDailyRows` en el Worker, por partes según la última cifra del id, y `radarCloseStmt`
   con las filas ya agregadas; mismas mediana y media; los 8 ficheros del día se leen de R2 y se
   comprueban una vez por ejecución para todas las partes) y `close-hist` (`hist` y `closed_day`).
-  Si un juego tiene las dos, se queda la que tiene más lecturas. Antes de tocar `hist` (`close`,
-  `close-hist`, `select-plan`, `export-plan` e `init`), `migrateHist`: una ejecución encadenada que creó
-  el código de antes no pasa por el `init` nuevo.
+  Si un juego tiene las dos, se queda la que tiene más lecturas. `init` llama a `migrateHist` antes
+  de que nada lea o escriba `hist`.
 - `select`: `select-plan` → `select-<i>` (250 juegos por paso: últimas 14 filas
   diarias + `radarScore` de `metrics.js`, ≈ 5 ms en frío) → `select-apply`
   (`chooseSelection` de `sampler.js`). Top 10 por jugadores en general y en horror,
@@ -443,7 +443,8 @@ producción; ver README): la pasada de las 00:00 pasa de ~555.000–620.000 a ~1
   `sel_day`, `maint_day`) y como mucho `DAILY_TRIES` = 2 intentos al día (`daily_tries`). `init` solo
   decide cuáles tocan; el intento se cuenta en un paso `try-<tarea>` al empezar la tarea (el meta, al
   empezar sus trozos de `sample-N`): una pasada que se corta antes no gasta intentos y repetir `init` no
-  cuenta dos veces. Antes había una sola marca (`day`) que escribía el cierre: si el cierre fallaba, cada
+  cuenta dos veces. Si `try-<tarea>` falla, la tarea no se hace en esa pasada (sin apuntar no tendría
+  tope; sin el meta, `sample-N` va solo con los seguidos) y sale en `last_run.sin_intento`. Antes había una sola marca (`day`) que escribía el cierre: si el cierre fallaba, cada
   hora se repetían el meta de todo el radar, el cierre, select y maint (~450.000 filas por hora).
   `{"daily": true}` en `/api/admin/run` las fuerza todas y `{"daily": ["close"]}` solo las de la lista.
   Una tarea pendiente sin intentos sale en `last_run.pendiente`; el cierre recoge al día siguiente los días

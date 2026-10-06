@@ -149,7 +149,7 @@ export class Sampler extends WorkflowEntrypoint {
       await step.do(`next-${phase}-${cursor}`, STEP, async () => {
         const id = `${base}-s${seg + 1}`;
         try {
-          await env.SAMPLER.create({ id, params: { ...p, seg: seg + 1, base, init, phase, cursor, summary: compact(summary) } });
+          await env.SAMPLER.create({ id, params: { ...p, seg: seg + 1, base, init, phase, cursor, sin_intento: [...sinIntento], summary: compact(summary) } });
         } catch (e) {
           if (!/already exists|duplicate/i.test(String(e?.message || e))) throw e;
         }
@@ -186,16 +186,16 @@ export class Sampler extends WorkflowEntrypoint {
       await setState(db, "run_current", { base, seg, id: base, phase: "discover", cursor: 0 });
       return {
         ts, today, daily, due, spent,
-        firstOfDay: daily.meta,
         closedDay: st.closed_day || null,
-        selDay: st.sel_day || null,
         cursor: Number(st.search_cursor) || 0,
         session: crypto.randomUUID(),
       };
     });
     const { ts, today } = init;
-    // Una ejecución encadenada que creó el código de antes trae init sin `daily`
-    const daily = init.daily || Object.fromEntries(DAILY_TASKS.map(t => [t, !!init.firstOfDay]));
+    // Tareas del día que no han podido apuntar su intento: no se hacen en esta
+    // pasada (tampoco en sus ejecuciones encadenadas)
+    const sinIntento = new Set(p.sin_intento || []);
+    const daily = Object.fromEntries(DAILY_TASKS.map(t => [t, !!init.daily[t] && !sinIntento.has(t)]));
     const firstSeen = isoMinute(ts);
     summary.ts = firstSeen;
     summary.first_of_day = daily.meta;
@@ -203,10 +203,20 @@ export class Sampler extends WorkflowEntrypoint {
     // Tareas del día pendientes que ya han gastado sus intentos: se repiten
     // mañana (el cierre recoge los días que falten) o con {"daily": ["close"]}
     if (init.spent?.length) summary.pendiente = init.spent;
-    // Un intento de una tarea del día, en un paso propio (no se cuenta dos veces)
-    const tryTask = t => (daily[t] && init.due?.[t]
-      ? safe(`try-${t}`, async () => { await countTryStmt(db, today, t).run(); return { task: t }; })
-      : null);
+    // Un intento de una tarea del día, en un paso propio (no se cuenta dos
+    // veces). Si no se puede apuntar, la tarea no se hace: hecha sin apuntar,
+    // no tendría tope y, si falla, se repetiría cada hora (~115.000 filas
+    // leídas el cierre, select y maint)
+    const tryTask = async t => {
+      if (!daily[t]) return false;
+      if (!init.due[t]) return true;   // forzada sin estar pendiente: no gasta intento
+      if (await safe(`try-${t}`, async () => { await countTryStmt(db, today, t).run(); return { task: t }; })) return true;
+      daily[t] = false;
+      sinIntento.add(t);
+      summary.sin_intento = [...sinIntento];
+      if (t === "meta") summary.first_of_day = false;
+      return false;
+    };
     // Ficheros del radar de cada día, leídos una vez por ejecución para todas las partes de close-radar
     const radarDays = new Map();
     const radarDay = async d => {
@@ -285,7 +295,7 @@ export class Sampler extends WorkflowEntrypoint {
 
     // ── rolimons: lecturas del radar (cada pasada) y, con el meta del día, los
     // places por resolver (a R2)
-    const places = daily.meta && want("rolimons");
+    const places = init.daily.meta && want("rolimons");
     // El radar se lee cada RADAR_EVERY_HOURS (y siempre con el meta del día)
     const radarHour = new Date(ts * 60000).getUTCHours() % RADAR_EVERY_HOURS === 0;
     if (reach("rolimons") && want("rolimons") && (places || radarHour)) {
@@ -353,8 +363,7 @@ export class Sampler extends WorkflowEntrypoint {
     // ── sample-N (+ meta diario): la lista de ids va a R2 para las demás ejecuciones.
     // Muestras de los seguidos; en la 1ª pasada del día, meta de todo el radar.
     if (reach("sample") && want("sample")) {
-      const meta = daily.meta;
-      const { ids, sel } = await step.do(`sample-list-${seg}`, STEP, async () => {
+      const list = await step.do(`sample-list-${seg}`, STEP, async () => {
         const key = `${tmp}ids.json`;
         if (p.phase === "sample") {
           const o = await env.BUCKET.get(key);
@@ -362,12 +371,17 @@ export class Sampler extends WorkflowEntrypoint {
         }
         const selected = await trackedIds(db, { selected: true });
         // Sin selección todavía (recién desplegado): todo el radar, como antes
-        const list = { ids: meta || !selected.length ? await trackedIds(db) : selected, sel: selected.length ? selected : null };
+        const list = { ids: daily.meta || !selected.length ? await trackedIds(db) : selected, sel: selected.length ? selected : null };
         await env.BUCKET.put(key, JSON.stringify(list));
         return list;
       });
-      // El intento del meta cuenta al empezar sus trozos (no en las ejecuciones que los siguen)
-      if (meta && p.phase !== "sample") await tryTask("meta");
+      // El intento del meta cuenta al empezar sus trozos (no en las ejecuciones
+      // que los siguen). Si no se puede apuntar, la pasada sigue sin meta: solo
+      // los seguidos (o todo el radar si aún no hay selección)
+      if (daily.meta && p.phase !== "sample") await tryTask("meta");
+      const meta = daily.meta;
+      const { sel } = list;
+      const ids = meta ? list.ids : sel || list.ids;
       const selSet = sel ? new Set(sel) : null;
       const size = meta ? META_CHUNK : SAMPLE_CHUNK;
       const need = meta ? META_NEED : SAMPLE_NEED;
@@ -448,11 +462,8 @@ export class Sampler extends WorkflowEntrypoint {
     // (hist y closed_day). Cada uno se puede repetir; si algo falla, closed_day
     // no avanza y la pasada siguiente lo repite (como mucho DAILY_TRIES al día).
     // Con el meta del día también: sus votos van a la fila de ayer aunque ya esté cerrada.
-    if (want("close") && (daily.close || daily.meta)) {
-      await tryTask("close");
+    if (want("close") && (daily.close ? await tryTask("close") : daily.meta)) {
       const plan = await safe("close", async () => {
-        // Antes de escribir en hist (una ejecución encadenada de antes de desplegar no ha pasado por init)
-        await migrateHist(db);
         // Votos y meta de los no seguidos, guardados por los pasos sample-N con meta
         const votes = {}, metaParts = Array.from({ length: RADAR_CLOSE_PARTS }, () => ({}));
         if (daily.meta) {
@@ -461,14 +472,8 @@ export class Sampler extends WorkflowEntrypoint {
             const obj = await env.BUCKET.get(o.key);
             if (!obj) continue;
             const part = await obj.json();
-            Object.assign(votes, part.v || {});
-            if (Array.isArray(part.r) && part.r.length === RADAR_CLOSE_PARTS) part.r.forEach((m, k) => Object.assign(metaParts[k], m));
-            else {
-              // De una ejecución de antes: el meta sin repartir, o en otro nº de partes
-              for (const m of Array.isArray(part.r) ? part.r : [part.r || {}]) {
-                for (const id in m) metaParts[idPart(id, RADAR_CLOSE_PARTS)][id] = m[id];
-              }
-            }
+            Object.assign(votes, part.v);
+            part.r.forEach((m, k) => Object.assign(metaParts[k], m));
           }
         }
         const oldest = addDays(today, -SAMPLE_RETENTION_DAYS);
@@ -509,7 +514,6 @@ export class Sampler extends WorkflowEntrypoint {
       }
       if (ok) {
         await safe("close-hist", async () => {
-          await migrateHist(db);
           const closed = init.closedDay && init.closedDay > yesterday ? init.closedDay : yesterday;
           const res = await db.batch([...plan.dates.map(d => mergeHistStmt(db, d)), setStateStmt(db, "closed_day", closed)]);
           return { closed, written: written(res) };
@@ -518,12 +522,11 @@ export class Sampler extends WorkflowEntrypoint {
     }
 
     // ── select: los juegos seguidos (una vez al día, con el día de ayer cerrado)
-    if (want("select") && (daily.select || p.select)) {
-      await tryTask("select");
+    if (want("select") && (daily.select ? await tryTask("select") : p.select)) {
       await runSelect(env, step, ts * 60000, today, safe, summary);
     }
 
-    // ── maint: poda de muestras, untrack y ficheros viejos del radar ────────
+    // ── maint: poda de muestras, untrack, ficheros viejos del radar y de pasadas cortadas
     // Una vez al día (state.maint_day). Podar muestras recorre todos los juegos
     // (~6.000 filas leídas aunque solo borre una hora): cada hora eran ~150.000
     // al día y una vez ~20.000; a cambio las muestras duran hasta un día más
@@ -533,8 +536,7 @@ export class Sampler extends WorkflowEntrypoint {
     // Sin poda de muestras huérfanas: games no pierde filas y todo lo que
     // inserta muestras sale de games (solo /api/admin/import podría dejarlas),
     // y buscarlas recorría `samples` entera (~50.000 filas al día).
-    if (want("maint") && daily.maint) {
-      await tryTask("maint");
+    if (want("maint") && daily.maint && await tryTask("maint")) {
       await safe("maint", async () => {
         const cutoff = ts - SAMPLE_RETENTION_DAYS * DAY_MIN;
         const oldDate = addDays(today, -DATA_RETENTION_DAYS);
@@ -550,10 +552,18 @@ export class Sampler extends WorkflowEntrypoint {
         const listed = await env.BUCKET.list({ prefix: RADAR_PREFIX, limit: 1000 });
         const keys = listed.objects.map(o => o.key).filter(k => k < old);
         if (keys.length) await env.BUCKET.delete(keys);
+        // Una pasada que se corta no llega a su `finish` y sus ficheros de
+        // tmp/run/ se quedaban para siempre. Los de otras pasadas con más de un
+        // día: una que sigue en marcha (la de la hora anterior) no se toca
+        const runs = await env.BUCKET.list({ prefix: RUN_PREFIX, limit: 1000 });
+        const stale = runs.objects
+          .filter(o => !o.key.startsWith(tmp) && o.uploaded && new Date(o.uploaded).getTime() < (ts - DAY_MIN) * 60000)
+          .map(o => o.key);
+        if (stale.length) await env.BUCKET.delete(stale);
         const oldRows = (res[3]?.meta?.changes ?? 0) + (res[4]?.meta?.changes ?? 0);
         return {
           pruned: res[0]?.meta?.changes ?? 0, untracked: res[1]?.meta?.changes ?? 0, old_rows: oldRows,
-          old_hist: res[5]?.meta?.changes ?? 0, radar_files: keys.length, written: written(res),
+          old_hist: res[5]?.meta?.changes ?? 0, radar_files: keys.length, tmp_files: stale.length, written: written(res),
         };
       });
     }
@@ -758,10 +768,7 @@ export function chooseSelection(rows, cfg = SELECTION) {
 export async function runSelect(env, step, nowMs, today, safe, summary) {
   const db = env.DB;
   // Los rangos, de los ids del radar (radarIds): sin recorrer games con ROW_NUMBER()
-  const plan = await safe("select-plan", async () => {
-    await migrateHist(db);   // radarSlice lee hist (por si esta ejecución no ha pasado por init)
-    return { ranges: idRanges(await radarIds(db, today), SELECT_SLICE) };
-  });
+  const plan = await safe("select-plan", async () => ({ ranges: idRanges(await radarIds(db, today), SELECT_SLICE) }));
   if (!plan) return null;
   const now = new Date(nowMs).toISOString();
   const rows = [];
@@ -848,7 +855,6 @@ export async function backfillFromRadar(env, ids, nowTs, { maxGames = BACKFILL_M
 export async function runExport(env, step, nowMs, safe, summary) {
   const db = env.DB;
   const plan = await safe("export-plan", async () => {
-    await migrateHist(db);   // el export lee hist (por si esta ejecución no ha pasado por init)
     const [lastTs, closed, radar, selIds] = await Promise.all([
       lastSampleTs(db), getState(db, "closed_day"), radarCounts(db), getState(db, "sel_ids"),
     ]);

@@ -1,6 +1,6 @@
 __pycache__/
 *.pyc
-# Los datos viven en el bucket R2 de Cloudflare (ver remote.py)
+# Los datos viven en D1 y R2 de Cloudflare (ver README)
 data/
 
 # Cloudflare (desarrollo local)

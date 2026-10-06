@@ -12,7 +12,7 @@ La interfaz entre piezas está en [`CONTRACT.md`](CONTRACT.md).
 | `src/sources.js` | Clientes de Rolimons, Explore, Search, Games, Votes, place→universe, iconos |
 | `src/db.js` | SQL: inserciones (`json_each`), cierre diario, tabla `hist`, export por trozos, historial, import |
 | `scripts/migrate_from_git.py` | Sube los datos actuales del repo (git o carpeta) a D1 por `/api/admin/import` |
-| `test/` | `dev.sh`/`sync.sh` (servidor local), `cpu_steps.mjs` (CPU por paso), `bench_rolimons.mjs`, `cf_loader.mjs`, `export.bench.mjs` (filas leídas y salida del export contra un D1 local), `filas.bench.mjs` (filas de D1 de pasadas completas, con topes), `cierre.parity.mjs` y `cierre.cpu.mjs` (el cierre del día: mismo resultado que antes y su CPU) |
+| `test/` | `dev.sh`/`sync.sh` (servidor local), `cpu_steps.mjs` (CPU por paso), `bench_rolimons.mjs`, `cf_loader.mjs`, `export.bench.mjs` (filas leídas y salida del export contra un D1 local), `filas.bench.mjs` (filas de D1 de pasadas completas, con topes), `cierre.parity.mjs` y `cierre.cpu.mjs` (el cierre del día: mismo resultado que antes y su CPU), `sources.test.mjs` (tope de tiempo de cada petición) |
 
 ## Desarrollo y pruebas en local
 
@@ -50,8 +50,9 @@ node --import ./test/cf_loader.mjs test/cierre.cpu.mjs       # close y close-rad
 cd cloudflare
 node --import ./test/cf_loader.mjs test/filas.bench.mjs todos     # filas de D1 por pasada: falla si se pasa de los topes
 node --import ./test/cf_loader.mjs test/cierre.parity.mjs         # el cierre da lo mismo que las consultas de antes
-node --test test/telegram.test.mjs                                # necesitan data/ en la raíz del repo (rama de datos:
-node test/metrics.parity.mjs --quick                              #  git archive <commit> data | tar -x) y python3
+node --test test/sources.test.mjs                                 # getJson: una petición colgada acaba en su tope (20 s)
+node --test test/telegram.test.mjs                                # necesitan data/ en la raíz del repo (los datos del
+node test/metrics.parity.mjs --quick                              #  03/10: git archive 99d2ee9 data | tar -x) y python3
 node test/horror.parity.mjs                                       # descarga de la Games API (o usa su caché)
 npx wrangler deploy --dry-run --outdir /tmp/dist                  # que empaqueta
 ```
@@ -67,9 +68,11 @@ pasada de las 00:00 y las de 01:00 a 03:00 (`--dia`: las 24 y la de las 00:00 de
 pasada pasa de su tope (`TOPES`, ~20 % sobre lo medido), si una consulta lee más de un 20 % (y más de
 10.000 filas) en `anio` que en `regimen` (recorre `daily` o `sort_hits` enteras), si un cierre que falla
 siempre repite el meta o se intenta más de `DAILY_TRIES` veces («cascada»), si dos pasadas que se cortan
-antes de las tareas del día les gastan los intentos («cortes») o si, al desplegar a media pasada, una
-ejecución encadenada del código de antes escribe en `hist` antes de migrar `state.hist_agg` o exporta sin
-sus datos («despliegue», con y sin el esquema aplicado). Para comparar con otra versión:
+antes de las tareas del día les gastan los intentos o si `maint` no borra lo que una pasada cortada hace
+más de un día dejó en `tmp/run/` («cortes»), si una tarea del día se hace sin haber podido apuntar su
+intento («sin intento»: sin apuntar no tiene tope), o si la primera pasada tras desplegar sobre una base con
+`state.hist_agg` deja `hist` distinta de la recalculada desde `daily` o exporta sin sus datos
+(«migración», con y sin el esquema aplicado). Para comparar con otra versión:
 `--src=<carpeta con su src/>`, y `--salida=<carpeta>` guarda el export y `telegram.json` de cada pasada
 (`cmp -r` entre versiones). `test/export.bench.mjs` acepta `--config=test/filas.wrangler.toml
 --persist=<copia de test/.filas/<escenario>/semilla>` para medir solo el export sobre esa base.
@@ -88,12 +91,11 @@ Fixtures de `cpu_steps.mjs`: `games_pages.json` y `votes_pages.json` (20 respues
 3. Nada más: la primera pasada copia `state.hist_agg` a `hist` y borra la clave (en su paso `init`, en un
    batch: las dos cosas o ninguna; repetirla no hace nada), y lee la marca vieja `day` mientras no exista
    `meta_day`, así que el día del despliegue no repite el meta, ni el cierre, ni select ni maint (sus marcas
-   ya son de hoy) y a las 00:00 los hace todos. Si al desplegar hay una pasada en marcha, sus ejecuciones
-   encadenadas pueden seguir con el código nuevo y el `init` de antes: migran antes de tocar `hist` (`close`, `close-hist`,
-   `select-plan` y `export-plan` también llaman a `migrateHist`). Si el código llegara antes que el esquema,
-   `migrateHist` crea la tabla. Mejor no desplegar entre las :00 y las :05 (cuando corre la pasada).
+   ya son de hoy) y a las 00:00 los hace todos. Si el código llegara antes que el esquema, `migrateHist`
+   crea la tabla. Mejor no desplegar entre las :00 y las :05 (cuando corre la pasada).
    Para comprobarlo: `GET /api/admin/status` enseña `meta_day`, `closed_day`, `maint_day` y `daily_tries`
-   (y `last_run.pendiente`, si alguna tarea del día se ha quedado sin intentos), y
+   (y `last_run.pendiente`, si alguna tarea del día se ha quedado sin intentos, y `last_run.sin_intento`, si
+   alguna no se ha hecho porque no se pudo apuntar su intento), y
    `wrangler d1 execute roblox-tracker --remote --command "SELECT COUNT(*) FROM hist"` da los juegos con
    filas diarias (~3.000) y `… "SELECT COUNT(*) FROM state WHERE key = 'hist_agg'"` da 0.
 4. Si una tarea del día se queda sin intentos (2 al día) y hay que repetirla hoy:
@@ -131,7 +133,7 @@ Workflow comparten invocación, y ni `step.sleep` ni los reintentos reinician la
 muestreo va en **ejecuciones encadenadas**: cada instancia gasta como mucho 46 peticiones (`Budget` de la
 invocación y un `SubBudget` por paso) y, cuando no le queda para la siguiente fase, crea la instancia
 `<base>-s<N>` con la fase y el cursor por los que seguir. Las listas intermedias van en R2 (`tmp/run/`) y
-se borran al terminar. Los pasos son idempotentes (`INSERT OR IGNORE`, UPSERT con
+se borran al terminar (lo de una pasada que se corta antes, en `maint` cuando tiene más de un día). Los pasos son idempotentes (`INSERT OR IGNORE`, UPSERT con
 `WHERE … IS NOT excluded…`), así que un reintento no duplica nada.
 
 **Trabajo en SQLite, no en el Worker.** Las filas viajan como un solo parámetro JSON (`json_each(?)`),
