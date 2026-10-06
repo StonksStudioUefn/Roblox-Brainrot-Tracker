@@ -472,14 +472,8 @@ export class Sampler extends WorkflowEntrypoint {
             const obj = await env.BUCKET.get(o.key);
             if (!obj) continue;
             const part = await obj.json();
-            Object.assign(votes, part.v || {});
-            if (Array.isArray(part.r) && part.r.length === RADAR_CLOSE_PARTS) part.r.forEach((m, k) => Object.assign(metaParts[k], m));
-            else {
-              // De una ejecución de antes: el meta sin repartir, o en otro nº de partes
-              for (const m of Array.isArray(part.r) ? part.r : [part.r || {}]) {
-                for (const id in m) metaParts[idPart(id, RADAR_CLOSE_PARTS)][id] = m[id];
-              }
-            }
+            Object.assign(votes, part.v);
+            part.r.forEach((m, k) => Object.assign(metaParts[k], m));
           }
         }
         const oldest = addDays(today, -SAMPLE_RETENTION_DAYS);
