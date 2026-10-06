@@ -523,7 +523,7 @@ export class Sampler extends WorkflowEntrypoint {
       await runSelect(env, step, ts * 60000, today, safe, summary);
     }
 
-    // ── maint: poda de muestras, untrack y ficheros viejos del radar ────────
+    // ── maint: poda de muestras, untrack, ficheros viejos del radar y de pasadas cortadas
     // Una vez al día (state.maint_day). Podar muestras recorre todos los juegos
     // (~6.000 filas leídas aunque solo borre una hora): cada hora eran ~150.000
     // al día y una vez ~20.000; a cambio las muestras duran hasta un día más
@@ -550,10 +550,18 @@ export class Sampler extends WorkflowEntrypoint {
         const listed = await env.BUCKET.list({ prefix: RADAR_PREFIX, limit: 1000 });
         const keys = listed.objects.map(o => o.key).filter(k => k < old);
         if (keys.length) await env.BUCKET.delete(keys);
+        // Una pasada que se corta no llega a su `finish` y sus ficheros de
+        // tmp/run/ se quedaban para siempre. Los de otras pasadas con más de un
+        // día: una que sigue en marcha (la de la hora anterior) no se toca
+        const runs = await env.BUCKET.list({ prefix: RUN_PREFIX, limit: 1000 });
+        const stale = runs.objects
+          .filter(o => !o.key.startsWith(tmp) && o.uploaded && new Date(o.uploaded).getTime() < (ts - DAY_MIN) * 60000)
+          .map(o => o.key);
+        if (stale.length) await env.BUCKET.delete(stale);
         const oldRows = (res[3]?.meta?.changes ?? 0) + (res[4]?.meta?.changes ?? 0);
         return {
           pruned: res[0]?.meta?.changes ?? 0, untracked: res[1]?.meta?.changes ?? 0, old_rows: oldRows,
-          old_hist: res[5]?.meta?.changes ?? 0, radar_files: keys.length, written: written(res),
+          old_hist: res[5]?.meta?.changes ?? 0, radar_files: keys.length, tmp_files: stale.length, written: written(res),
         };
       });
     }

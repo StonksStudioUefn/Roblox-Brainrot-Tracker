@@ -309,7 +309,8 @@ Solución (`sampler.js`):
   peticiones. Si no caben, se crea la siguiente ejecución (`<id>-s<N>`) con `phase` y `cursor`, y la
   actual termina. Las fases son discover → search → rolimons → resolve → sample → radar-api → finalize.
 - **Datos entre ejecuciones.** Las listas que necesita la siguiente ejecución (ids, places por resolver y
-  votos) van a R2 `tmp/run/<id>/` y se borran en `finish`.
+  votos) van a R2 `tmp/run/<id>/` y se borran en `finish` (lo de una pasada que se corta antes, en
+  `maint`, cuando tiene más de un día).
 - **Estado.** D1 `state.run_current` dice qué ejecución va ahora; `/api/admin/status` la enseña.
 
 Medido en producción:

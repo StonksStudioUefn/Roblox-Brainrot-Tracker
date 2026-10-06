@@ -67,7 +67,8 @@ pasada de las 00:00 y las de 01:00 a 03:00 (`--dia`: las 24 y la de las 00:00 de
 pasada pasa de su tope (`TOPES`, ~20 % sobre lo medido), si una consulta lee más de un 20 % (y más de
 10.000 filas) en `anio` que en `regimen` (recorre `daily` o `sort_hits` enteras), si un cierre que falla
 siempre repite el meta o se intenta más de `DAILY_TRIES` veces («cascada»), si dos pasadas que se cortan
-antes de las tareas del día les gastan los intentos («cortes») o si, al desplegar a media pasada, una
+antes de las tareas del día les gastan los intentos o si `maint` no borra lo que una pasada cortada hace
+más de un día dejó en `tmp/run/` («cortes»), o si, al desplegar a media pasada, una
 ejecución encadenada del código de antes escribe en `hist` antes de migrar `state.hist_agg` o exporta sin
 sus datos («despliegue», con y sin el esquema aplicado). Para comparar con otra versión:
 `--src=<carpeta con su src/>`, y `--salida=<carpeta>` guarda el export y `telegram.json` de cada pasada
@@ -131,7 +132,7 @@ Workflow comparten invocación, y ni `step.sleep` ni los reintentos reinician la
 muestreo va en **ejecuciones encadenadas**: cada instancia gasta como mucho 46 peticiones (`Budget` de la
 invocación y un `SubBudget` por paso) y, cuando no le queda para la siguiente fase, crea la instancia
 `<base>-s<N>` con la fase y el cursor por los que seguir. Las listas intermedias van en R2 (`tmp/run/`) y
-se borran al terminar. Los pasos son idempotentes (`INSERT OR IGNORE`, UPSERT con
+se borran al terminar (lo de una pasada que se corta antes, en `maint` cuando tiene más de un día). Los pasos son idempotentes (`INSERT OR IGNORE`, UPSERT con
 `WHERE … IS NOT excluded…`), así que un reintento no duplica nada.
 
 **Trabajo en SQLite, no en el Worker.** Las filas viajan como un solo parámetro JSON (`json_each(?)`),
