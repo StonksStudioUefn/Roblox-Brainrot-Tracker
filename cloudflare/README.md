@@ -69,7 +69,8 @@ pasada pasa de su tope (`TOPES`, ~20 % sobre lo medido), si una consulta lee má
 10.000 filas) en `anio` que en `regimen` (recorre `daily` o `sort_hits` enteras), si un cierre que falla
 siempre repite el meta o se intenta más de `DAILY_TRIES` veces («cascada»), si dos pasadas que se cortan
 antes de las tareas del día les gastan los intentos o si `maint` no borra lo que una pasada cortada hace
-más de un día dejó en `tmp/run/` («cortes»), o si la primera pasada tras desplegar sobre una base con
+más de un día dejó en `tmp/run/` («cortes»), si una tarea del día se hace sin haber podido apuntar su
+intento («sin intento»: sin apuntar no tiene tope), o si la primera pasada tras desplegar sobre una base con
 `state.hist_agg` deja `hist` distinta de la recalculada desde `daily` o exporta sin sus datos
 («migración», con y sin el esquema aplicado). Para comparar con otra versión:
 `--src=<carpeta con su src/>`, y `--salida=<carpeta>` guarda el export y `telegram.json` de cada pasada
@@ -93,7 +94,8 @@ Fixtures de `cpu_steps.mjs`: `games_pages.json` y `votes_pages.json` (20 respues
    ya son de hoy) y a las 00:00 los hace todos. Si el código llegara antes que el esquema, `migrateHist`
    crea la tabla. Mejor no desplegar entre las :00 y las :05 (cuando corre la pasada).
    Para comprobarlo: `GET /api/admin/status` enseña `meta_day`, `closed_day`, `maint_day` y `daily_tries`
-   (y `last_run.pendiente`, si alguna tarea del día se ha quedado sin intentos), y
+   (y `last_run.pendiente`, si alguna tarea del día se ha quedado sin intentos, y `last_run.sin_intento`, si
+   alguna no se ha hecho porque no se pudo apuntar su intento), y
    `wrangler d1 execute roblox-tracker --remote --command "SELECT COUNT(*) FROM hist"` da los juegos con
    filas diarias (~3.000) y `… "SELECT COUNT(*) FROM state WHERE key = 'hist_agg'"` da 0.
 4. Si una tarea del día se queda sin intentos (2 al día) y hay que repetirla hoy:

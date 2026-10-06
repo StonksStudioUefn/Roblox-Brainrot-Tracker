@@ -31,7 +31,8 @@
  * Y con `regimen` (salvo --sin-cascada): «cascada» (un cierre que falla
  * siempre), «cortes» (dos pasadas que se cortan antes de las tareas del día
  * no les gastan los intentos, y maint borra lo que deja en tmp/run/ una pasada
- * cortada hace más de un día) y «migración» (la primera pasada tras desplegar,
+ * cortada hace más de un día), «sin intento» (si no se puede apuntar el
+ * intento de una tarea del día, no se hace) y «migración» (la primera pasada tras desplegar,
  * con state.hist_agg, es la de las 00:00: hist tiene que acabar igual que
  * recalculada desde daily, con y sin el esquema aplicado).
  * --src=<carpeta> mide otra versión del código (p. ej. una copia de main) con
@@ -252,13 +253,17 @@ function seedRadar(bucket) {
 // ─── Contador de filas ──────────────────────────────────────────────────────
 function counting(raw, log, tagRef, fallos = new Set()) {
   const add = (sql, meta) => log.push({ tag: tagRef.tag, sql: sql.replace(/\s+/g, " ").trim().slice(0, 80), read: meta?.rows_read ?? 0, written: meta?.rows_written ?? 0 });
-  // fallos: pasos cuyos batch fallan; tagRef.corte: un paso en el que falla todo (la ejecución se corta)
+  // fallos: pasos cuyas escrituras (batch y run) fallan; tagRef.corte: un paso en el que falla todo (la ejecución se corta)
   const corte = () => { if (tagRef.corte && tagRef.tag === tagRef.corte) throw new Error(`corte simulado en ${tagRef.tag}`); };
   class Stmt {
     constructor(s, sql) { this.s = s; this.sql = sql; }
     bind(...a) { return new Stmt(this.s.bind(...a), this.sql); }
     async all() { corte(); const r = await this.s.all(); add(this.sql, r.meta); return r; }
-    async run() { corte(); const r = await this.s.run(); add(this.sql, r.meta); return r; }
+    async run() {
+      corte();
+      if (fallos.has(tagRef.tag)) throw new Error(`fallo simulado en ${tagRef.tag}`);
+      const r = await this.s.run(); add(this.sql, r.meta); return r;
+    }
     async raw(o) { return this.s.raw(o); }
     // first() de D1 no devuelve meta: se hace con all() para contar sus filas
     async first(col) { const row = (await this.all()).results[0]; return row ? (col ? row[col] : row) : null; }
@@ -468,6 +473,31 @@ if (scens.includes("regimen") && !flag("--sin-cascada")) {
     fail = true;
     out(`✗ tmp/run: ${extra.viejo ? "lo de una pasada cortada hace 2 días sigue ahí" : "bien lo viejo"}; ${extra.cortadas} ficheros de las cortadas de hoy (tienen que quedarse); ${extra.ultima} de la de las 02:00 (finish los borra)`);
   } else out(`✓ tmp/run: maint borra lo de una pasada cortada hace 2 días y deja lo de las de hace 1–2 h (${extra.cortadas} ficheros)`);
+}
+
+// Si no se puede apuntar el intento de una tarea del día (try-<tarea>), la
+// tarea no se hace en esa pasada: hecha sin apuntar no tiene tope. Aquí fallan
+// siempre los cuatro try-… y el cierre: antes se hacían las cuatro a las 00:00
+// y el cierre (que falla) se repetía cada hora, sin tope; ahora ninguna
+if (scens.includes("regimen") && !flag("--sin-cascada")) {
+  const tries = ["try-meta", "try-close", "try-select", "try-maint"];
+  const { runs } = await scenario("regimen", { hours: horas(4), fallos: new Set([...tries, "close"]), work: "sin-intento" });
+  out("\n══ sin intento: apuntar el intento falla siempre, y el cierre también (regimen) ══");
+  const did = r => [
+    r.q.some(x => x.sql.startsWith("UPDATE games SET place_id")) && "meta",
+    (r.q.some(x => x.tag === "close") || r.errors.some(e => e.startsWith("close:"))) && "cierre",
+    (r.q.some(x => x.tag === "select-plan") || r.errors.some(e => e.startsWith("select-plan:"))) && "select",
+    (r.q.some(x => x.tag === "maint") || r.errors.some(e => e.startsWith("maint:"))) && "maint",
+  ].filter(Boolean);
+  const day = runs.filter(r => r.hh !== "cal");
+  for (const r of runs) { out(`${r.iso.slice(0, 16)}  ${fmt(r.read).padStart(10)} leídas  ${did(r).join(" ") || "-"}`); if (VERBOSE) printRun(r); }
+  const hechas = day.flatMap(did);
+  const otros = day.flatMap(r => r.errors).filter(e => !tries.some(t => e.startsWith(`${t}:`)) && !e.startsWith("close:"));
+  const marcas = day.some(r => r.st.meta_day || r.st.daily_tries || r.st.closed_day !== D.addDays(DAY0, -1) || r.st.sel_day !== DAY0 || r.st.maint_day !== DAY0);
+  if (hechas.length || otros.length || marcas) {
+    fail = true;
+    out(`✗ sin intento: tareas hechas sin apuntar su intento: ${hechas.join(", ") || "ninguna"} (cierre en ${hechas.filter(x => x === "cierre").length} pasadas)${marcas ? "; marcas cambiadas" : ""}${otros.length ? `; ${otros.join(" | ").slice(0, 160)}` : ""}`);
+  } else out(`✓ sin intento: ninguna tarea del día sin su intento apuntado (${day.map(r => fmt(r.read)).join(" / ")} leídas)`);
 }
 
 // La primera pasada tras desplegar sobre una base con state.hist_agg es la de

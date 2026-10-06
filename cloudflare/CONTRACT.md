@@ -443,7 +443,8 @@ producción; ver README): la pasada de las 00:00 pasa de ~555.000–620.000 a ~1
   `sel_day`, `maint_day`) y como mucho `DAILY_TRIES` = 2 intentos al día (`daily_tries`). `init` solo
   decide cuáles tocan; el intento se cuenta en un paso `try-<tarea>` al empezar la tarea (el meta, al
   empezar sus trozos de `sample-N`): una pasada que se corta antes no gasta intentos y repetir `init` no
-  cuenta dos veces. Antes había una sola marca (`day`) que escribía el cierre: si el cierre fallaba, cada
+  cuenta dos veces. Si `try-<tarea>` falla, la tarea no se hace en esa pasada (sin apuntar no tendría
+  tope; sin el meta, `sample-N` va solo con los seguidos) y sale en `last_run.sin_intento`. Antes había una sola marca (`day`) que escribía el cierre: si el cierre fallaba, cada
   hora se repetían el meta de todo el radar, el cierre, select y maint (~450.000 filas por hora).
   `{"daily": true}` en `/api/admin/run` las fuerza todas y `{"daily": ["close"]}` solo las de la lista.
   Una tarea pendiente sin intentos sale en `last_run.pendiente`; el cierre recoge al día siguiente los días
