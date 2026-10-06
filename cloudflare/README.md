@@ -50,8 +50,8 @@ node --import ./test/cf_loader.mjs test/cierre.cpu.mjs       # close y close-rad
 cd cloudflare
 node --import ./test/cf_loader.mjs test/filas.bench.mjs todos     # filas de D1 por pasada: falla si se pasa de los topes
 node --import ./test/cf_loader.mjs test/cierre.parity.mjs         # el cierre da lo mismo que las consultas de antes
-node --test test/telegram.test.mjs                                # necesitan data/ en la raíz del repo (rama de datos:
-node test/metrics.parity.mjs --quick                              #  git archive <commit> data | tar -x) y python3
+node --test test/telegram.test.mjs                                # necesitan data/ en la raíz del repo (los datos del
+node test/metrics.parity.mjs --quick                              #  03/10: git archive 99d2ee9 data | tar -x) y python3
 node test/horror.parity.mjs                                       # descarga de la Games API (o usa su caché)
 npx wrangler deploy --dry-run --outdir /tmp/dist                  # que empaqueta
 ```
