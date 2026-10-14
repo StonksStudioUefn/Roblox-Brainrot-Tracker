@@ -3,11 +3,15 @@
  *
  * Lo llama el Workflow en cada muestreo. Decide solo qué toca enviar y guarda
  * lo enviado en el estado (D1 `state`, clave "telegram"):
- *   · alerta en cuanto aparece un emergente fuerte (una vez por juego, como
- *     mucho TELEGRAM.max_alerts_per_run por pasada), con su miniatura;
+ *   · alerta «PETANDO» cuando un juego nuevo pasa de muchos jugadores (ver
+ *     isBoom: TELEGRAM.alert_*), una vez por juego y como mucho
+ *     TELEGRAM.max_alerts_per_run por pasada, con su miniatura;
  *   · resumen diario desde TELEGRAM.report_hour_utc: un mensaje por categoría,
  *     con la miniatura del juego más destacado;
  *   · resumen semanal los lunes (misma hora).
+ * Telegram es más exclusivo que la web: los resúmenes solo listan juegos con
+ * TELEGRAM.report_min_players típicos o más, y una categoría sin ninguno no
+ * manda mensaje.
  * Los textos son EXACTAMENTE los de notifier.py (ver test/telegram.test.mjs).
  *
  * CPU (10 ms por paso en el plan gratis). En frío, buildDashboard de 150
@@ -24,7 +28,7 @@
  *     bajan incluidas). Si a runTelegram le llega el export completo, lo usa.
  *
  * Peticiones externas: como mucho 3 por mensaje (miniatura, sendPhoto y, si
- * la foto falla, sendMessage). Con 5 alertas + 2 diarios + 2 semanales son 27;
+ * la foto falla, sendMessage). Con 3 alertas + 2 diarios + 2 semanales son 21;
  * el tope duro es TELEGRAM_MAX_FETCH (50, el límite por invocación).
  *
  * Sin TELEGRAM_TOKEN o TELEGRAM_CHAT_ID no se envía nada: el mensaje sale por
@@ -125,13 +129,40 @@ export function todayLabel(now) {
   return `${DAYS[(d.getUTCDay() + 6) % 7]} ${dd}/${mm}`;
 }
 
+// ─── Qué merece un mensaje ────────────────────────────────────────────────────
+/**
+ * «Petando»: juego nuevo con muchos jugadores ahora y de forma sostenida, que
+ * no está cayendo. Vale para el resumen de buildDashboard y para las filas
+ * de quickMetrics (mismos campos: players, typical, age_days, status).
+ */
+export function isBoom(g) {
+  return (g.players || 0) >= TELEGRAM.alert_min_players
+    && (g.typical || 0) >= TELEGRAM.alert_min_typical
+    && g.age_days != null && g.age_days <= TELEGRAM.alert_max_age_days
+    && g.status !== "down" && g.status !== "down2";
+}
+
+/** Categoría de la alerta: la de su clasificador (horror) o, si no, la general. */
+export function alertCategory(cats, g) {
+  const keys = Object.keys(cats);
+  return keys.find(k => CATEGORIES[k]?.classifier === "horror" && g.horror)
+    ?? keys.find(k => CATEGORIES[k]?.classifier === "all") ?? keys[0];
+}
+
+/** Bastante grande para salir en los resúmenes diario y semanal. */
+const big = g => (g.typical || 0) >= TELEGRAM.report_min_players;
+
 // ─── Mensajes ─────────────────────────────────────────────────────────────────
-/** → [texto, id del juego para la miniatura | null] */
+/**
+ * → [texto, id del juego para la miniatura | null], o [null, null] si no hay
+ * ningún juego con TELEGRAM.report_min_players (ese día no se manda nada).
+ */
 export function dailyReport(key, cat, games, now) {
   const s = cat.stats, n = TELEGRAM.list_size;
-  const emerging = cat.emerging.slice(0, n).map(u => games[String(u)]);
+  const emerging = cat.emerging.map(u => games[String(u)]).filter(big).slice(0, n);
   const shown = new Set(emerging.map(g => g.id));
-  const trending = cat.trending.map(u => games[String(u)]).filter(g => !shown.has(g.id)).slice(0, n);
+  const trending = cat.trending.map(u => games[String(u)]).filter(g => big(g) && !shown.has(g.id)).slice(0, n);
+  if (!emerging.length && !trending.length) return [null, null];
 
   const lines = [
     `${cat.icon} <b>${h(cat.label.toUpperCase())}</b> · ${todayLabel(now)}`,
@@ -149,18 +180,20 @@ export function dailyReport(key, cat, games, now) {
     lines.push("", "🔥 <b>En tendencia</b>");
     trending.forEach((g, i) => lines.push(entry(i + 1, g, [], false)));
   }
-  if (!emerging.length && !trending.length) lines.push("", "Hoy no hay nada despegando. 😴");
   lines.push("", `📊 <a href="${DASHBOARD_URL}#cat=${key}">Abrir dashboard</a>`);
 
   const top = emerging[0] || trending[0] || null;
   return [lines.join("\n"), top?.id ?? null];
 }
 
+/** Como dailyReport: [null, null] si ningún juego llega a TELEGRAM.report_min_players. */
 export function weeklyReport(key, cat, games, now) {
-  const listed = cat.ids.map(u => games[String(u)]).filter(g => g.growth_7d !== null && g.growth_7d !== undefined);
+  const listed = cat.ids.map(u => games[String(u)])
+    .filter(g => big(g) && g.growth_7d !== null && g.growth_7d !== undefined);
   // sorted() de Python es estable, como Array.prototype.sort
   const up = [...listed].sort((a, b) => b.growth_7d - a.growth_7d).slice(0, TELEGRAM.list_size);
   const down = listed.filter(g => g.growth_7d < 0).sort((a, b) => a.growth_7d - b.growth_7d).slice(0, 3);
+  if (!up.length) return [null, null];
   const lines = [
     `📅 ${cat.icon} <b>${h(cat.label.toUpperCase())} · LA SEMANA</b>`,
     `<i>hasta el ${todayLabel(now)}</i>`,
@@ -175,16 +208,17 @@ export function weeklyReport(key, cat, games, now) {
   return [lines.join("\n"), up[0]?.id ?? null];
 }
 
+/** Alerta «PETANDO» (ver isBoom). */
 export function alertMessage(key, cat, g) {
   const creator = h(g.creator || "—") + (g.creator_verified ? " ✔" : "");
   const genre = h(g.subgenre || g.genre || "");
   const lines = [
-    `🌱 <b>NUEVO EMERGENTE</b> · ${cat.icon} ${h(cat.label)}`,
+    `🚀 <b>PETANDO</b> · ${cat.icon} ${h(cat.label)}`,
     "",
     `<b>${h(g.title)}</b>`,
     `<i>${creator}${genre ? " · " + genre : ""}</i>`,
     "",
-    `👥 <b>${num(g.typical)}</b> jugadores`,
+    `👥 <b>${num(g.players)}</b> jugadores ahora · ${num(g.typical)} de media en 24h`,
     growth(g, true) + (growth(g).endsWith("/día") && g.growth_24h != null ? ` · ${pct(g.growth_24h)} en 24h` : ""),
     `👁 ${num(g.visits)} visitas` + (g.visits_day ? ` · +${num(g.visits_day)}/día` : ""),
   ];
@@ -192,9 +226,10 @@ export function alertMessage(key, cat, g) {
   if (g.like_ratio != null) extra.push(`👍 ${pyFixed(g.like_ratio, 0)}%`);
   if (g.age_days != null) extra.push(`🗓 creado hace ${g.age_days} días`);
   if (extra.length) lines.push(extra.join(" · "));
+  if (g.emerging != null) {
+    lines.push("", `⭐ <b>${g.emerging}/100</b> — <i>${h((g.emerging_reasons || []).join(", "))}</i>`);
+  }
   lines.push(
-    "",
-    `⭐ <b>${g.emerging}/100</b> — <i>${h((g.emerging_reasons || []).join(", "))}</i>`,
     "",
     `▶️ <a href="https://www.roblox.com/games/${pyStr(g.place_id)}">Jugar</a>   ·   📊 ${cardLink(key, g, "Ver ficha")}`,
   );
@@ -257,7 +292,7 @@ const CATS = Object.entries(CATEGORIES);
  * (quickMetrics de metrics.js). Devuelve filas pequeñas y serializables, así
  * que se puede repartir el export entre varios pasos y juntar luego las filas
  * (ver telegramScanText / telegramReduce).
- * → [{ id, horror, typical, cat (bit por categoría), st, rising, momentum, g7, em }]
+ * → [{ id, horror, typical, cat (bit por categoría), st, rising, momentum, g7, em, boom }]
  */
 export function quickRows(games, { now } = {}) {
   const rows = [];
@@ -271,6 +306,7 @@ export function quickRows(games, { now } = {}) {
     rows.push({
       id: g.id, horror: g.horror ? 1 : 0, typical: m.typical, cat, st: STATUS_CODE[m.status],
       rising: isRising(m) ? 1 : 0, momentum: m.momentum, g7: m.growth_7d, em: em ? em[0] : null,
+      boom: isBoom(m) ? 1 : 0,
     });
   }
   return rows;
@@ -297,10 +333,13 @@ export function pickCandidates(rows) {
       .sort((a, b) => b.em - a.em).slice(0, PICK.emerging_top).forEach(r => picked.add(r.id));
     ids.filter(r => r.rising).sort((a, b) => b.momentum - a.momentum)
       .slice(0, PICK.trending_top).forEach(r => picked.add(r.id));
-    const w = ids.filter(r => r.g7 !== null);
+    // semanal: solo los juegos con TELEGRAM.report_min_players (como weeklyReport)
+    const w = ids.filter(r => r.g7 !== null && (r.typical || 0) >= TELEGRAM.report_min_players);
     [...w].sort((a, b) => b.g7 - a.g7).slice(0, PICK.weekly_up).forEach(r => picked.add(r.id));
     w.filter(r => r.g7 < 0).sort((a, b) => a.g7 - b.g7).slice(0, PICK.weekly_down).forEach(r => picked.add(r.id));
   });
+  // alertas «PETANDO»: todos los que cumplen (son pocos)
+  for (const r of rows) if (r.boom) picked.add(r.id);
   return { counts, ids: picked };
 }
 
@@ -564,14 +603,13 @@ export async function runTelegram({
   const dueWeekly = force === "weekly"
     || (weekday === 0 && hour >= TELEGRAM.report_hour_utc && state.last_weekly !== week);
 
-  // Atajo (6 de cada 8 pasadas): sin diario ni semanal, solo hace falta
-  // buildDashboard si algún juego aún sin avisar puede llegar a alerta. El
-  // cálculo reducido da el mismo score que metrics.js (test/telegram.test.mjs);
-  // se deja un margen de 5 puntos.
-  if (quickExit && !dueDaily && !dueWeekly) {
-    const alerted = state.alerted || {};
+  // Atajo (casi todas las pasadas): sin diario ni semanal, solo hace falta
+  // buildDashboard si algún juego aún sin avisar está petando. quickRows usa
+  // las mismas métricas que metrics.js (test/telegram.test.mjs). Sin
+  // state.boom (primera pasada) nunca: hay que apuntar los que ya petan.
+  if (quickExit && !dueDaily && !dueWeekly && state.boom) {
     const maybe = quickRows(reduced.games || [], { now: nowD })
-      .some(r => r.em !== null && r.em >= TELEGRAM.alert_min_score - 5 && !(String(r.id) in alerted));
+      .some(r => r.boom && !(String(r.id) in state.boom));
     if (!maybe) return { ...result, skipped: "sin alertas posibles", fetches: 0 };
   }
 
@@ -587,27 +625,36 @@ export async function runTelegram({
   };
 
   try {
-    // Alertas de emergentes (una sola vez por juego, aunque esté en dos categorías)
-    const alerted = (state.alerted ||= {});
-    for (const [key, cat] of Object.entries(cats)) {
-      for (const uid of cat.emerging) {
-        const g = games[String(uid)];
-        if (g.emerging >= TELEGRAM.alert_min_score && !(String(uid) in alerted)
-            && result.alerts < TELEGRAM.max_alerts_per_run) {
-          result.messages++;
-          if (await client.send(...alertMessage(key, cat, g))) {
-            alerted[String(uid)] = today;
-            result.alerts++;
-          }
-        }
+    // Alertas «PETANDO»: una sola vez por juego, los de más jugadores primero.
+    // La primera pasada (sin state.boom: recién desplegado) apunta sin avisar
+    // los que ya están petando: no son noticia.
+    const seeding = !state.boom;
+    const boomed = (state.boom ||= {});
+    if (seeding) delete state.alerted;   // las alertas de emergentes de antes
+    const booming = Object.values(games).filter(g => isBoom(g) && !(String(g.id) in boomed))
+      .sort((a, b) => (b.players - a.players) || (a.id - b.id));
+    for (const g of booming) {
+      if (seeding) {
+        boomed[String(g.id)] = today;
+        continue;
+      }
+      if (result.alerts >= TELEGRAM.max_alerts_per_run) break;
+      const key = alertCategory(cats, g);
+      result.messages++;
+      if (await client.send(...alertMessage(key, cats[key], g))) {
+        boomed[String(g.id)] = today;
+        result.alerts++;
       }
     }
+    if (seeding) result.seeded = booming.length;
 
     if (dueDaily) {
       const ok = [];
       for (const [key, cat] of Object.entries(cats)) {
+        const [text, id] = dailyReport(key, cat, games, nowD);
+        if (!text) continue;
         result.messages++;
-        ok.push(await client.send(...dailyReport(key, cat, games, nowD)));
+        ok.push(await client.send(text, id));
       }
       result.daily = ok.every(Boolean);
       if (result.daily) state.last_daily = today;
@@ -616,8 +663,10 @@ export async function runTelegram({
     if (dueWeekly) {
       const ok = [];
       for (const [key, cat] of Object.entries(cats)) {
+        const [text, id] = weeklyReport(key, cat, games, nowD);
+        if (!text) continue;
         result.messages++;
-        ok.push(await client.send(...weeklyReport(key, cat, games, nowD)));
+        ok.push(await client.send(text, id));
       }
       result.weekly = ok.every(Boolean);
       if (result.weekly) state.last_weekly = week;

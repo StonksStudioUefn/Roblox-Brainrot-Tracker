@@ -8,7 +8,8 @@
  *   --daily / --weekly, y la ejecución normal sin credenciales, que guarda
  *   estado) para el mismo `now` (test/notifier_ref.py).
  * · Estado: no repite alertas ni el diario/semanal; con un envío fallido no
- *   marca nada.
+ *   marca nada; la primera pasada (sin state.boom) apunta sin avisar los
+ *   juegos que ya están petando.
  * · Envío: foto + pie; si la foto falla o no hay miniatura, texto; más de 1024
  *   caracteres visibles → texto sin pedir miniatura; nunca más de 50 fetch.
  * · Prefiltro (si existen test/make_export.py y src/metrics.js): con el export
@@ -25,7 +26,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  alertMessage, dailyReport, headerCounts, isoWeek, num, pct, pyFixed, quickRows, runTelegram,
+  alertMessage, dailyReport, headerCounts, isBoom, isoWeek, num, pct, pyFixed, quickRows, runTelegram,
   telegramCandidates, telegramReduce, telegramScanText, visibleLen, weeklyReport,
 } from "../src/telegram.js";
 import { buildDashboard } from "../src/metrics.js";
@@ -99,13 +100,17 @@ function mockFetch({ thumb = "ok", photo = 200, message = 200 } = {}) {
 const sortKeys = o => (o && typeof o === "object" && !Array.isArray(o)
   ? Object.fromEntries(Object.keys(o).sort().map(k => [k, sortKeys(o[k])])) : o);
 
-// Dashboard con más emergentes fuertes (para el tope de 5 alertas y los duplicados)
-function strongDashboard(n = 7) {
+// Dashboard con n juegos más petando (para el tope de alertas). En DASH ya
+// hay uno (Anime Dice: 64K jugadores, creado hace 48 días).
+function boomDashboard(n = 7) {
   const d = clone(DASH);
-  const gen = d.categories.general.emerging;
-  gen.slice(0, n).forEach((u, i) => { d.games[String(u)].emerging = 75 + i; });
+  d.categories.general.emerging.slice(0, n).forEach((u, i) => {
+    Object.assign(d.games[String(u)], { players: 50_000 + i * 1000, typical: 30_000, age_days: 30, status: "up" });
+  });
   return d;
 }
+const BOOM_IDS = d => Object.values(d.games).filter(isBoom).map(g => String(g.id));
+const NO_BOOM = { boom: {} };   // estado ya desplegado: sin apuntar a nadie
 
 // ─── Formato ──────────────────────────────────────────────────────────────────
 test("formato de números, porcentajes y semana ISO = Python", () => {
@@ -135,10 +140,12 @@ print(json.dumps([date.fromisoformat(d).strftime("%G-W%V") for d in json.load(sy
 test("visibleLen = notifier.visible_len en todos los mensajes", () => {
   const msgs = [];
   for (const [key, cat] of Object.entries(DASH.categories)) {
-    msgs.push(dailyReport(key, cat, DASH.games, new Date("2026-10-03T19:00:00Z"))[0]);
-    msgs.push(weeklyReport(key, cat, DASH.games, new Date("2026-10-05T19:00:00Z"))[0]);
+    const d = boomDashboard(24);
+    msgs.push(dailyReport(key, cat, d.games, new Date("2026-10-03T19:00:00Z"))[0]);
+    msgs.push(weeklyReport(key, cat, d.games, new Date("2026-10-05T19:00:00Z"))[0]);
     for (const u of cat.emerging) msgs.push(alertMessage(key, cat, DASH.games[String(u)])[0]);
   }
+  assert.ok(msgs.every(m => m !== null));
   msgs.push("a &amp; b &lt;i&gt; <b>x</b> &amp;amp; 😴");
   const py = JSON.parse(execFileSync(PY, ["-c", `
 import json,sys
@@ -160,16 +167,17 @@ for (const [now, args, force] of [
     const r = await js({ now, state: STATE_JSON, force });
     // --dry-run imprime sin guardar; aquí sin credenciales también se imprime igual
     assert.equal(r.stdout, py.stdout);
-    assert.ok(py.messages.length >= 2);
+    assert.ok(py.messages.length >= 1);
   });
 }
 
 for (const [label, now, state, dash] of [
-  ["sábado 19:00, estado vacío (alertas + diario)", "2026-10-03T19:00:00Z", {}, DASH],
-  ["lunes 18:30, estado vacío (alertas + diario + semanal)", "2026-10-05T18:30:00Z", {}, DASH],
+  ["sábado 19:00, estado vacío (apunta sin avisar + diario)", "2026-10-03T19:00:00Z", {}, boomDashboard(4)],
+  ["sábado 19:00, ya desplegado (alertas + diario)", "2026-10-03T19:00:00Z", NO_BOOM, DASH],
+  ["lunes 18:30, ya desplegado (alertas + diario + semanal)", "2026-10-05T18:30:00Z", NO_BOOM, DASH],
   ["lunes, estado de data/state.json", "2026-10-05T18:30:00Z", STATE_JSON, DASH],
-  ["7 emergentes ≥ 70: tope de 5 alertas", "2026-10-03T19:00:00Z", {}, strongDashboard(7)],
-  ["antes de las 18:00: solo alertas", "2026-10-03T12:00:00Z", {}, DASH],
+  ["8 petando: tope de 3 alertas", "2026-10-03T19:00:00Z", NO_BOOM, boomDashboard(7)],
+  ["antes de las 18:00: solo alertas", "2026-10-03T12:00:00Z", NO_BOOM, DASH],
 ]) {
   test(`ejecución normal sin credenciales = notifier.py: ${label}`, async () => {
     const py = python({ now, state, dashboard: dash });
@@ -181,7 +189,7 @@ for (const [label, now, state, dash] of [
     const r2 = await js({ now, state: r.state, dashboard: dash });
     assert.equal(r2.stdout, py2.stdout);
     if (label.includes("tope")) {
-      assert.equal(r.res.alerts, 5);
+      assert.equal(r.res.alerts, 3);
       assert.ok(r2.res.alerts > 0, "las que no cupieron salen en la siguiente pasada");
     } else {
       assert.equal(r2.stdout, "");
@@ -189,11 +197,54 @@ for (const [label, now, state, dash] of [
   });
 }
 
+test("primera pasada: los que ya petan se apuntan sin avisar; los nuevos sí avisan", async () => {
+  const d = boomDashboard(2);
+  const r = await js({ now: "2026-10-03T12:00:00Z", state: { alerted: { 1: "2026-10-02" }, last_daily: "x" }, dashboard: d });
+  assert.equal(r.res.alerts, 0);
+  assert.equal(r.res.seeded, 3);
+  assert.equal(r.stdout, "");
+  assert.deepEqual(Object.keys(r.state.boom).sort(), BOOM_IDS(d).sort());
+  assert.equal(r.state.alerted, undefined, "las alertas de emergentes de antes se borran");
+  // Un juego que empieza a petar después sí avisa
+  const d2 = boomDashboard(3);
+  const r2 = await js({ now: "2026-10-03T13:00:00Z", state: r.state, dashboard: d2 });
+  assert.equal(r2.res.alerts, 1);
+  assert.match(r2.stdout, /🚀 <b>PETANDO<\/b>/);
+  // Juegos que no cuentan: viejos, cayendo, pico de una hora o por debajo
+  const g = d2.games[String(d2.categories.general.emerging[0])];
+  for (const [k, v] of [["age_days", 121], ["age_days", null], ["status", "down"], ["status", "down2"],
+    ["typical", 19_999], ["players", 39_999]]) {
+    assert.equal(isBoom({ ...g, [k]: v }), false, `${k} = ${v}`);
+  }
+  assert.equal(isBoom({ ...g, status: "new", age_days: 120, players: 40_000, typical: 20_000 }), true);
+});
+
+test("resúmenes: solo juegos con 10K típicos; una categoría sin ninguno no manda mensaje", () => {
+  const now = new Date("2026-10-05T19:00:00Z");
+  for (const [key, cat] of Object.entries(DASH.categories)) {
+    for (const report of [dailyReport, weeklyReport]) {
+      const [text] = report(key, cat, DASH.games, now);
+      if (text === null) continue;
+      const shown = [...text.matchAll(/games\/(\d+)"/g)].map(m => m[1]);
+      for (const pid of shown) {
+        const g = Object.values(DASH.games).find(x => String(x.place_id) === pid);
+        assert.ok(g.typical >= 10_000, `${g.title}: ${g.typical}`);
+      }
+    }
+  }
+  // En DASH ningún emergente ni «en tendencia» de horror llega a 10K: sin diario
+  assert.deepEqual(dailyReport("horror", DASH.categories.horror, DASH.games, now), [null, null]);
+  const none = { ...DASH.categories.horror, ids: DASH.categories.horror.ids.filter(u => DASH.games[String(u)].typical < 10_000) };
+  assert.deepEqual(weeklyReport("horror", none, DASH.games, now), [null, null]);
+});
+
 test("con credenciales y fetch simulado: mismos textos y fotos que notifier.py", async () => {
   const now = "2026-10-05T18:30:00Z";
-  const py = python({ now, state: {} });
+  const dash = boomDashboard(2);
+  const py = python({ now, state: NO_BOOM, dashboard: dash });
   const m = mockFetch();
-  const r = await js({ now, state: {}, env: { TELEGRAM_TOKEN: TOKEN, TELEGRAM_CHAT_ID: "123" }, fetch: m.f });
+  const r = await js({ now, state: NO_BOOM, dashboard: dash, env: { TELEGRAM_TOKEN: TOKEN, TELEGRAM_CHAT_ID: "123" }, fetch: m.f });
+  assert.equal(r.res.alerts, 3);
   const photos = m.calls.filter(c => c.url.endsWith("/sendPhoto"));
   assert.deepEqual(photos.map(c => c.body.caption), py.messages.map(x => x[0]));
   // la miniatura pedida es la del juego que elige notifier.py
@@ -216,7 +267,7 @@ test("foto rechazada → mismo texto con sendMessage (sin vista previa)", async 
   const r = await js({ now: "2026-10-03T19:00:00Z", state: STATE_JSON, env: ENV, fetch: m.f });
   const msgs = m.calls.filter(c => c.url.endsWith("/sendMessage"));
   const photos = m.calls.filter(c => c.url.endsWith("/sendPhoto"));
-  assert.equal(msgs.length, 2);
+  assert.equal(msgs.length, 1);   // solo general: en horror no hay juegos de 10K
   assert.deepEqual(msgs.map(c => c.body.text), photos.map(c => c.body.caption));
   for (const c of msgs) assert.deepEqual(c.body.link_preview_options, { is_disabled: true });
   assert.equal(r.res.daily, true);
@@ -228,37 +279,39 @@ test("sin miniatura (o caída) → texto, sin sendPhoto", async () => {
     const m = mockFetch({ thumb });
     const r = await js({ now: "2026-10-03T19:00:00Z", state: STATE_JSON, env: ENV, fetch: m.f });
     assert.equal(m.calls.filter(c => c.url.endsWith("/sendPhoto")).length, 0);
-    assert.equal(m.calls.filter(c => c.url.endsWith("/sendMessage")).length, 2);
+    assert.equal(m.calls.filter(c => c.url.endsWith("/sendMessage")).length, 1);
     assert.equal(r.res.daily, true);
   }
 });
 
 test("si Telegram falla no se marca como enviado (se reintenta en la siguiente pasada)", async () => {
   const m = mockFetch({ photo: 500, message: 500 });
-  const r = await js({ now: "2026-10-03T19:00:00Z", state: {}, env: ENV, fetch: m.f });
+  const r = await js({ now: "2026-10-03T19:00:00Z", state: NO_BOOM, dashboard: boomDashboard(4), env: ENV, fetch: m.f });
   assert.equal(r.res.alerts, 0);
   assert.equal(r.res.daily, false);
-  assert.deepEqual(r.state ?? { alerted: {} }, { alerted: {} });
-  // 4 alertas (+1: el juego que está en las dos categorías se reintenta en la
-  // segunda, como en notifier.py) + 2 diarios, 3 peticiones cada uno
+  assert.deepEqual(r.state ?? NO_BOOM, NO_BOOM);
+  // 5 alertas (cada fallo deja probar el siguiente) + 2 diarios, 3 peticiones cada uno
   assert.equal(m.calls.length, 7 * 3);
 });
 
 test("límite de 1024 caracteres visibles del pie de foto", async () => {
   const base = clone(DASH);
   const uid = String(base.categories.general.emerging[0]);
-  const only = { ...base, categories: { general: { ...base.categories.general, emerging: [Number(uid)], trending: [] } } };
+  const only = {
+    ...base, games: { [uid]: base.games[uid] },
+    categories: { general: { ...base.categories.general, ids: [Number(uid)], emerging: [Number(uid)], trending: [] } },
+  };
   const fit = async len => {
     const d = clone(only);
     const g = d.games[uid];
-    g.emerging = 99;
+    Object.assign(g, { emerging: 99, players: 50_000, typical: 30_000, age_days: 30, status: "up" });
     g.creator = "";
     const probe = alertMessage("general", d.categories.general, g)[0];
     g.creator = "x".repeat(len - visibleLen(probe) + 1);   // "—" (1) → len caracteres
     const msg = alertMessage("general", d.categories.general, g)[0];
     assert.equal(visibleLen(msg), len);
     const m = mockFetch();
-    await js({ now: "2026-10-03T12:00:00Z", state: {}, dashboard: d, env: ENV, fetch: m.f });
+    await js({ now: "2026-10-03T12:00:00Z", state: NO_BOOM, dashboard: d, env: ENV, fetch: m.f });
     return m.calls.map(c => c.url.split("?")[0].split("/").pop());
   };
   assert.deepEqual(await fit(1024), ["thumbnails", "sendPhoto"]);
@@ -266,20 +319,24 @@ test("límite de 1024 caracteres visibles del pie de foto", async () => {
 });
 
 test("nunca más de 50 fetch, ni con todo forzado y todo fallando", async () => {
-  // 24 emergentes ≥ 70 en las dos categorías, lunes, diario + semanal, fotos rechazadas
+  // 24 juegos petando en las dos categorías, lunes, diario + semanal, fotos rechazadas
   const d = clone(DASH);
   const ids = Object.keys(d.games).slice(0, 24).map(Number);
-  for (const key of Object.keys(d.categories)) d.categories[key].emerging = ids;
-  ids.forEach(u => { d.games[String(u)].emerging = 90; });
+  for (const key of Object.keys(d.categories)) {
+    d.categories[key].emerging = ids;
+    d.categories[key].ids = ids;
+  }
+  ids.forEach(u => Object.assign(d.games[String(u)], { emerging: 90, players: 50_000, typical: 30_000, age_days: 30, status: "up", growth_7d: 50 }));
   const m = mockFetch({ photo: 400 });
-  const r = await js({ now: "2026-10-05T19:00:00Z", state: {}, dashboard: d, env: ENV, fetch: m.f });
-  assert.equal(r.res.alerts, 5);
-  assert.equal(m.calls.length, (5 + 2 + 2) * 3);   // 27
+  const r = await js({ now: "2026-10-05T19:00:00Z", state: NO_BOOM, dashboard: d, env: ENV, fetch: m.f });
+  assert.equal(r.res.alerts, 3);
+  assert.equal(r.res.messages, 3 + 2 + 2);
+  assert.equal(m.calls.length, (3 + 2 + 2) * 3);   // 21
   // Con un tope artificial de 10 se para limpio y no marca lo no enviado
   const m2 = mockFetch({ photo: 400 });
-  const r2 = await js({ now: "2026-10-05T19:00:00Z", state: {}, dashboard: d, env: ENV, fetch: m2.f, maxFetch: 10 });
+  const r2 = await js({ now: "2026-10-05T19:00:00Z", state: NO_BOOM, dashboard: d, env: ENV, fetch: m2.f, maxFetch: 10 });
   assert.equal(m2.calls.length, 10);
-  assert.ok(r2.res.alerts <= 4);
+  assert.ok(r2.res.alerts <= 3);
   assert.equal(r2.res.daily, false);
   assert.equal(r2.state.last_daily, undefined);
 });
@@ -310,11 +367,14 @@ test("estado: diario una vez al día, semanal una vez por semana ISO", async () 
 });
 
 test("cabecera con `totals` del backend: con y sin suben/bajan", async () => {
+  // Un juego de horror con 10K para que también salga el diario de horror
+  const dash = clone(DASH);
+  dash.games[String(dash.categories.horror.trending[0])].typical = 12_000;
   const run = async totals => {
     const lines = [];
     await runTelegram({
       env: {}, now: "2026-10-03T19:00:00Z", force: "daily", exportData: { totals, games: [] },
-      buildDashboard: () => clone(DASH), getState: async () => clone(STATE_JSON), setState: async () => {},
+      buildDashboard: () => clone(dash), getState: async () => clone(STATE_JSON), setState: async () => {},
       log: x => lines.push(x),
     });
     return lines.filter(l => l.startsWith("🎮") || l.startsWith("👻")).map(l => l.split("\n")[1]);
@@ -343,8 +403,8 @@ for (const now of NOWS) {
     for (const r of quickRows(ex.games, { now })) {
       const g = full.games[String(r.id)];
       if (!g) continue;
-      assert.deepEqual([r.typical, ST[r.st], r.momentum, r.g7, r.em !== null && r.em >= 45 ? r.em : null],
-        [g.typical, g.status, g.momentum, g.growth_7d, g.emerging], `juego ${r.id}`);
+      assert.deepEqual([r.typical, ST[r.st], r.momentum, r.g7, r.em !== null && r.em >= 45 ? r.em : null, !!r.boom],
+        [g.typical, g.status, g.momentum, g.growth_7d, g.emerging, isBoom(g)], `juego ${r.id}`);
     }
     // 2. Cabeceras = las de buildDashboard con todos los juegos
     const red = telegramCandidates(ex, { now });
@@ -371,7 +431,9 @@ for (const now of NOWS) {
     const a = await msgs(red), b = await msgs(ex);
     assert.equal(a, b);
     // 5. El atajo sin diario/semanal no cambia nada: con estado vacío y con todo avisado
-    for (const st of [{}, { alerted: Object.fromEntries(full.categories.general.emerging.map(u => [String(u), "x"])) }]) {
+    const boomed = Object.values(full.games).filter(isBoom);
+    for (const g of boomed) assert.ok(red.games.some(x => x.id === g.id), `${g.title} petando y fuera de los candidatos`);
+    for (const st of [{}, NO_BOOM, { boom: Object.fromEntries(boomed.map(g => [String(g.id), "x"])) }]) {
       const pass = async quickExit => {
         const lines = [];
         const r = await runTelegram({
