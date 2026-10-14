@@ -39,13 +39,13 @@ if (process.argv[2] === "--child") {
     if (mode === "candidates") {
       tg.telegramCandidates(data, { now });
     } else if (mode === "quiet") {
-      const alerted = Object.fromEntries(data.games.map(g => [String(g.id), "x"]));
-      await tg.runTelegram({ ...quiet, exportData: data, getState: async () => ({ alerted, last_daily: now.slice(0, 10) }) });
+      const boom = Object.fromEntries(data.games.map(g => [String(g.id), "x"]));
+      await tg.runTelegram({ ...quiet, exportData: data, getState: async () => ({ boom, last_daily: now.slice(0, 10) }) });
     } else if (mode === "normal") {
-      await tg.runTelegram({ ...quiet, exportData: data, getState: async () => ({ last_daily: now.slice(0, 10) }) });
+      await tg.runTelegram({ ...quiet, exportData: data, getState: async () => ({ last_daily: now.slice(0, 10) }), quickExit: false });
     } else {
       await tg.runTelegram({ ...quiet, exportData: data, force: "daily", getState: async () => ({}) });
-      await tg.runTelegram({ ...quiet, exportData: data, force: "weekly", getState: async () => ({ alerted: {} }) });
+      await tg.runTelegram({ ...quiet, exportData: data, force: "weekly", getState: async () => ({ boom: {} }) });
     }
     return [c1 - c0, cpu() - c1];
   };

@@ -28,7 +28,7 @@ En cada muestreo el Workflow:
    - **cierra el día anterior**: mediana, media, mín y máx de las muestras de los seguidos y de las lecturas del radar del resto;
    - **elige los juegos seguidos** de hoy (ver abajo).
 5. **Genera el export** para la web (solo los seguidos) y la lista de candidatos para Telegram. Borra las muestras de más de 8 días y, una vez al día, los días y puestos en listas de **más de un año**.
-6. **Telegram**: alertas de emergentes, resumen diario (desde las 18:00 UTC) y semanal.
+6. **Telegram**: alerta «PETANDO» (juego nuevo con ≥ 40K jugadores), resumen diario (desde las 18:00 UTC) y semanal.
 
 El plan gratuito permite 50 peticiones externas por invocación, así que el muestreo se reparte en varias ejecuciones encadenadas (1–2 en una pasada normal y unas 4–5 en la primera del día).
 
@@ -145,7 +145,11 @@ Los mensajes llegan al grupo del equipo. Para cambiar de bot o de chat:
 2. Añade el bot al grupo, escribe algo y copia el `chat.id` de `https://api.telegram.org/bot<TOKEN>/getUpdates`.
 3. En Cloudflare: **Workers → roblox-tracker → Settings → Variables and Secrets** → cambia `TELEGRAM_TOKEN` y `TELEGRAM_CHAT_ID`.
 
-Los mensajes están pensados para el móvil: el resumen diario es un mensaje por categoría con la miniatura del juego más destacado, y cada juego ocupa dos líneas (nombre / jugadores · crecimiento). Las alertas de emergentes llevan su miniatura, sus datos y enlaces para jugar y ver la ficha.
+Los mensajes están pensados para el móvil: el resumen diario es un mensaje por categoría con la miniatura del juego más destacado, y cada juego ocupa dos líneas (nombre / jugadores · crecimiento).
+
+Telegram es más exclusivo que la web (límites en `TELEGRAM` de `cloudflare/src/config.js`):
+- **Alerta «🚀 PETANDO»**, una vez por juego y de cualquier género: juego creado hace ≤ 120 días, con **≥ 40K jugadores ahora** y ≥ 20K de media en 24 h (no un pico de una hora), que no está cayendo. Como mucho 3 por pasada. Lleva su miniatura, sus datos y enlaces para jugar y ver la ficha. Con los datos del 2 al 13/10/2026 sale ~1 al día (la alerta de emergentes anterior mandaba ~14).
+- **Resúmenes diario y semanal**: solo juegos con ≥ 10K jugadores típicos; si una categoría no tiene ninguno, ese día no manda mensaje.
 
 ## Limitaciones
 

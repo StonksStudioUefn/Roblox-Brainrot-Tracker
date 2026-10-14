@@ -264,12 +264,16 @@ El dashboard calcula los días de evento con `flagEvents`.
 `pickCandidates` de `telegram.js`, y el resultado es R2 `data/telegram.json`; ver el paso 8 del muestreo.)
 
 `telegram.js` pasa a `buildDashboard()` un export reducido. Tiene solo los juegos que pueden salir en los
-mensajes:
-- emergentes posibles: visits < max_visits y típico ≥ 300 (o en `up-and-coming`);
-- top 60 por crecimiento de 24 h y top 60 por típico.
+mensajes (`pickCandidates`), por categoría:
+- los 30 mejores emergentes y los 18 «en tendencia» con más momentum;
+- semanal: los 8 que más crecen y los 6 que más caen en 7 días, entre los de `TELEGRAM.report_min_players`
+  típicos o más (los resúmenes solo listan juegos de ese tamaño);
+- y todos los que están petando (`isBoom`: alerta «PETANDO», ver `TELEGRAM.alert_*` en `config.js`).
 
-Son unos 150 juegos y el cálculo cuesta ~4 ms. El estado (`alerted`, `last_daily`, `last_weekly`) se guarda
-en D1 `state`, clave `telegram`. Los secrets son `TELEGRAM_TOKEN` y `TELEGRAM_CHAT_ID`.
+Son unos 25–40 juegos. El estado (`boom`: juegos ya avisados, `last_daily`, `last_weekly`) se guarda en D1
+`state`, clave `telegram`; sin `boom` (primera pasada tras el cambio de octubre de 2026, que sustituyó la
+alerta de emergentes y su clave `alerted`) se apuntan sin avisar los que ya están petando. Los secrets son
+`TELEGRAM_TOKEN` y `TELEGRAM_CHAT_ID`.
 
 ## Notas del backend (cambios respecto a la primera versión)
 

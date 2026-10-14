@@ -3,11 +3,14 @@ notifier.py — Avisos por Telegram a partir de data/dashboard.json.
 
 Como el tracker corre varias veces al día, el notificador decide solo qué
 toca enviar (y guarda en data/state.json lo ya enviado):
-  · Alerta en cuanto aparece un emergente fuerte (una vez por juego), con su
-    miniatura (se pide a Roblox en el momento de enviar).
+  · Alerta «PETANDO» cuando un juego nuevo pasa de muchos jugadores (ver
+    is_boom), una vez por juego, con su miniatura (se pide a Roblox en el
+    momento de enviar).
   · Resumen diario a partir de REPORT_HOUR_UTC: un mensaje por categoría, con
     la miniatura del juego más destacado.
   · Resumen semanal los lunes.
+Telegram es más exclusivo que la web: los resúmenes solo listan juegos con
+REPORT_MIN_PLAYERS típicos o más, y una categoría sin ninguno no manda mensaje.
 
 Los mensajes están pensados para el móvil: cada juego ocupa dos líneas
 cortas (nombre / datos) y ningún juego se repite dentro de un mensaje.
@@ -34,8 +37,12 @@ import requests
 from config import DASHBOARD_PATH, STATE_PATH
 
 REPORT_HOUR_UTC = 18          # el resumen diario sale en la primera ejecución desde esta hora
-ALERT_MIN_SCORE = 70          # emergentes con esta puntuación generan alerta instantánea
-MAX_ALERTS_PER_RUN = 5
+# Alerta «PETANDO» (una vez por juego, de cualquier género)
+ALERT_MIN_PLAYERS = 40_000    # jugadores AHORA
+ALERT_MIN_TYPICAL = 20_000    # y típicos (mediana 24 h): sostenido, no un pico de una hora
+ALERT_MAX_AGE_DAYS = 120      # juego nuevo, no un clásico de siempre
+MAX_ALERTS_PER_RUN = 3
+REPORT_MIN_PLAYERS = 10_000   # los resúmenes solo listan juegos con estos jugadores típicos
 LIST_SIZE = 5                 # juegos por sección
 TITLE_CHARS = 30              # para que el nombre quepa en una línea del móvil
 CAPTION_LIMIT = 1024          # límite de Telegram para el texto de una foto
@@ -104,13 +111,37 @@ def today_label(now) -> str:
     return f"{DAYS[now.weekday()]} {now:%d/%m}"
 
 
+# ─── Qué merece un mensaje ─────────────────────────────────────────────────────
+def is_boom(g) -> bool:
+    """«Petando»: juego nuevo con muchos jugadores ahora y de forma sostenida,
+    que no está cayendo."""
+    return ((g.get("players") or 0) >= ALERT_MIN_PLAYERS
+            and (g.get("typical") or 0) >= ALERT_MIN_TYPICAL
+            and g.get("age_days") is not None and g["age_days"] <= ALERT_MAX_AGE_DAYS
+            and g.get("status") not in ("down", "down2"))
+
+
+def big(g) -> bool:
+    return (g.get("typical") or 0) >= REPORT_MIN_PLAYERS
+
+
+def alert_category(cats, g) -> str:
+    """La categoría de horror si el juego es de horror; si no, la general."""
+    if g.get("horror") and "horror" in cats:
+        return "horror"
+    return "general" if "general" in cats else next(iter(cats))
+
+
 # ─── Mensajes ──────────────────────────────────────────────────────────────────
-def daily_report(key, cat, games, now) -> tuple[str, str | None]:
-    """Devuelve (texto, url de la imagen de cabecera)."""
+def daily_report(key, cat, games, now) -> tuple[str | None, str | None]:
+    """Devuelve (texto, id del juego de la miniatura), o (None, None) si no hay
+    ningún juego con REPORT_MIN_PLAYERS (ese día no se manda nada)."""
     s = cat["stats"]
-    emerging = [games[str(u)] for u in cat["emerging"][:LIST_SIZE]]
+    emerging = [g for g in (games[str(u)] for u in cat["emerging"]) if big(g)][:LIST_SIZE]
     shown = {g["id"] for g in emerging}
-    trending = [games[str(u)] for u in cat["trending"] if games[str(u)]["id"] not in shown][:LIST_SIZE]
+    trending = [g for g in (games[str(u)] for u in cat["trending"]) if big(g) and g["id"] not in shown][:LIST_SIZE]
+    if not emerging and not trending:
+        return None, None
 
     lines = [
         f"{cat['icon']} <b>{h(cat['label'].upper())}</b> · {today_label(now)}",
@@ -122,18 +153,18 @@ def daily_report(key, cat, games, now) -> tuple[str, str | None]:
     if trending:
         lines += ["", "🔥 <b>En tendencia</b>"]
         lines += [entry(i, g, medals=False) for i, g in enumerate(trending, 1)]
-    if not emerging and not trending:
-        lines += ["", "Hoy no hay nada despegando. 😴"]
     lines += ["", f'📊 <a href="{DASHBOARD_URL}#cat={key}">Abrir dashboard</a>']
 
     top = (emerging or trending or [None])[0]
     return "\n".join(lines), (top or {}).get("id")
 
 
-def weekly_report(key, cat, games, now) -> tuple[str, str | None]:
-    listed = [games[str(u)] for u in cat["ids"] if games[str(u)].get("growth_7d") is not None]
+def weekly_report(key, cat, games, now) -> tuple[str | None, str | None]:
+    listed = [g for g in (games[str(u)] for u in cat["ids"]) if big(g) and g.get("growth_7d") is not None]
     up = sorted(listed, key=lambda g: -g["growth_7d"])[:LIST_SIZE]
     down = sorted((g for g in listed if g["growth_7d"] < 0), key=lambda g: g["growth_7d"])[:3]
+    if not up:
+        return None, None
     lines = [
         f"📅 {cat['icon']} <b>{h(cat['label'].upper())} · LA SEMANA</b>",
         f"<i>hasta el {today_label(now)}</i>",
@@ -148,15 +179,16 @@ def weekly_report(key, cat, games, now) -> tuple[str, str | None]:
 
 
 def alert(key, cat, g) -> tuple[str, str | None]:
+    """Alerta «PETANDO» (ver is_boom)."""
     creator = h(g.get("creator") or "—") + (" ✔" if g.get("creator_verified") else "")
     genre = h(g.get("subgenre") or g.get("genre") or "")
     lines = [
-        f"🌱 <b>NUEVO EMERGENTE</b> · {cat['icon']} {h(cat['label'])}",
+        f"🚀 <b>PETANDO</b> · {cat['icon']} {h(cat['label'])}",
         "",
         f"<b>{h(g['title'])}</b>",
         f"<i>{creator}{' · ' + genre if genre else ''}</i>",
         "",
-        f"👥 <b>{num(g['typical'])}</b> jugadores",
+        f"👥 <b>{num(g.get('players'))}</b> jugadores ahora · {num(g['typical'])} de media en 24h",
         f"{growth(g, arrow=True)}" + (f" · {pct(g['growth_24h'])} en 24h"
                                       if growth(g).endswith("/día") and g.get("growth_24h") is not None else ""),
         f"👁 {num(g['visits'])} visitas" + (f" · +{num(g['visits_day'])}/día" if g.get("visits_day") else ""),
@@ -168,9 +200,9 @@ def alert(key, cat, g) -> tuple[str, str | None]:
         extra.append(f"🗓 creado hace {g['age_days']} días")
     if extra:
         lines.append(" · ".join(extra))
+    if g.get("emerging") is not None:
+        lines += ["", f"⭐ <b>{g['emerging']}/100</b> — <i>{h(', '.join(g.get('emerging_reasons') or []))}</i>"]
     lines += [
-        "",
-        f"⭐ <b>{g['emerging']}/100</b> — <i>{h(', '.join(g.get('emerging_reasons') or []))}</i>",
         "",
         f'▶️ <a href="https://www.roblox.com/games/{g["place_id"]}">Jugar</a>   ·   📊 {card_link(key, g, "Ver ficha")}',
     ]
@@ -239,26 +271,38 @@ def main():
     now = datetime.now(timezone.utc)
     today, week = now.date().isoformat(), now.strftime("%G-W%V")
 
-    # Alertas de emergentes (una sola vez por juego, aunque esté en dos categorías)
-    alerted = state.setdefault("alerted", {})
+    # Alertas «PETANDO»: una sola vez por juego, los de más jugadores primero.
+    # La primera vez (sin "boom" en el estado) se apuntan sin avisar los que ya
+    # están petando: no son noticia.
+    seeding = "boom" not in state
+    boomed = state.setdefault("boom", {})
+    if seeding:
+        state.pop("alerted", None)   # las alertas de emergentes de antes
+    booming = sorted((g for g in games.values() if is_boom(g) and str(g["id"]) not in boomed),
+                     key=lambda g: (-g["players"], g["id"]))
     sent = 0
-    for key, cat in cats.items():
-        for uid in cat["emerging"]:
-            g = games[str(uid)]
-            if g["emerging"] >= ALERT_MIN_SCORE and str(uid) not in alerted and sent < MAX_ALERTS_PER_RUN:
-                if send(*alert(key, cat, g), dry):
-                    alerted[str(uid)] = today
-                    sent += 1
+    for g in booming:
+        if seeding:
+            boomed[str(g["id"])] = today
+            continue
+        if sent >= MAX_ALERTS_PER_RUN:
+            break
+        key = alert_category(cats, g)
+        if send(*alert(key, cats[key], g), dry):
+            boomed[str(g["id"])] = today
+            sent += 1
+
+    def send_all(build):
+        msgs = [build(key, cat, games, now) for key, cat in cats.items()]
+        return all([send(text, gid, dry) for text, gid in msgs if text])
 
     if "--daily" in args or (now.hour >= REPORT_HOUR_UTC and state.get("last_daily") != today):
-        ok = [send(*daily_report(key, cat, games, now), dry) for key, cat in cats.items()]
-        if all(ok):
+        if send_all(daily_report):
             state["last_daily"] = today
 
     if "--weekly" in args or (now.weekday() == 0 and now.hour >= REPORT_HOUR_UTC
                               and state.get("last_weekly") != week):
-        ok = [send(*weekly_report(key, cat, games, now), dry) for key, cat in cats.items()]
-        if all(ok):
+        if send_all(weekly_report):
             state["last_weekly"] = week
 
     if not dry:

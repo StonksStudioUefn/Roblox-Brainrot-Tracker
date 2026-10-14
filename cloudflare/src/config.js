@@ -125,10 +125,21 @@ export const EVENTS = {
 };
 
 // ─── Telegram ─────────────────────────────────────────────────────────────────
+// Telegram es más exclusivo que la web: solo avisa de juegos que ya están
+// petando. Con los datos del 2 al 13/10/2026 (D1), la alerta antigua
+// (emergente ≥ 70 puntos, desde 300 jugadores) mandó ~170 avisos en 12 días;
+// con estos límites salen ~1 por día (todos los géneros), de juegos con
+// 40K-120K jugadores.
 export const TELEGRAM = {
   report_hour_utc: 18,     // el resumen diario sale en el primer muestreo desde esta hora
-  alert_min_score: 70,     // emergentes con esta puntuación generan alerta (una vez por juego)
-  max_alerts_per_run: 5,
+  // Alerta «PETANDO» (una vez por juego, de cualquier género):
+  alert_min_players: 40_000,   // jugadores AHORA (última muestra)
+  alert_min_typical: 20_000,   // y jugadores típicos (mediana 24 h): sostenido, no un pico de una hora
+  alert_max_age_days: 120,     // juego nuevo (creado hace ≤ 120 días), no un clásico de siempre
+  max_alerts_per_run: 3,
+  // Resúmenes diario y semanal: solo juegos con al menos estos jugadores típicos.
+  // Una categoría sin ninguno no manda mensaje ese día.
+  report_min_players: 10_000,
   list_size: 5,
   title_chars: 30,
   dashboard_url: "https://robloxtracker.stonksstudio.com/",
