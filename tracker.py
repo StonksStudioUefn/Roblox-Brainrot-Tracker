@@ -1,23 +1,4 @@
-"""
-tracker.py — Toma una muestra de todos los juegos de Roblox con jugadores.
-
-Cada ejecución:
-  1. Descarga la lista de Rolimons (todos los juegos con su player count).
-  2. Se queda con los que tienen ≥ TRACK_MIN_PLAYERS.
-  3. Traduce place_id → universe_id (con caché en data/games.json).
-  4. Enriquece con la API oficial: nombre, creador, género, fechas,
-     visitas, favoritos y likes. Con la descripción se calcula aquí la
-     clasificación de horror, pero la descripción no se guarda.
-  5. Añade una muestra a data/raw/HOY.csv y recalcula data/daily/MES.csv.
-
-Solo se guarda lo básico (números, nombre, géneros, fechas). Las
-descripciones, iconos y miniaturas las pide el Worker a Roblox al momento.
-Está pensado para correr varias veces al día: con varias muestras diarias
-un evento puntual no ensucia la media.
-
-Uso:
-  python tracker.py
-"""
+"""Muestra de Roblox varias veces al día: con varias muestras, un evento suelto no ensucia la mediana."""
 
 import sys
 import time
@@ -43,7 +24,6 @@ SESSION.headers["User-Agent"] = "roblox-tracker/2.0"
 
 
 def get_json(url: str, params=None, retries: int = 6, timeout: int = 20):
-    """GET con reintentos y backoff. Devuelve el JSON o None."""
     for attempt in range(retries):
         try:
             r = SESSION.get(url, params=params, timeout=timeout)
@@ -65,7 +45,6 @@ def batched(items: list, size: int):
         yield items[i:i + size]
 
 
-# ─── Fuentes ───────────────────────────────────────────────────────────────────
 def fetch_rolimons() -> dict[int, tuple[str, int]]:
     data = get_json(ROLIMONS_GAMELIST, timeout=30)
     if not data or not data.get("games"):
@@ -80,7 +59,7 @@ def fetch_rolimons() -> dict[int, tuple[str, int]]:
 
 
 def resolve_universes(place_ids: list[int]) -> dict[int, int]:
-    """place_id → universe_id. Solo se llama para places que no están en caché."""
+    """Solo para places que no están en la caché."""
     def one(pid):
         data = get_json(PLACE_UNIVERSE_API.format(pid), timeout=10)
         return pid, (data or {}).get("universeId")
@@ -109,7 +88,6 @@ def fetch_batched(url: str, ids: list[int], size: int, extra_params=None,
     return out
 
 
-# ─── Pipeline ──────────────────────────────────────────────────────────────────
 def run():
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     ts = now.strftime("%Y-%m-%dT%H:%MZ")

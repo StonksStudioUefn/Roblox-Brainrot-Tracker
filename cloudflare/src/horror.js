@@ -1,26 +1,7 @@
-/**
- * horror.js — Clasificación de horror y limpieza de títulos.
- *
- * Port fiel de analytics.py (`clean_title`, `_kw_regex`, `horror_score`,
- * `is_horror`, `_has_strong`). Módulo ES sin dependencias salvo config.js:
- * lo usan el Workflow (meta diario, con la descripción) y el navegador.
- *
- * Diferencias de Python `re` / `str` que se cuidan aquí:
- *  · Las regex con caracteres fuera del BMP llevan flag `u`, y las longitudes
- *    (`{1,30}`, `len(t) <= 12`, `len(title)`) se cuentan en code points.
- *  · `\s` y `str.strip()` de Python no son los de JS (Python incluye
- *    \x1c-\x1f y \x85; JS incluye ﻿): se usa la clase exacta de Python.
- *  · `str.strip(chars)` se reimplementa (JS no tiene equivalente).
- *
- * Rendimiento: cada palabra clave se busca primero con `includes` (búsqueda
- * nativa muy rápida) y solo si aparece se aplica la regex con el
- * lookbehind `(?<![a-z0-9])`. El resultado es idéntico: si la palabra no es
- * subcadena, la regex no puede coincidir.
- */
+// Port fiel de analytics.py: \s, strip() y len() de Python no son los de JS (clase, flag u).
 
 import { HORROR } from "./config.js";
 
-// ─── Títulos ──────────────────────────────────────────────────────────────────
 // Mismos rangos que EMOJI_RE de analytics.py
 const EMOJI_SRC =
   "[\\u{1F000}-\\u{1FAFF}\\u{2600}-\\u{27BF}\\u{1F1E6}-\\u{1F1FF}" +
@@ -37,7 +18,6 @@ const PY_WS_SET = new Set(
     0x2028, 0x2029, 0x202f, 0x205f, 0x3000].map(c => String.fromCharCode(c)),
 );
 
-/** `str.strip(chars)` de Python; sin `chars`, quita los espacios de Python. */
 const STRIP_SETS = new Map();
 export function pyStrip(s, chars) {
   let set = PY_WS_SET;
@@ -52,14 +32,12 @@ export function pyStrip(s, chars) {
   return s.slice(a, b);
 }
 
-/** `str.rstrip()` de Python (espacios). */
 export function pyRstrip(s) {
   let b = s.length;
   while (b > 0 && PY_WS_SET.has(s[b - 1])) b--;
   return s.slice(0, b);
 }
 
-/** Longitud en code points (= `len()` de Python). */
 export function pyLen(s) {
   let n = 0;
   for (let i = 0; i < s.length; i++) {
@@ -73,7 +51,6 @@ export function pyLen(s) {
   return n;
 }
 
-/** '[⚙️UPD 6] Anime Dice 🎲' → ['Anime Dice', ['UPD 6']]. */
 // Sin '[', '(' ni caracteres no ASCII no puede haber etiquetas ni emojis
 const NEEDS_FULL_TITLE = /[\[\(\u0080-\uffff]/;
 
@@ -95,7 +72,6 @@ export function cleanTitle(name) {
   return [title, tags.slice(0, 3)];
 }
 
-// ─── Clasificación de horror ──────────────────────────────────────────────────
 function escapeRe(w) {
   return w.replace(/[.*+?^${}()|[\]\\\/-]/g, "\\$&");
 }
@@ -105,8 +81,7 @@ function kwList(words) {
   return words.map(w => ({ w, rx: new RegExp("(?<![a-z0-9])" + escapeRe(w)) }));
 }
 
-// Las ~100 regex de referencia se compilan solo si se usan (en frío cada
-// milisegundo de arranque cuenta)
+// Se compilan solo si se usan: en frío cuenta cada ms de arranque.
 let H_CACHE = null;
 const refLists = () => {
   if (!H_CACHE) {
@@ -120,9 +95,7 @@ const FORCE_IN = new Set(HORROR.force_include.map(Number));
 const FORCE_OUT = new Set(HORROR.force_exclude.map(Number));
 const own = (obj, k) => k != null && Object.prototype.hasOwnProperty.call(obj, k);
 
-// Referencia: lo mismo que analytics.py, palabra a palabra con su regex.
-// Se usa si alguna palabra clave no es ASCII (el escáner rápido no vale) y en
-// las pruebas de paridad.
+// Referencia palabra a palabra, como analytics.py: horror.parity.mjs la compara con el escáner.
 const refMatcher = {
   first(key, text) {
     for (const kw of refLists()[key]) if (text.includes(kw.w) && kw.rx.test(text)) return kw.w;
@@ -135,15 +108,7 @@ const refMatcher = {
   },
 };
 
-// ─── Búsqueda rápida (resultado idéntico a las regex de una en una) ─────────
-// En vez de probar cada palabra con su regex, una sola regex con todas las
-// palabras de varias listas (en forma de árbol de prefijos) encuentra cada
-// posición del texto en minúsculas donde empieza alguna, y en esa posición se
-// comprueba con `startsWith` qué palabras de las que empiezan por esa letra
-// están ahí. Tras cada coincidencia se sigue desde la posición siguiente, así
-// que no se pierden palabras solapadas ("being hunted" / "hunted by").
-// Es exacto: si una palabra coincide en p, la alternativa de la regex también
-// coincide en p (la alternancia prueba todas las ramas).
+// Exacto: tras cada acierto sigue en p+1 y no pierde solapadas («being hunted» / «hunted by»).
 
 function trieSource(words) {
   const root = {};
@@ -216,7 +181,6 @@ function scanMatcher(sc, text) {
 const NAME_SCAN = makeScanner(["name_strong", "name_weak", "name_negative"]);
 const DESC_SCAN = makeScanner(["desc_strong", "desc_weak"]);
 
-/** Port de `horror_score` + `is_horror` (+ `_has_strong`), en una sola pasada. */
 export function classifyHorror(game, { reference = false } = {}) {
   const g = game || {};
   const uid = Number(g.universe_id ?? g.id);
@@ -259,7 +223,6 @@ export function classifyHorror(game, { reference = false } = {}) {
     reasons.push(`género: ${genre.replace(/\/+$/, "")}`);
   }
 
-  // La descripción, después del nombre (los dos escáneres reutilizan sus marcas)
   const desc = (g.description || "").toLowerCase();
   const dm = fast ? scanMatcher(DESC_SCAN, desc) : refMatcher;
   const ds = dm.all("desc_strong", desc);
@@ -273,7 +236,6 @@ export function classifyHorror(game, { reference = false } = {}) {
     if (!ds.length) reasons.push("descripción: " + dw.slice(0, 2).join(", "));
   }
 
-  // _has_strong: nombre fuerte, etiqueta, descripción fuerte o género antiguo
   const strong = Boolean(hit || tag || ds.length || legacy);
   return { horror: score >= HORROR.threshold && strong, score, reasons };
 }

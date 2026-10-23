@@ -1,20 +1,4 @@
-/**
- * metrics.bench.mjs — CPU de buildDashboard() con 150 y 1.000 juegos.
- *
- *   node cloudflare/test/metrics.bench.mjs [export.json]
- *
- * Cada medida corre en un proceso NUEVO (como un isolate frío del Worker):
- * JSON.parse del export + la primera llamada (fría, sin JIT) + la mediana de
- * 20 llamadas en caliente. CPU con process.cpuUsage() (usuario + sistema).
- *
- * Conjuntos:
- *   real    juegos del export dado (por defecto, make_export.py de data/ ahora:
- *           la mayoría tienen solo 2-3 días de serie todavía);
- *   steady  sintético "en régimen": 21 días de serie y 16 muestras (cada 3 h)
- *           por juego, con algún pico, que es lo que habrá en unas semanas.
- * Para 150 se usa el prefiltro de Telegram del contrato (emergentes posibles +
- * top 60 por crecimiento 24 h + top 60 por típico).
- */
+// node test/metrics.bench.mjs [export.json] — CPU de buildDashboard (150 y 1.000 juegos), un proceso nuevo por medida.
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -24,7 +8,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.resolve(HERE, '../src');
 
-// ─── Modo hijo: mide un fichero ───────────────────────────────────────────────
 if (process.argv[2] === '--child') {
   const [file, metricsUrl, now] = process.argv.slice(3);
   const cpu = () => { const u = process.cpuUsage(); return (u.user + u.system) / 1000; };
@@ -44,7 +27,6 @@ if (process.argv[2] === '--child') {
   process.exit(0);
 }
 
-// ─── Datos ────────────────────────────────────────────────────────────────────
 function rng(seed) { return () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648); }
 
 function steadyExport(n, nowMs) {
@@ -73,11 +55,7 @@ function steadyExport(n, nowMs) {
   return { generated_at: new Date(nowMs).toISOString().slice(0, 19) + 'Z', last_sample: new Date((nowMin - 3) * 60000).toISOString().slice(0, 16) + 'Z', samples_24h: 8, games };
 }
 
-/**
- * Prefiltro de Telegram (contrato), aproximado con el propio export:
- * emergentes posibles (visitas < 30M y típico ≥ 300, o en up-and-coming) +
- * top 60 por crecimiento de 24 h + top 60 por típico; como mucho `max`.
- */
+// Aproxima el prefiltro de Telegram con el propio export.
 function telegramSubset(E, max = 150) {
   const med = a => { const b = [...a].sort((x, y) => x - y); return b.length ? b[b.length >> 1] : 0; };
   const rows = E.games.map(g => {

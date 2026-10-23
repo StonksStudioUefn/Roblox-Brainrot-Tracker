@@ -1,39 +1,4 @@
-/**
- * telegram.js — Avisos por Telegram (port de notifier.py).
- *
- * Lo llama el Workflow en cada muestreo. Decide solo qué toca enviar y guarda
- * lo enviado en el estado (D1 `state`, clave "telegram"):
- *   · alerta «PETANDO» cuando un juego nuevo pasa de muchos jugadores (ver
- *     isBoom: TELEGRAM.alert_*), una vez por juego y como mucho
- *     TELEGRAM.max_alerts_per_run por pasada, con su miniatura;
- *   · resumen diario desde TELEGRAM.report_hour_utc: un mensaje por categoría,
- *     con la miniatura del juego más destacado;
- *   · resumen semanal los lunes (misma hora).
- * Telegram es más exclusivo que la web: los resúmenes solo listan juegos con
- * TELEGRAM.report_min_players típicos o más, y una categoría sin ninguno no
- * manda mensaje.
- * Los textos son EXACTAMENTE los de notifier.py (ver test/telegram.test.mjs).
- *
- * CPU (10 ms por paso en el plan gratis). En frío, buildDashboard de 150
- * juegos ya cuesta ~10 ms y parsear el export completo otros 6–12, así que
- * `runTelegram` trabaja con un export REDUCIDO (~60–80 juegos):
- *   · lo normal: `data/telegram.json`, que el backend genera en SQL en el paso
- *     export (mismo formato que el export + `totals` con las cifras de
- *     cabecera de cada categoría). Se usa tal cual: buildDashboard solo con
- *     esos juegos y la cabecera de `totals` (si no trae suben/bajan, la línea
- *     se queda en "N juegos": contarlos sobre los candidatos saldría mal);
- *   · respaldo y pruebas: `telegramCandidates(export)` (o, repartido en varios
- *     pasos, `telegramScanText` + `telegramReduce`) reduce el export completo
- *     con las mismas fórmulas que metrics.js, y da cabeceras EXACTAS (suben y
- *     bajan incluidas). Si a runTelegram le llega el export completo, lo usa.
- *
- * Peticiones externas: como mucho 3 por mensaje (miniatura, sendPhoto y, si
- * la foto falla, sendMessage). Con 3 alertas + 2 diarios + 2 semanales son 21;
- * el tope duro es TELEGRAM_MAX_FETCH (50, el límite por invocación).
- *
- * Sin TELEGRAM_TOKEN o TELEGRAM_CHAT_ID no se envía nada: el mensaje sale por
- * console.log y cuenta como enviado (igual que notifier.py), para no repetir.
- */
+// Port de notifier.py: los textos son EXACTAMENTE los suyos (test/telegram.test.mjs).
 
 import { CATEGORIES, EMERGING, TELEGRAM } from "./config.js";
 import { buildDashboard as metricsBuildDashboard, isRising, quickMetrics } from "./metrics.js";
@@ -47,17 +12,11 @@ const DAYS = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"];
 const DAY_MS = 864e5;
 const DASHBOARD_URL = TELEGRAM.dashboard_url;
 
-// ─── Formato (como notifier.py) ───────────────────────────────────────────────
-/** html.escape(str(s or ""), quote=False) */
 export function h(s) {
   return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/**
- * f"{x:.{d}f}" de Python: redondea el valor binario exacto y, en el empate
- * exacto, al par (toFixed de JS va al mayor). Solo hay empate si x·2^(d+1) es
- * un entero impar.
- */
+// toFixed de JS va al mayor en el empate; Python, al par.
 export function pyFixed(x, d) {
   if (Object.is(x, -0)) return "-" + (0).toFixed(d);
   const q = x * 2 ** (d + 1);
@@ -81,7 +40,6 @@ export function num(n) {
   return String(Math.trunc(n));
 }
 
-/** f"{p:+.0f}%" */
 export function pct(p) {
   if (p === null || p === undefined) return "—";
   const s = pyFixed(p, 0);
@@ -95,7 +53,6 @@ export function short(title) {
   return pyRstrip(Array.from(title).slice(0, TELEGRAM.title_chars - 1).join("")) + "…";
 }
 
-/** str() de Python para ids (None si falta). */
 const pyStr = v => (v === null || v === undefined ? "None" : v === true ? "True" : v === false ? "False" : String(v));
 
 const gameLink = g =>
@@ -103,7 +60,6 @@ const gameLink = g =>
 
 const cardLink = (key, g, text) => `<a href="${DASHBOARD_URL}#cat=${key}&amp;game=${pyStr(g.id)}">${text}</a>`;
 
-/** La tendencia diaria; si es casi plana o no existe, el cambio de 24 h. */
 export function growth(g, arrow = false) {
   const t = g.trend ?? null, g24 = g.growth_24h ?? null;
   let value, unit;
@@ -114,7 +70,6 @@ export function growth(g, arrow = false) {
   return `${icon}${pct(value)}${unit}`;
 }
 
-/** Dos líneas: '🥇 Nombre' y '      └ 👥 39K · +33%/día · …'. */
 function entry(i, g, extra = [], medals = true) {
   const mark = medals ? ({ 1: "🥇", 2: "🥈", 3: "🥉" }[i] ?? `${i}.`) : `${i}.`;
   const stats = [`👥 ${num(g.typical)}`, growth(g), ...extra].join(" · ");
@@ -122,19 +77,12 @@ function entry(i, g, extra = [], medals = true) {
   return `${mark} ${gameLink(g)}${flag}\n      └ ${stats}`;
 }
 
-/** "vie 03/10" (UTC) */
 export function todayLabel(now) {
   const d = toDate(now);
   const dd = String(d.getUTCDate()).padStart(2, "0"), mm = String(d.getUTCMonth() + 1).padStart(2, "0");
   return `${DAYS[(d.getUTCDay() + 6) % 7]} ${dd}/${mm}`;
 }
 
-// ─── Qué merece un mensaje ────────────────────────────────────────────────────
-/**
- * «Petando»: juego nuevo con muchos jugadores ahora y de forma sostenida, que
- * no está cayendo. Vale para el resumen de buildDashboard y para las filas
- * de quickMetrics (mismos campos: players, typical, age_days, status).
- */
 export function isBoom(g) {
   return (g.players || 0) >= TELEGRAM.alert_min_players
     && (g.typical || 0) >= TELEGRAM.alert_min_typical
@@ -142,17 +90,14 @@ export function isBoom(g) {
     && g.status !== "down" && g.status !== "down2";
 }
 
-/** Categoría de la alerta: la de su clasificador (horror) o, si no, la general. */
 export function alertCategory(cats, g) {
   const keys = Object.keys(cats);
   return keys.find(k => CATEGORIES[k]?.classifier === "horror" && g.horror)
     ?? keys.find(k => CATEGORIES[k]?.classifier === "all") ?? keys[0];
 }
 
-/** Bastante grande para salir en los resúmenes diario y semanal. */
 const big = g => (g.typical || 0) >= TELEGRAM.report_min_players;
 
-// ─── Mensajes ─────────────────────────────────────────────────────────────────
 /**
  * → [texto, id del juego para la miniatura | null], o [null, null] si no hay
  * ningún juego con TELEGRAM.report_min_players (ese día no se manda nada).
@@ -166,8 +111,7 @@ export function dailyReport(key, cat, games, now) {
 
   const lines = [
     `${cat.icon} <b>${h(cat.label.toUpperCase())}</b> · ${todayLabel(now)}`,
-    // Sin cifras fiables de suben/bajan (export reducido sin ellas) se omiten:
-    // mejor nada que un número contado solo sobre los candidatos
+    // Sin suben/bajan fiables se omiten: mejor nada que contarlos solo sobre los candidatos.
     s.rising == null || s.falling == null
       ? `<i>${s.games} juegos</i>`
       : `<i>${s.games} juegos · 📈 ${s.rising} suben · 📉 ${s.falling} bajan</i>`,
@@ -186,7 +130,6 @@ export function dailyReport(key, cat, games, now) {
   return [lines.join("\n"), top?.id ?? null];
 }
 
-/** Como dailyReport: [null, null] si ningún juego llega a TELEGRAM.report_min_players. */
 export function weeklyReport(key, cat, games, now) {
   const listed = cat.ids.map(u => games[String(u)])
     .filter(g => big(g) && g.growth_7d !== null && g.growth_7d !== undefined);
@@ -208,7 +151,6 @@ export function weeklyReport(key, cat, games, now) {
   return [lines.join("\n"), up[0]?.id ?? null];
 }
 
-/** Alerta «PETANDO» (ver isBoom). */
 export function alertMessage(key, cat, g) {
   const creator = h(g.creator || "—") + (g.creator_verified ? " ✔" : "");
   const genre = h(g.subgenre || g.genre || "");
@@ -247,7 +189,6 @@ export function visibleLen(message) {
   return pyLen(text);
 }
 
-// ─── Fechas ───────────────────────────────────────────────────────────────────
 function toDate(now) {
   if (now instanceof Date) return now;
   if (now === null || now === undefined) return new Date();
@@ -256,7 +197,6 @@ function toDate(now) {
 
 const isoDay = d => d.toISOString().slice(0, 10);
 
-/** strftime("%G-W%V") */
 export function isoWeek(now) {
   const d = toDate(now);
   const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
@@ -267,15 +207,7 @@ export function isoWeek(now) {
   return `${year}-W${String(week).padStart(2, "0")}`;
 }
 
-// ─── Prefiltro de candidatos y cifras de cabecera ────────────────────────────
-// Mismas fórmulas que metrics.js (que a su vez es el port de analytics.py),
-// pero solo lo que hace falta para decidir quién puede salir en un mensaje y
-// para contar suben/bajan. Si metrics.js cambia una fórmula, aquí solo afecta
-// a qué juegos se pasan a buildDashboard (hay margen) y a la cabecera; el
-// contenido de los mensajes sale siempre de buildDashboard.
-
-// Márgenes: se pasan más juegos de los que caben en los mensajes, por si el
-// cálculo reducido y el completo difieren en algún borde.
+// Mismas fórmulas que metrics.js; si se separan, solo cambia quién pasa (hay margen) y la cabecera.
 const PICK = {
   emerging_top: 30,        // los N mejores emergentes de cada categoría (EMERGING.max_results + margen)
   trending_top: 18,        // en tendencia: TRENDING_MAX (12) + margen, por categoría
@@ -286,14 +218,6 @@ const PICK = {
 const STATUS_CODE = { new: 0, flat: 1, hot: 2, up: 3, down: 4, down2: 5 };
 const CATS = Object.entries(CATEGORIES);
 
-/**
- * Las cifras de cada juego que puede importar (pertenece a una categoría o
- * puede ser emergente), con las mismas funciones que el dashboard
- * (quickMetrics de metrics.js). Devuelve filas pequeñas y serializables, así
- * que se puede repartir el export entre varios pasos y juntar luego las filas
- * (ver telegramScanText / telegramReduce).
- * → [{ id, horror, typical, cat (bit por categoría), st, rising, momentum, g7, em, boom }]
- */
 export function quickRows(games, { now } = {}) {
   const rows = [];
   for (const { g, m, em } of quickMetrics(games, { now: toDate(now) })) {
@@ -312,7 +236,6 @@ export function quickRows(games, { now } = {}) {
   return rows;
 }
 
-/** De las filas de quickRows: cifras de cabecera e ids de los candidatos. */
 export function pickCandidates(rows) {
   const picked = new Set();
   const counts = {};
@@ -327,28 +250,19 @@ export function pickCandidates(rows) {
       if (DOWN.includes(r.st)) falling++;
     }
     counts[key] = { games: ids.length, players, rising, falling };
-    // emergentes: los de la categoría (horror: los juegos de horror, aunque no lleguen al mínimo)
     const belongs = cfg.classifier === "all" ? () => true : r => r.horror;
     rows.filter(r => belongs(r) && r.em !== null)
       .sort((a, b) => b.em - a.em).slice(0, PICK.emerging_top).forEach(r => picked.add(r.id));
     ids.filter(r => r.rising).sort((a, b) => b.momentum - a.momentum)
       .slice(0, PICK.trending_top).forEach(r => picked.add(r.id));
-    // semanal: solo los juegos con TELEGRAM.report_min_players (como weeklyReport)
     const w = ids.filter(r => r.g7 !== null && (r.typical || 0) >= TELEGRAM.report_min_players);
     [...w].sort((a, b) => b.g7 - a.g7).slice(0, PICK.weekly_up).forEach(r => picked.add(r.id));
     w.filter(r => r.g7 < 0).sort((a, b) => a.g7 - b.g7).slice(0, PICK.weekly_down).forEach(r => picked.add(r.id));
   });
-  // alertas «PETANDO»: todos los que cumplen (son pocos)
   for (const r of rows) if (r.boom) picked.add(r.id);
   return { counts, ids: picked };
 }
 
-/**
- * Reduce el export a los juegos que pueden salir en los mensajes y calcula
- * las cifras de cabecera de cada categoría con TODOS los juegos.
- * → { generated_at, last_sample, samples_24h, games: [...],
- *     telegram: { counts: { <cat>: {games, players, rising, falling} }, total, candidates } }
- */
 export function telegramCandidates(exportData, { now } = {}) {
   const all = exportData.games || [];
   const { counts, ids } = pickCandidates(quickRows(all, { now: now ?? exportData.generated_at }));
@@ -365,19 +279,10 @@ function reducedExport(head, games, counts, total) {
   };
 }
 
-// ─── El mismo prefiltro, repartido en varios pasos ───────────────────────────
-// JSON.parse del export entero (~1 MB) ya cuesta casi los 10 ms. El export lo
-// escribe SQLite con json_object, sin espacios, y cada juego empieza por
-// {"id": (dentro de un texto JSON las comillas van escapadas, así que esa
-// secuencia solo aparece al empezar un juego). Así se puede trocear el texto
-// sin parsearlo entero:
-//   paso k de N:  rows_k = telegramScanText(text, { now, part: k, parts: N })
-//   último paso:  reduced = telegramReduce(text, [rows_0, …, rows_N-1])
-//                 await runTelegram({ …, exportData: reduced })
+// Trocear sin JSON.parse (~10 ms con 1 MB): sin espacios, {"id": solo sale al empezar un juego.
 
 const GAME_START = '{"id":';
 
-/** Posiciones de inicio de cada juego en el texto del export (y el fin del array). */
 export function gameOffsets(text) {
   const g = text.indexOf('"games":[');
   if (g < 0) throw new Error("export sin games");
@@ -395,7 +300,6 @@ export function gameOffsets(text) {
   return out;
 }
 
-/** Cabecera del export (generated_at, last_sample, samples_24h) sin parsear los juegos. */
 export function exportHead(text) {
   const pick = re => {
     const m = re.exec(text);
@@ -411,12 +315,10 @@ export function exportHead(text) {
 function parseSlice(text, offs, a, b) {
   if (a >= b) return [];
   let end = offs[b];
-  // offs[b] es el inicio del juego siguiente (precedido de ",") o el "]" final
   const slice = text.slice(offs[a], end).replace(/,\s*$/, "");
   return JSON.parse("[" + slice + "]");
 }
 
-/** Paso k de N del prefiltro: filas de quickRows de su trozo de juegos. */
 export function telegramScanText(text, { now, part = 0, parts = 1 } = {}) {
   const offs = gameOffsets(text), n = offs.length - 1;
   const a = Math.floor(n * part / parts), b = Math.floor(n * (part + 1) / parts);
@@ -424,13 +326,11 @@ export function telegramScanText(text, { now, part = 0, parts = 1 } = {}) {
   return quickRows(games, { now: now ?? exportHead(text).generated_at });
 }
 
-/** Último paso: junta las filas, elige candidatos y parsea solo esos juegos. */
 export function telegramReduce(text, rowParts) {
   const rows = rowParts.flat();
   const { counts, ids } = pickCandidates(rows);
   const offs = gameOffsets(text), games = [];
   for (let k = 0; k < offs.length - 1; k++) {
-    // el id va justo después de {"id":
     const p = offs[k] + GAME_START.length;
     const id = Number(text.slice(p, text.indexOf(",", p)));
     if (ids.has(id)) games.push(...parseSlice(text, offs, k, k + 1));
@@ -438,13 +338,7 @@ export function telegramReduce(text, rowParts) {
   return reducedExport(exportHead(text), games, counts, offs.length - 1);
 }
 
-/**
- * Cifras de cabecera de un export reducido:
- *   · `telegram.counts` (telegramCandidates/telegramReduce): exactas;
- *   · `totals` (data/telegram.json del backend): { <cat>: n } o
- *     { <cat>: { games, players?, rising?, falling? } }.
- * → { <cat>: { games, players?, rising, falling } } o null si no es un export reducido.
- */
+// totals de data/telegram.json: { <cat>: n } o { <cat>: { games, players?, rising?, falling? } }
 export function headerCounts(exportData) {
   if (exportData?.telegram?.counts) return exportData.telegram.counts;
   const totals = exportData?.totals;
@@ -452,14 +346,12 @@ export function headerCounts(exportData) {
   const out = {};
   for (const [key, v] of Object.entries(totals)) {
     const c = typeof v === "number" ? { games: v } : { ...(v || {}) };
-    // lo que no venga no se toma de los candidatos (saldría mal): se omite
     if (c.rising == null || c.falling == null) { c.rising = null; c.falling = null; }
     out[key] = c;
   }
   return out;
 }
 
-/** Pone en el dashboard reducido las cifras de cabecera calculadas con todo el export. */
 function applyCounts(dash, counts) {
   if (!counts) return;
   for (const [key, c] of Object.entries(counts)) {
@@ -471,12 +363,7 @@ function applyCounts(dash, counts) {
   }
 }
 
-// ─── Envío ────────────────────────────────────────────────────────────────────
-/**
- * Chat al que se envía: TELEGRAM_CHAT_ID o, si Telegram dijo que ese grupo
- * pasó a supergrupo, el id nuevo guardado en el estado ({from, to}). Solo se
- * usa mientras el secret siga siendo el id antiguo: si alguien lo cambia, manda él.
- */
+// El secret manda: el id migrado solo vale mientras siga el antiguo.
 export function chatFor(envChat, migrated) {
   if (envChat && migrated?.to && String(migrated.from) === String(envChat)) return String(migrated.to);
   return envChat;
@@ -494,7 +381,6 @@ function makeClient({ env, fetchImpl, log, maxFetch, migrated }) {
     return fetchImpl(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
   }
 
-  /** Miniatura 16:9 del juego, pedida a Roblox en el momento (no se guarda). */
   async function thumbUrl(uid) {
     if (!uid) return null;
     try {
@@ -521,8 +407,7 @@ function makeClient({ env, fetchImpl, log, maxFetch, migrated }) {
       // Nunca se registra la URL: lleva el token
       return { ok: false, status: 0, text: String(e?.name === "TimeoutError" ? "timeout" : e?.message || e) };
     }
-    // El grupo pasó a supergrupo: Telegram da el id nuevo. Se sigue a ese id
-    // (y runTelegram lo guarda en el estado para los siguientes envíos).
+    // Grupo pasado a supergrupo: se sigue al id nuevo (runTelegram lo guarda).
     const to = res.ok ? null : migrateTo(res.text);
     if (to && retry && String(to) !== String(chat)) {
       log(`  el grupo ahora es un supergrupo: se envía al id nuevo ${to}`);
@@ -533,7 +418,6 @@ function makeClient({ env, fetchImpl, log, maxFetch, migrated }) {
     return res;
   }
 
-  /** Envía el mensaje; si hay juego, con su miniatura como foto. */
   async function send(message, gameId) {
     if (!token || !chat) {
       log(`--- mensaje (no enviado)${gameId ? ` · foto del juego ${gameId}` : ""} ---`);
@@ -557,7 +441,6 @@ function makeClient({ env, fetchImpl, log, maxFetch, migrated }) {
   return { send, counter, moved, hasCredentials: Boolean(token && chat) };
 }
 
-/** migrate_to_chat_id de una respuesta de error de Telegram, o null. */
 function migrateTo(text) {
   try {
     const id = JSON.parse(text)?.parameters?.migrate_to_chat_id;
@@ -567,15 +450,7 @@ function migrateTo(text) {
   }
 }
 
-/**
- * Decide qué toca y lo envía.
- *   env: { TELEGRAM_TOKEN, TELEGRAM_CHAT_ID }
- *   exportData: el export completo (R2 data/export.json) o el que devuelve telegramCandidates()
- *   now: Date | ISO | ms
- *   getState(key) / setState(key, value) o setState(value): estado en D1 (clave "telegram")
- *   force: undefined | 'daily' | 'weekly'  (como --daily / --weekly)
- * Opcionales (pruebas): fetch, buildDashboard, log, maxFetch, quickExit (false = calcular siempre).
- */
+// fetch, buildDashboard, log, maxFetch y quickExit solo para las pruebas.
 export async function runTelegram({
   env, exportData, now, getState, setState, force,
   fetch: fetchImpl = globalThis.fetch, buildDashboard = metricsBuildDashboard,
@@ -585,9 +460,7 @@ export async function runTelegram({
   const today = isoDay(nowD), week = isoWeek(nowD), hour = nowD.getUTCHours();
   const weekday = (nowD.getUTCDay() + 6) % 7;
 
-  // Export reducido (data/telegram.json del backend, con `totals`, o el de
-  // telegramCandidates/telegramReduce, con `telegram`) tal cual; el completo
-  // se reduce aquí (respaldo: cuesta más CPU).
+  // El export completo se reduce aquí solo como respaldo: cuesta más CPU.
   const reduced = exportData?.telegram || exportData?.totals ? exportData : telegramCandidates(exportData, { now: nowD });
 
   const loaded = getState ? await getState(STATE_KEY) : null;
@@ -603,10 +476,7 @@ export async function runTelegram({
   const dueWeekly = force === "weekly"
     || (weekday === 0 && hour >= TELEGRAM.report_hour_utc && state.last_weekly !== week);
 
-  // Atajo (casi todas las pasadas): sin diario ni semanal, solo hace falta
-  // buildDashboard si algún juego aún sin avisar está petando. quickRows usa
-  // las mismas métricas que metrics.js (test/telegram.test.mjs). Sin
-  // state.boom (primera pasada) nunca: hay que apuntar los que ya petan.
+  // Atajo: sin diario ni semanal, buildDashboard solo si alguien nuevo peta; sin state.boom, nunca.
   if (quickExit && !dueDaily && !dueWeekly && state.boom) {
     const maybe = quickRows(reduced.games || [], { now: nowD })
       .some(r => r.boom && !(String(r.id) in state.boom));
@@ -619,15 +489,12 @@ export async function runTelegram({
 
   const save = async () => {
     if (!setState || JSON.stringify(state) === before) return;
-    // setState(key, value) (db.js) o setState(value)
     if (setState.length >= 2) await setState(STATE_KEY, state);
     else await setState(state);
   };
 
   try {
-    // Alertas «PETANDO»: una sola vez por juego, los de más jugadores primero.
-    // La primera pasada (sin state.boom: recién desplegado) apunta sin avisar
-    // los que ya están petando: no son noticia.
+    // Primera pasada (sin state.boom): apunta sin avisar los que ya petan, no son noticia.
     const seeding = !state.boom;
     const boomed = (state.boom ||= {});
     if (seeding) delete state.alerted;   // las alertas de emergentes de antes

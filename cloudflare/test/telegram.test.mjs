@@ -1,22 +1,4 @@
-/**
- * telegram.test.mjs — Pruebas de src/telegram.js, sin red (fetch simulado).
- *
- *   node --test cloudflare/test/telegram.test.mjs      (o node cloudflare/test/telegram.test.mjs)
- *
- * · Mensajes: con data/dashboard.json como salida de buildDashboard, los textos
- *   y la foto de cada mensaje son IDÉNTICOS a los de notifier.py (--dry-run
- *   --daily / --weekly, y la ejecución normal sin credenciales, que guarda
- *   estado) para el mismo `now` (test/notifier_ref.py).
- * · Estado: no repite alertas ni el diario/semanal; con un envío fallido no
- *   marca nada; la primera pasada (sin state.boom) apunta sin avisar los
- *   juegos que ya están petando.
- * · Envío: foto + pie; si la foto falla o no hay miniatura, texto; más de 1024
- *   caracteres visibles → texto sin pedir miniatura; nunca más de 50 fetch.
- * · Prefiltro (si existen test/make_export.py y src/metrics.js): con el export
- *   construido de data/, las cabeceras de telegramCandidates son las de
- *   buildDashboard con TODOS los juegos y los mensajes salen iguales que sin
- *   reducir; también repartido en pasos (telegramScanText + telegramReduce).
- */
+// node --test test/telegram.test.mjs — sin red; los textos, contra notifier.py (notifier_ref.py).
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -52,7 +34,6 @@ const tmpFile = (name, data) => {
   return p;
 };
 
-/** notifier.py de producción vía notifier_ref.py → { stdout, messages: [[texto, id]], state } */
 function python({ now, dashboard = DASH, state = null, args = [] }) {
   const dpath = dashboard === DASH ? DASH_PATH : tmpFile("dash.json", dashboard);
   const a = [join(HERE, "notifier_ref.py"), "--now", now, "--dashboard", dpath];
@@ -61,7 +42,6 @@ function python({ now, dashboard = DASH, state = null, args = [] }) {
   return JSON.parse(out.toString("utf8"));
 }
 
-/** runTelegram con buildDashboard sustituido por un dashboard fijo. */
 async function js({ now, dashboard = DASH, state = null, force, env = {}, fetch, maxFetch }) {
   let stored = state ? clone(state) : null;
   const lines = [];
@@ -76,7 +56,6 @@ async function js({ now, dashboard = DASH, state = null, force, env = {}, fetch,
   return { res, state: stored, stdout: lines.length ? lines.join("\n") + "\n" : "" };
 }
 
-/** fetch simulado: miniaturas y Telegram; registra cada llamada. */
 function mockFetch({ thumb = "ok", photo = 200, message = 200 } = {}) {
   const calls = [];
   const f = async (url, init = {}) => {
@@ -112,7 +91,6 @@ function boomDashboard(n = 7) {
 const BOOM_IDS = d => Object.values(d.games).filter(isBoom).map(g => String(g.id));
 const NO_BOOM = { boom: {} };   // estado ya desplegado: sin apuntar a nadie
 
-// ─── Formato ──────────────────────────────────────────────────────────────────
 test("formato de números, porcentajes y semana ISO = Python", () => {
   const xs = [];
   let seed = 7;
@@ -155,7 +133,6 @@ print(json.dumps([notifier.visible_len(m) for m in json.load(sys.stdin)]))`], { 
   assert.deepEqual(msgs.map(visibleLen), py);
 });
 
-// ─── Paridad de mensajes con notifier.py ──────────────────────────────────────
 for (const [now, args, force] of [
   ["2026-10-03T00:36:44Z", ["--dry-run", "--daily"], "daily"],
   ["2026-10-03T00:36:44Z", ["--dry-run", "--weekly"], "weekly"],
@@ -259,7 +236,6 @@ test("con credenciales y fetch simulado: mismos textos y fotos que notifier.py",
   assert.deepEqual(sortKeys(r.state), sortKeys(py.state));
 });
 
-// ─── Envío: fallbacks y límites ───────────────────────────────────────────────
 const ENV = { TELEGRAM_TOKEN: TOKEN, TELEGRAM_CHAT_ID: "123" };
 
 test("foto rechazada → mismo texto con sendMessage (sin vista previa)", async () => {
@@ -385,7 +361,6 @@ test("cabecera con `totals` del backend: con y sin suben/bajan", async () => {
   assert.deepEqual(headerCounts({ totals: { general: 5 } }), { general: { games: 5, rising: null, falling: null } });
 });
 
-// ─── Prefiltro sobre un export real (data/ → make_export.py) ──────────────────
 const MAKE_EXPORT = join(HERE, "make_export.py");
 const NOWS = ["2026-10-03T00:36:44Z", "2026-10-02T21:20:00Z", "2026-09-28T19:00:00Z"];
 

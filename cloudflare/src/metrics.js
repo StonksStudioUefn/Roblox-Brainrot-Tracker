@@ -1,33 +1,4 @@
-/**
- * metrics.js — Métricas del dashboard (port de analytics.py + export_dashboard.py).
- *
- * Módulo ES sin dependencias: lo usan igual el navegador (que lo descarga de
- * /metrics.js) y el Worker (Telegram, con ~150 juegos y 10 ms de CPU).
- *
- *   buildDashboard(exportData, { now }) → mismo esquema que data/dashboard.json
- *                                          + `roblox_sorts` en cada juego
- *   flagEvents(values, dates)          → días de evento (para /api/history)
- *   cleanTitle(name)                   → reexportado de horror.js
- *
- * Es un port FIEL: mismas fórmulas, umbrales (config.js), redondeos (el
- * `round` de Python redondea al par en los empates, ver pyRound) y orden de
- * las listas. Diferencias de entrada respecto a Python, que veía toda la
- * historia:
- *   · la serie diaria trae solo EXPORT_DAILY_DAYS días: los días de evento del
- *     principio de la ventana no se pueden marcar igual y `event_days` cuenta
- *     como mucho esos días (Python: últimos 30);
- *   · `peak`, `peak_date`, `days_tracked` y `first_day` vienen ya calculados
- *     de toda la historia;
- *   · las muestras son [ts_minutos_epoch, playing, visits] de las últimas
- *     EXPORT_SAMPLE_HOURS h (Python leía 8 días; solo se usan 48 h).
- *
- * Rendimiento: una pasada por juego, arrays pequeños, medianas con
- * ordenación por inserción sobre búferes reutilizados y sin copias del
- * export. Medido con cloudflare/test/metrics.bench.mjs (Node 22, proceso
- * nuevo): 150 juegos ≈ 2,5 ms en caliente y ≈ 10 ms la primera llamada (código
- * aún sin optimizar); 1.000 juegos ≈ 8 ms en caliente, ≈ 25-40 ms en frío.
- * La paridad con Python: cloudflare/test/metrics.parity.mjs.
- */
+// De analytics.py + export_dashboard.py; su salida la fija test/metrics.parity.mjs. Va a la web.
 
 import { CATEGORIES, EMERGING, EVENTS, SCAN_START, SELECTION, TRACK_MIN_PLAYERS } from './config.js';
 import { cleanTitle } from './horror.js';
@@ -39,21 +10,7 @@ const SPARK_DAYS = 21;        // puntos del minigráfico
 const EVENT_DAYS_WINDOW = 30; // `event_days` = días de evento de los últimos 30
 const TRENDING_MAX = 12;
 
-// Señal de Roblox para los emergentes. Estar en una lista oficial es una señal
-// externa de que el juego despega, independiente de nuestras muestras:
-//   · up-and-coming (juegos nuevos que crecen): +15, lo mismo que un 75 % del
-//     peso del crecimiento propio (25) o que ser un juego de un mes (≈15/20);
-//   · top-trending (crecimiento reciente, también de juegos grandes, aunque esos
-//     ya los quita max_visits): +10.
-// No se suman entre sí (cuenta la mayor). Nuestros datos mandan: la lista solo
-// vale como "está creciendo" para la condición de entrada cuando aún no hay con
-// qué medir (tendencia, 24 h y 7 d en null, p. ej. juegos recién descubiertos);
-// si las medimos y no crecen, no entra. Tampoco salva a un juego en caída
-// (status down/down2) ni a uno con muchas visitas o pocos jugadores. Su motivo
-// va el primero para que no lo corte el límite de 4 motivos. La puntuación se
-// recorta a 100 (sin la señal el máximo ya era 100).
-// Con las listas del 03/10/2026 (cloudflare/test/metrics.parity.mjs --sorts):
-// general pasa de 12 a 20 emergentes (8 juegos con 31-44 puntos que ya crecían).
+// +15 ≈ 75 % del peso del crecimiento propio; la lista solo es «crece» si no hay con qué medir.
 export const ROBLOX_SORT_POINTS = { 'up-and-coming': 15, 'top-trending': 10 };
 const ROBLOX_SORT_LABELS = { 'up-and-coming': 'Roblox: Up-and-Coming', 'top-trending': 'Roblox: Top Trending' };
 
@@ -61,8 +18,7 @@ const MIN = 60e6;             // microsegundos por minuto
 const DAY_US = 86400e6;
 const DAY_MS = 864e5;
 
-// ─── Redondeo como Python ─────────────────────────────────────────────────────
-/** round(x) de Python: entero más cercano y, en el empate exacto .5, el par. */
+// round() de Python: el empate .5 va al par (Math.round va al mayor).
 function pyRound0(x) {
   const f = Math.floor(x), d = x - f;           // exacto para |x| < 2^52
   if (d < 0.5) return f;
@@ -71,11 +27,7 @@ function pyRound0(x) {
 }
 
 const P10 = [1, 10, 100, 1000];
-/**
- * round(x, nd) de Python. Python redondea el valor binario EXACTO (por eso
- * round(2.675, 2) = 2.67) y solo hay empate si x·2^(nd+1) es un entero impar
- * (p. ej. 0.25, 0.75 con nd=1); entonces va al par.
- */
+// Como round(x, nd) de Python: redondea el binario exacto (2.675 → 2.67) y el empate va al par.
 function pyRound(x, nd) {
   const p = P10[nd], y = x * p;
   const f = Math.floor(y), d = y - f;
@@ -86,10 +38,8 @@ function pyRound(x, nd) {
   return Number(x.toFixed(nd));                 // toFixed usa el valor exacto
 }
 
-/** f"{x:.0f}" de Python. */
 const fmt0 = x => String(pyRound0(x));
 
-// ─── Utilidades ───────────────────────────────────────────────────────────────
 const clip = (x, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, x));
 
 function pct(nw, old) {
@@ -97,14 +47,13 @@ function pct(nw, old) {
   return pyRound((nw - old) * 100 / old, 1);
 }
 
-// Búfer reutilizado para las medianas (las listas son pequeñas: ≤ 28 slopes,
-// ≤ 6 vecinos, las muestras de 24 h…). Ordenación por inserción in situ.
+// Un solo búfer: las listas son pequeñas (≤ 28 pendientes) y así no se crean arrays por juego.
 let BUF = new Float64Array(64);
 function bufFor(n) {
   if (BUF.length < n) BUF = new Float64Array(Math.max(n, BUF.length * 2));
   return BUF;
 }
-/** Mediana de buf[0..n) (lo ordena). Igual que statistics.median. */
+// Igual que statistics.median
 function medianBuf(buf, n) {
   for (let i = 1; i < n; i++) {
     const v = buf[i];
@@ -115,7 +64,6 @@ function medianBuf(buf, n) {
   const h = n >> 1;
   return n % 2 ? buf[h] : (buf[h - 1] + buf[h]) / 2;
 }
-/** Mediana de arr[lo..hi) sin tocar arr; atajo para ≤ 3 (el caso de flagEvents). */
 function medianRange(arr, lo, hi) {
   const n = hi - lo;
   if (n === 1) return arr[lo];
@@ -129,7 +77,6 @@ function medianRange(arr, lo, hi) {
   return medianBuf(buf, n);
 }
 
-/** "AAAA-MM-DD" → nº de día desde epoch. */
 function dayNum(s) {
   return Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10)) / DAY_MS;
 }
@@ -137,13 +84,7 @@ function isoDate(dn) {
   return new Date(dn * DAY_MS).toISOString().slice(0, 10);
 }
 
-/**
- * ISO de Roblox → microsegundos desde epoch (entero exacto) o null, como
- * parse_ts (datetime.fromisoformat, que trunca la fracción a microsegundos).
- * Date.parse acepta "…THH:MMZ" y fracciones de más de 3 cifras (las trunca a
- * ms); los dígitos 4-6 se añaden a mano. Es mucho más barato que una regex
- * cuando el código aún no está optimizado (isolate frío).
- */
+// Sin regex: en un isolate frío cuesta mucho más. Date.parse trunca a ms; los µs van a mano.
 function isoUs(s) {
   if (!s) return null;
   const ms = Date.parse(s);
@@ -170,24 +111,13 @@ function toUs(now) {
   return us;
 }
 
-// datetime.isoformat() de Python para un instante UTC
 const pyIso = ms => new Date(ms).toISOString().slice(0, 19) + '+00:00';
 
-// ─── Series y eventos ─────────────────────────────────────────────────────────
-/**
- * Marca días de evento (picos que se salen de su entorno y luego bajan).
- * Compara con los días de antes Y de después, descuenta el día de la semana
- * (mismo día de hace 7 y 14 días) y nunca marca el último día.
- * `values`: medianas diarias; `dates`: "AAAA-MM-DD" ascendente.
- */
 export function flagEvents(values, dates) {
   return flagCore(values, dates.map(dayNum));
 }
 
-/**
- * `dn`: nº de día de cada valor. Los vecinos son los 3 de cada lado que estén
- * a 7 días o menos: con huecos, un juego no se compara con días de hace meses.
- */
+// Vecinos a ≤ 7 días: con huecos, un juego no se compara con días de hace meses.
 function flagCore(values, dn) {
   const n = values.length, w = Math.floor(EVENTS.window_days / 2), gap = EVENTS.window_days;
   const minRatio = EVENTS.min_ratio, madK = EVENTS.mad_k;
@@ -208,7 +138,6 @@ function flagCore(values, dn) {
     for (let j = 0; j < k; j++) b[j] = Math.abs(b[j] - m);
     const mad = Math.max(medianBuf(b, k) * 1.4826, m * 0.05);
     if (!((v - base) > madK * mad)) continue;
-    // ¿Se explica por el día de la semana?
     let maxSame = null;
     for (const back of [7, 14]) {
       const target = dn[i] - back;
@@ -228,7 +157,6 @@ function flagCore(values, dn) {
 const TX = new Float64Array(8), TY = new Float64Array(8), LAST8 = new Float64Array(8), LAST8X = new Float64Array(8);
 const MAX7 = new Float64Array(8), SAME = new Float64Array(4);
 
-/** Crecimiento diario típico (%) por Theil–Sen sobre vals[0..k) en los días xs[0..k) (k ≤ 8). */
 function theilSen(vals, xs, k) {
   let n = 0;
   for (let i = 0; i < k; i++) {
@@ -242,7 +170,6 @@ function theilSen(vals, xs, k) {
   return pyRound((Math.exp(medianBuf(b, m)) - 1) * 100, 1);
 }
 
-// ─── Métricas por juego ───────────────────────────────────────────────────────
 // `g` es un juego del export. Las ventanas van por FECHA, contadas hacia atrás
 // desde ayer (el último día cerrado): el día de hoy está a medias y solo cuenta
 // para «ahora» y las 24 h (por las muestras).
@@ -256,18 +183,15 @@ function gameMetrics(g, ctx) {
   while (nc > 0 && dn[nc - 1] >= ctx.today) nc--;
   const D = ctx.today - 1;                          // ayer: el último día cerrado
 
-  // Muestras (ascendentes según el contrato)
   const ns = s.length;
   const lastTs = ns ? s[ns - 1][0] : null;           // minutos
   const nowPlayers = ns ? s[ns - 1][1] : (n ? values[n - 1] : 0);
   const ref = lastTs ?? ctx.nowMin;
 
-  // Jugadores típicos: mediana de las últimas 24 h; y las 24 h anteriores
   const b = bufFor(ns);
   let n24 = 0;
   for (let i = 0; i < ns; i++) { const t = s[i][0]; if (t >= ref - 1440 && t < ref + 1) b[n24++] = s[i][1]; }
   let typical = n24 ? medianBuf(b, n24) : null;
-  // Sin muestras: el último día cerrado (o el de hoy si no hay otro)
   const tIdx = nc ? nc - 1 : n - 1;
   if (n24 < 2) typical = n ? values[tIdx] : nowPlayers;
   let nprev = 0;
@@ -275,18 +199,12 @@ function gameMetrics(g, ctx) {
   let prev = nprev ? medianBuf(b, nprev) : null;
   if (nprev < 2) {
     prev = null;
-    // sin muestras de ayer: el último día "limpio" cerrado anterior al que da el típico (≤ 7 días antes)
     const from = n24 < 2 ? tIdx - 1 : nc - 1;
     const anchor = n24 < 2 && tIdx >= 0 ? dn[tIdx] : D + 1;
     for (let i = from; i >= 0 && anchor - dn[i] <= 7; i--) if (!events[i]) { prev = values[i]; break; }
   }
   const growth24 = pct(typical, prev);
 
-  // Una pasada hacia atrás por los días cerrados; k = D − día + 1 (1 = ayer):
-  //   7 días = k 1..7, recent3 = k 1..3, week_ago = k 7..10 y k 1..8 para la
-  //   tendencia, todos sin días de evento; los máximos de k 1..7 y del mismo
-  //   día de la semana de hace 1-3 semanas para el pico; días de evento de los
-  //   últimos 30; las 2 últimas visitas (en todas las filas).
   let sum7 = 0, c7 = 0, sum3 = 0, c3 = 0, sumW = 0, cW = 0, evDays = 0;
   let n8 = 0, nmax = 0, nsame = 0, vz = -1, va = -1;
   for (let i = n - 1; i >= 0; i--) {
@@ -314,16 +232,12 @@ function gameMetrics(g, ctx) {
   }
   const trend = theilSen(LAST8, LAST8X, n8);
 
-  // Pico ahora: la última muestra frente a los MÁXIMOS diarios (con muestras
-  // cada hora la mediana del día queda por debajo del pico de la tarde) de los
-  // 7 días limpios anteriores y, si los hay, del mismo día de la semana de
-  // hace 1-3 semanas.
+  // MÁXIMOS diarios: con muestras cada hora, la mediana del día queda bajo el pico de la tarde.
   const baseMax = nmax >= 4 ? medianBuf(MAX7, nmax) : null;
   const sameMax = nsame ? medianBuf(SAME, nsame) : null;
   const spikeNow = !!(baseMax && nowPlayers >= baseMax * EVENTS.spike_now_ratio
     && (sameMax === null || nowPlayers >= sameMax * EVENTS.spike_weekday_ratio));
 
-  // Visitas: actuales y ganadas en el último día
   const visits = vz >= 0 ? d[vz][5] : null;
   let visitsDay = null;
   let i1 = ns - 1;
@@ -390,8 +304,7 @@ function gameMetrics(g, ctx) {
   };
 }
 
-// ─── Estado y puntuaciones ────────────────────────────────────────────────────
-/** analytics.status: si 24 h y tendencia se contradicen, manda la tendencia. */
+// Manda la tendencia: es más difícil de engañar con un pico.
 function status(m) {
   const t = m.trend;
   let g = m.growth_24h;
@@ -405,7 +318,6 @@ function status(m) {
 }
 
 const LOG_SIZE = Math.log10(1_000_000 / 300);
-/** analytics.momentum_score: 0-100, crecimiento sostenido ponderado por tamaño. */
 function momentumScore(m) {
   const t = m.trend || 0, g24 = m.growth_24h || 0, g7 = m.growth_7d || 0;
   const size = clip(Math.log10(Math.max(m.typical || 1, 1) / 300) / LOG_SIZE);
@@ -415,24 +327,17 @@ function momentumScore(m) {
 }
 
 const LOG30 = Math.log10(30);
-/** analytics.emerging + la señal de las listas de Roblox. → [score, motivos] o null. */
 function emerging(m, sorts) {
   return emergingCore(m, sorts, true);
 }
 
-/**
- * strict = true: la regla de emergentes (lo que sale en la web y en Telegram).
- * strict = false: puntuación de CANDIDATO para elegir qué juegos se siguen
- * (radar): la misma fórmula, pero sin corte por puntuación, con visitas aún
- * desconocidas (juego recién descubierto) y, si no crece o está bajando, a mitad.
- */
+// strict = false: candidato del radar (sin corte, visitas desconocidas y, si no crece, a mitad).
 function emergingCore(m, sorts, strict) {
   const cfg = EMERGING;
   const visits = m.visits, typical = m.typical || 0;
   if (typical < cfg.min_players || (visits !== null && visits > cfg.max_visits)) return null;
   if (visits === null && strict) return null;
   const t = m.trend, g24 = m.growth_24h, g7 = m.growth_7d;
-  // Listas oficiales de Roblox (ver ROBLOX_SORT_POINTS)
   let sRoblox = 0;
   const rReasons = [];
   if (sorts) {
@@ -449,7 +354,7 @@ function emergingCore(m, sorts, strict) {
   const weak = (!growing && !fresh) || m.status === 'down' || m.status === 'down2';
   if (weak && strict) return null;
 
-  const reasons = rReasons;
+  const reasons = rReasons;   // las de Roblox, las primeras: así no las corta el límite de 4
   const vg = m.visits_growth || 0;
   const sVisits = 30 * clip(vg / 12);
   if (vg >= 3) reasons.push(`visitas +${fmt0(vg)}%/día`);
@@ -473,8 +378,7 @@ function emergingCore(m, sorts, strict) {
   if (lr && lr >= 90) reasons.push(`${fmt0(lr)}% likes`);
   if (visits !== null && visits < 2_000_000) reasons.push('menos de 2M visitas');
 
-  // sRoblox va al final: con 0 la suma es la misma que en Python. Sin él el
-  // máximo ya es 100; con él se recorta a 100 para que siga siendo 0-100.
+  // sRoblox va aparte: con 0 la suma es la de Python.
   let score = Math.min(100, pyRound0(sVisits + sGrowth + sYoung + sSize + sLike + sRoblox));
   if (m.spike_now && (t || 0) < 5) score = pyRound0(score * 0.8);
   if (!strict) return [weak ? score / 2 : score, reasons];
@@ -482,11 +386,7 @@ function emergingCore(m, sorts, strict) {
   return [score, reasons.slice(0, 4)];
 }
 
-/**
- * Radar: métricas mínimas de un juego para elegir los que se siguen.
- * `g` como un juego del export (sin muestras basta: d con la serie diaria).
- * → [typical, candidato (0-100) | null], o null si lleva 2 días sin datos.
- */
+// null si lleva 2 días sin datos.
 export function radarScore(g, { now } = {}) {
   const ctx = radarCtx(now);
   const d = g.d;
@@ -509,11 +409,7 @@ function radarCtx(now) {
   return RADAR_CTX;
 }
 
-/**
- * Las cifras de cada juego que necesita el prefiltro de Telegram (telegram.js
- * quickRows), calculadas con las MISMAS funciones que buildDashboard: así los
- * candidatos y el dashboard no pueden separarse. → [{ g, m, em }] (activos).
- */
+// Las mismas funciones que buildDashboard: los candidatos de Telegram no se separan de la web.
 export function quickMetrics(games, { now } = {}) {
   const ctx = radarCtx(now);
   const out = [];
@@ -528,15 +424,9 @@ export function quickMetrics(games, { now } = {}) {
   return out;
 }
 
-/** «En tendencia»: subiendo de forma sostenida, sin ser solo un pico. */
 export const isRising = m => (m.status === 'hot' || m.status === 'up') && (m.trend === null || m.trend > 0)
   && !(m.spike_now && (m.trend || 0) < 5);
 
-// ─── Dashboard ────────────────────────────────────────────────────────────────
-/**
- * Port de export_dashboard.build() sobre el export de Cloudflare.
- * `now`: Date, ms desde epoch o ISO (por defecto, ahora).
- */
 export function buildDashboard(exportData, { now } = {}) {
   const nowUs = toUs(now);
   const nowMs = Math.floor(nowUs / 1000);
@@ -558,8 +448,7 @@ export function buildDashboard(exportData, { now } = {}) {
     list.push({ g, m, horror: !!g.horror, em, firstDay: g.first_day || d[0][0] });
   }
 
-  // Python recorre los juegos por orden de aparición en el CSV diario: primera
-  // fecha y luego id. Como sus sort son estables, ese orden decide los empates.
+  // Orden del CSV de Python (fecha y id): sus sort estables desempatan así.
   const byOrder = (a, b) => (a.firstDay < b.firstDay ? -1 : a.firstDay > b.firstDay ? 1 : a.g.id - b.g.id);
 
   const categories = {};
@@ -595,7 +484,6 @@ export function buildDashboard(exportData, { now } = {}) {
     for (const x of emerg) used.add(x);
   }
 
-  // Solo se resumen los juegos que salen en alguna lista (como Python)
   const games = {};
   for (const x of [...used].sort((a, b) => a.g.id - b.g.id)) games[String(x.g.id)] = summary(x);
 

@@ -1,29 +1,4 @@
-"""
-notifier.py — Avisos por Telegram a partir de data/dashboard.json.
-
-Como el tracker corre varias veces al día, el notificador decide solo qué
-toca enviar (y guarda en data/state.json lo ya enviado):
-  · Alerta «PETANDO» cuando un juego nuevo pasa de muchos jugadores (ver
-    is_boom), una vez por juego, con su miniatura (se pide a Roblox en el
-    momento de enviar).
-  · Resumen diario a partir de REPORT_HOUR_UTC: un mensaje por categoría, con
-    la miniatura del juego más destacado.
-  · Resumen semanal los lunes.
-Telegram es más exclusivo que la web: los resúmenes solo listan juegos con
-REPORT_MIN_PLAYERS típicos o más, y una categoría sin ninguno no manda mensaje.
-
-Los mensajes están pensados para el móvil: cada juego ocupa dos líneas
-cortas (nombre / datos) y ningún juego se repite dentro de un mensaje.
-
-Variables de entorno:
-  TELEGRAM_TOKEN, TELEGRAM_CHAT_ID   (sin ellas, el mensaje se imprime)
-
-Uso:
-  python notifier.py              # envía lo que toque
-  python notifier.py --daily      # fuerza el resumen diario
-  python notifier.py --weekly     # fuerza el resumen semanal
-  python notifier.py --dry-run    # muestra sin enviar ni guardar estado
-"""
+"""Avisos por Telegram desde data/dashboard.json; lo enviado se guarda en data/state.json para no repetir."""
 
 import html
 import json
@@ -53,7 +28,6 @@ DASHBOARD_URL = os.environ.get(
 DAYS = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"]
 
 
-# ─── Formato ───────────────────────────────────────────────────────────────────
 def h(s) -> str:
     return html.escape(str(s or ""), quote=False)
 
@@ -86,8 +60,7 @@ def card_link(key, g, text) -> str:
 
 
 def growth(g, arrow: bool = False) -> str:
-    """Crecimiento más fiable disponible: la tendencia diaria; si es casi
-    plana o no existe, el cambio de 24 h."""
+    """La tendencia; si es casi plana, el cambio de 24 h."""
     t, g24 = g.get("trend"), g.get("growth_24h")
     if t is not None and (abs(t) >= 2 or g24 is None):
         value, unit = t, "/día"
@@ -100,7 +73,6 @@ def growth(g, arrow: bool = False) -> str:
 
 
 def entry(i: int, g, *extra: str, medals: bool = True) -> str:
-    """Dos líneas: '🥇 Nombre' y '      └ 👥 39K · +33%/día · …'."""
     mark = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.") if medals else f"{i}."
     stats = " · ".join([f"👥 {num(g['typical'])}", growth(g), *extra])
     flag = " 🎉" if g.get("spike_now") else ""
@@ -111,7 +83,6 @@ def today_label(now) -> str:
     return f"{DAYS[now.weekday()]} {now:%d/%m}"
 
 
-# ─── Qué merece un mensaje ─────────────────────────────────────────────────────
 def is_boom(g) -> bool:
     """«Petando»: juego nuevo con muchos jugadores ahora y de forma sostenida,
     que no está cayendo."""
@@ -126,13 +97,11 @@ def big(g) -> bool:
 
 
 def alert_category(cats, g) -> str:
-    """La categoría de horror si el juego es de horror; si no, la general."""
     if g.get("horror") and "horror" in cats:
         return "horror"
     return "general" if "general" in cats else next(iter(cats))
 
 
-# ─── Mensajes ──────────────────────────────────────────────────────────────────
 def daily_report(key, cat, games, now) -> tuple[str | None, str | None]:
     """Devuelve (texto, id del juego de la miniatura), o (None, None) si no hay
     ningún juego con REPORT_MIN_PLAYERS (ese día no se manda nada)."""
@@ -179,7 +148,6 @@ def weekly_report(key, cat, games, now) -> tuple[str | None, str | None]:
 
 
 def alert(key, cat, g) -> tuple[str, str | None]:
-    """Alerta «PETANDO» (ver is_boom)."""
     creator = h(g.get("creator") or "—") + (" ✔" if g.get("creator_verified") else "")
     genre = h(g.get("subgenre") or g.get("genre") or "")
     lines = [
@@ -209,14 +177,12 @@ def alert(key, cat, g) -> tuple[str, str | None]:
     return "\n".join(lines), g.get("id")
 
 
-# ─── Envío ─────────────────────────────────────────────────────────────────────
 def visible_len(message: str) -> int:
     """Longitud que cuenta Telegram: sin etiquetas y con entidades resueltas."""
     return len(html.unescape(re.sub(r"<[^>]+>", "", message)))
 
 
 def thumb_url(uid) -> str | None:
-    """Miniatura 16:9 del juego, pedida a Roblox en el momento (no se guarda)."""
     if not uid:
         return None
     try:
@@ -230,7 +196,6 @@ def thumb_url(uid) -> str | None:
 
 
 def send(message: str, game_id, dry: bool) -> bool:
-    """Envía el mensaje; si hay juego, con su miniatura como foto."""
     token, chat = os.environ.get("TELEGRAM_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
     if dry or not token or not chat:
         print(f"--- mensaje (no enviado){f' · foto del juego {game_id}' if game_id else ''} ---")
@@ -271,9 +236,7 @@ def main():
     now = datetime.now(timezone.utc)
     today, week = now.date().isoformat(), now.strftime("%G-W%V")
 
-    # Alertas «PETANDO»: una sola vez por juego, los de más jugadores primero.
-    # La primera vez (sin "boom" en el estado) se apuntan sin avisar los que ya
-    # están petando: no son noticia.
+    # Primera vez sin "boom": se apuntan sin avisar los que ya petan (no son noticia).
     seeding = "boom" not in state
     boomed = state.setdefault("boom", {})
     if seeding:

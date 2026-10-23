@@ -1,9 +1,4 @@
-"""Referencia en Python para horror.parity.mjs.
-
-Lee de stdin una lista JSON de juegos {id, name, description, genre, genre_l1,
-genre_l2} y escribe en stdout, por juego, lo que dicen analytics.is_horror y
-analytics.clean_title (los de producción).
-"""
+"""analytics.is_horror y clean_title (los de producción) de los juegos JSON de stdin, para horror.parity.mjs."""
 import json
 import sys
 from pathlib import Path
