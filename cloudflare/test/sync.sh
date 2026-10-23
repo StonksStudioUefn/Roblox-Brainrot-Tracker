@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Copia src/ a test/.build/src (wrangler dev recarga solo) sin pisar los stubs.
 set -euo pipefail
 shopt -s nullglob
 cd "$(dirname "$0")/.."

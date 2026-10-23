@@ -1,5 +1,3 @@
-// Mide la CPU del filtro de Rolimons (texto vs JSON.parse) con process.cpuUsage.
-// Uso: node test/bench_rolimons.mjs [fichero]   (sin fichero lo descarga)
 import { readFileSync } from "node:fs";
 import { filterRolimons, filterRolimonsParse } from "../src/sources.js";
 

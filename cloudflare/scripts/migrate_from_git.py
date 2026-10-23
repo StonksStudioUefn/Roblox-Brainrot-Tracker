@@ -1,28 +1,7 @@
 #!/usr/bin/env python3
-"""
-migrate_from_git.py — Sube los datos actuales del tracker (CSV/JSON del repo)
-a la versión Cloudflare (D1) por POST /api/admin/import, en lotes.
-
-Qué sube (pensado para no pasar del límite de 100.000 filas escritas/día de D1):
-  · games     data/games.json (~2.400). Se ignoran los campos antiguos
-              (description, icon, thumb, creator_type); el horror se calcula
-              aquí con analytics.is_horror (con la descripción si la hay) y la
-              descripción NO se sube. tracked=1 solo si tiene muestras en 48 h.
-  · places    place_id → universe_id (caché de Rolimons), de games.json.
-  · daily     data/daily/*.csv entero, salvo el día de hoy (UTC), que el
-              Worker calcula al vuelo desde las muestras (~27.000 filas).
-  · samples   data/raw/*.csv, solo las últimas 48 h.
-  · state     telegram = data/state.json; closed_day = ayer.
-  Al final llama a /api/admin/rebuild (agregados de la historia + export).
-
-Es re-ejecutable: el import hace UPSERT y solo escribe filas nuevas o
-distintas, así que repetirlo no duplica ni gasta escrituras.
-
-Uso:
-  python cloudflare/scripts/migrate_from_git.py --url https://roblox-tracker.<cuenta>.workers.dev \\
-      [--ref origin/main | --dir /ruta/al/repo]  [--token …]  [--dry-run]
-
-  El token sale de --token o de la variable ADMIN_TOKEN.
+"""migrate_from_git.py --url … [--ref | --dir] [--token] [--dry-run]
+Re-ejecutable: el import hace UPSERT y no gasta escrituras al repetirse.
+Solo 48 h de muestras: el tope de D1 es 100.000 filas escritas al día.
 """
 
 import argparse
@@ -47,7 +26,6 @@ DROPPED = {"description", "icon", "thumb", "creator_type"}
 SAMPLE_HOURS = 48
 
 
-# ─── Lectura (git o carpeta) ──────────────────────────────────────────────────
 class Source:
     def __init__(self, ref=None, root=None):
         self.ref, self.root = ref, Path(root) if root else None
@@ -83,13 +61,11 @@ def ts_minutes(iso):
     return int(datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp() // 60)
 
 
-# ─── Construcción de filas ────────────────────────────────────────────────────
 def build(src, now):
     today = now.date().isoformat()
     yesterday = (now.date() - timedelta(days=1)).isoformat()
     cut = int(now.timestamp() // 60) - SAMPLE_HOURS * 60
 
-    # Muestras de las últimas 48 h
     samples = []
     for path in src.list("data/raw"):
         if not path.endswith(".csv"):
@@ -107,9 +83,7 @@ def build(src, now):
             samples.append([int(r["universe_id"]), ts, _int(r["playing"]), _int(r.get("visits"))])
     recent = {s[0] for s in samples}
 
-    # Serie diaria (sin el día en curso). Los favoritos/votos que tracker.py ya
-    # guardó HOY pasan a la fila de AYER, que es donde los deja el Worker
-    # (así el export da los mismos "últimos conocidos" que Python).
+    # Votos de HOY a la fila de AYER: ahí los deja el Worker (mismos «últimos conocidos» que Python).
     daily = []
     last_day = None
     today_votes = {}
@@ -133,7 +107,6 @@ def build(src, now):
                       _int(r["up"]), _int(r["down"])])
         last_day = max(last_day or r["date"], r["date"])
 
-    # Fichas
     raw_games = json.loads(src.read("data/games.json") or "{}")
     games, places = [], []
     horror_n = 0
@@ -176,7 +149,6 @@ def build(src, now):
     }, {"horror": horror_n, "tracked": len(recent & {g[0] for g in games}), "last_day": last_day}
 
 
-# ─── Subida ───────────────────────────────────────────────────────────────────
 def post(url, token, path, body, retries=5):
     data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     for attempt in range(retries):

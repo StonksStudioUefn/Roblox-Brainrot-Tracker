@@ -1,40 +1,3 @@
-/**
- * Roblox Tracker — Worker de Cloudflare (plan gratis).
- *
- * robloxtracker.stonksstudio.com (detrás de Cloudflare Access):
- *   GET /                    dashboard (R2 site/dashboard.html)
- *   GET /favicon.svg         (R2 site/favicon.svg)
- *   GET /config.js /metrics.js /horror.js   módulos ES compartidos con el Worker
- *   GET /api/export          R2 data/export.json
- *   GET /api/history/<id>    serie diaria + muestras (D1)
- *   GET /api/live?ids=…      jugadores ahora + icono (Roblox en directo)
- *   GET /api/thumbs?ids=…    miniaturas 16:9
- *   GET /api/game/<id>       ficha en vivo
- *
- * Admin (en cualquier host, "Authorization: Bearer <ADMIN_TOKEN>"):
- *   POST /api/admin/run      lanza un muestreo  {daily? (true | ["meta", "close", "select", "maint"]), select?, skip?: [...], only?: [...], telegram_force?, now?}
- *   GET  /api/admin/status   estado (state + instancia) ?id=<instancia> &counts=1 (estimado) | &counts=exacto
- *   GET  /api/admin/espacio  lo que ocupa la base D1 (lo mismo que espacio() para el Almacén) ?exacto=1
- *   POST /api/admin/import   {table, columns, rows}  (migración, por lotes)
- *   POST /api/admin/rebuild  recalcula la tabla hist desde daily y lanza un export
- *   POST /api/admin/export   lanza un Workflow que solo regenera el export
- *   POST /api/admin/backfill {ids?}  copia a samples las lecturas del radar de 48 h (por defecto, de los seguidos)
- *
- * *.workers.dev no pasa por Access: ahí solo responde /api/admin/*; todo lo
- * demás es 404.
- *
- * Los módulos que descarga el navegador se incrustan como texto al empaquetar
- * (`import … with { type: "text" }`, lo resuelve esbuild en `wrangler deploy`
- * / `wrangler deploy --dry-run --outdir dist`), así que web y Worker usan
- * siempre el mismo código. El esquema (schema.sql) NO se incrusta: wrangler
- * trata los .sql como módulo aparte; se aplica con `wrangler d1 execute`.
- *
- * Bindings: DB (D1), BUCKET (R2 común `stonks-archivos`: el tracker solo usa su
- * carpeta `roblox-tracker/`, ver stonks.js), SAMPLER (Workflow). Secrets:
- * ADMIN_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID. El entrypoint `Operaciones`
- * (stonks.js) es para el Almacén de STONKS: espacio() y nombres().
- */
-
 import configSrc from "./config.js" with { type: "text" };
 import metricsSrc from "./metrics.js" with { type: "text" };
 import horrorSrc from "./horror.js" with { type: "text" };
@@ -66,6 +29,7 @@ export default {
     const path = url.pathname;
     try {
       if (path.startsWith("/api/admin/")) return await admin(req, env, url);
+      // *.workers.dev no pasa por Access: ahí solo /api/admin/*, que pide ADMIN_TOKEN.
       if (url.hostname.endsWith(".workers.dev")) return text("No encontrado", 404);
       if (req.method !== "GET" && req.method !== "HEAD") return text("Método no permitido", 405);
 
@@ -99,7 +63,6 @@ export default {
   },
 };
 
-// ─── Respuestas ─────────────────────────────────────────────────────────────
 function json(data, status = 200, maxAge = 0) {
   return new Response(typeof data === "string" ? data : JSON.stringify(data), {
     status,
@@ -125,7 +88,6 @@ async function getJson(url, cacheTtl) {
   return r.json();
 }
 
-// ─── Web (R2) ───────────────────────────────────────────────────────────────
 async function site(env, path) {
   let key;
   if (path === "/" || path === "/index.html" || path === "/dashboard.html") key = "site/dashboard.html";
@@ -163,7 +125,6 @@ async function historyRoute(env, id) {
   return json(out, 200, 300);
 }
 
-// ─── En vivo (port de worker/worker.js) ─────────────────────────────────────
 async function live(url) {
   const ids = parseIds(url, MAX_LIVE_IDS);
   if (!ids.length) return json({ error: "Faltan ids" }, 400);
@@ -214,7 +175,6 @@ async function game(id) {
   }, 200, 30);
 }
 
-// ─── Admin ──────────────────────────────────────────────────────────────────
 async function authorized(req, env) {
   if (!env.ADMIN_TOKEN) return false;
   const got = new TextEncoder().encode(req.headers.get("authorization") || "");
@@ -247,7 +207,6 @@ async function admin(req, env, url) {
     if (action === "run") {
       const body = await readBody(req);
       const params = {};
-      // daily: true (todas las tareas del día) o una lista: ["close"], ["meta", "select"]…
       if (Array.isArray(body.daily)) params.daily = body.daily.map(String);
       else if (body.daily) params.daily = true;
       if (body.select) params.select = true;
@@ -279,8 +238,7 @@ async function admin(req, env, url) {
       const inst = await env.SAMPLER.create({ id: `export-${stamp()}`, params: { only: ["export"] } });
       return json({ export_instance: inst.id });
     }
-    // Para rellenar a mano los huecos de juegos ya seguidos (select solo
-    // rellena los que entran). Solo escribe las muestras que faltan.
+    // select solo rellena los que entran; esto, los huecos de los ya seguidos.
     if (action === "backfill") {
       const body = await readBody(req);
       const ids = Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isSafeInteger) : null;
@@ -304,8 +262,7 @@ async function adminStatus(env, url) {
   }
   const counts = url.searchParams.get("counts");
   if (counts && counts !== "exacto") {
-    // Las filas del desglose de espacio() (de las últimas 24 h, y estimadas en
-    // daily y sort_hits): contarlas recorre todas las tablas (~60.000 filas hoy)
+    // Del desglose de espacio(): contar de verdad recorre todas las tablas (~60.000 filas).
     const [esp, radar] = await Promise.all([espacioD1(env.DB), radarCounts(env.DB)]);
     const n = name => esp.base.tablas.find(t => t.nombre === name)?.filas ?? null;
     out.counts = {

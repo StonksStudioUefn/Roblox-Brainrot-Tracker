@@ -1,12 +1,4 @@
-/**
- * sources.test.mjs — getJson() contra un servidor local que se queda colgado.
- *
- *   node --test test/sources.test.mjs
- *
- * Una petición sin respuesta (o con el cuerpo a medias) tiene que acabar en
- * `timeout` ms como un fallo más: reintenta, gasta del Budget y da null. Antes
- * no tenía tope y bloqueaba su paso del Workflow hasta sus 10 minutos.
- */
+// Sin tope, una petición colgada bloqueaba su paso del Workflow sus 10 min.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { after, before, test } from "node:test";
@@ -18,7 +10,7 @@ before(async () => {
   server = createServer((req, res) => {
     const path = req.url.slice(1);
     hits[path] = (hits[path] || 0) + 1;
-    if (path === "cuelga") return;   // ni cabeceras
+    if (path === "cuelga") return;
     if (path === "cuerpo") { res.writeHead(200, { "content-type": "application/json" }); res.write('{"data": ['); return; }
     res.writeHead(200, { "content-type": "application/json" });
     res.end('{"data": [1]}');

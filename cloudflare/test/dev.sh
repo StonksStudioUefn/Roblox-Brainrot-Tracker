@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Arranca `wrangler dev --local` sobre una copia de src/ en test/.build, rellenando
-# con test/stubs/ los módulos de otros equipos que aún no existan.
-# Uso: test/dev.sh [--port 8787]      (estado local persistente en test/.state)
+# Uso: test/dev.sh [--port 8787]   (estado local en test/.state)
 set -euo pipefail
 shopt -s nullglob
 cd "$(dirname "$0")/.."

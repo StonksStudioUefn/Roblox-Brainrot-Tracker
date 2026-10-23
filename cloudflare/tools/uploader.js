@@ -1,12 +1,4 @@
-/**
- * roblox-uploader — Worker auxiliar para subir la web y los bundles de despliegue
- * del tracker a su carpeta del bucket común (stonks-archivos/roblox-tracker/).
- * Lo usan los despliegues por la API de Cloudflare (sin wrangler con cuenta):
- *   curl -X PUT -H "Authorization: Bearer $ADMIN_TOKEN" --data-binary @public/dashboard.html \
- *        -H "Content-Type: text/html; charset=utf-8" https://roblox-uploader.<cuenta>.workers.dev/file/site/dashboard.html
- * Bindings: BUCKET (R2 stonks-archivos). Secret: ADMIN_TOKEN (el mismo que el tracker).
- * Solo acepta claves de site/ y deploy/.
- */
+// Despliegue por la API de Cloudflare (sin wrangler): solo claves de site/ y deploy/.
 const PREFIX = "roblox-tracker/";
 
 export default {
