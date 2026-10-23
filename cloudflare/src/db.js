@@ -15,7 +15,7 @@ export const isoDate = ts => new Date(ts * 60000).toISOString().slice(0, 10);
 export const dayStart = date => Date.parse(`${date}T00:00:00Z`) / 60000;
 export const addDays = (date, n) => isoDate(dayStart(date) + n * DAY_MIN);
 export const openDayOf = (closed, nowMs) => (closed ? addDays(closed, 1) : isoDate(minuteOf(nowMs)));
-// El export y /api/history cortan igual entre daily y samples: si no, un día sale dos veces o ninguna
+// El export y /api/history cortan igual entre daily y samples: si no, un día sale 2 o 0 veces
 const clampOpenDay = (openDay, today) => (openDay && openDay < today ? openDay : today);
 
 // round() de Python lleva los .5 al par y ROUND de SQLite arriba: fallaba el 30 % de las medianas

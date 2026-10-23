@@ -1,5 +1,5 @@
 //   node --import ./test/cf_loader.mjs test/export.bench.mjs <src> <salida> [--persist=test/.state] [--now=ISO] [--config=wrangler.toml]
-// En Windows, d1 execute --file con un volcado grande falla y la ruta de --persist tiene que ser corta.
+// En Windows, d1 execute --file con un volcado grande falla y --persist necesita una ruta corta.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";

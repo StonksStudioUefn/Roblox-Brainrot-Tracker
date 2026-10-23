@@ -1,5 +1,5 @@
-// node test/metrics.parity.mjs [--actualizar] — buildDashboard sobre data/ de 99d2ee9; sale con 1 si cambia.
-// Desde e9b720d metrics.js ya no es el port de export_dashboard.py: se compara con su propia salida.
+// node test/metrics.parity.mjs [--actualizar] — buildDashboard sobre data/ de 99d2ee9; 1 si cambia.
+// Desde e9b720d metrics.js ya no es port de export_dashboard.py: se compara con su propia salida.
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';

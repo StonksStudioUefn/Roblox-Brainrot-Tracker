@@ -1,4 +1,4 @@
-// node test/telegram.cpu.mjs <export.json> <now ISO> [--runs=5] — CPU del paso telegram, en frío y en caliente.
+// node test/telegram.cpu.mjs <export.json> <now ISO> [--runs=5] — CPU del paso telegram.
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

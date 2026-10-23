@@ -1,4 +1,4 @@
-// workers.dev no pasa por Access: ahí solo /api/admin/*, y ADMIN_TOKEN se compara en tiempo constante.
+// workers.dev no pasa por Access: ahí solo /api/admin/*; ADMIN_TOKEN, en tiempo constante.
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

@@ -1,4 +1,4 @@
-// node test/metrics.bench.mjs [export.json] — CPU de buildDashboard (candidatos y 1.000 juegos), un proceso nuevo por medida.
+// node test/metrics.bench.mjs [export.json] — CPU de buildDashboard, un proceso nuevo por medida.
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';

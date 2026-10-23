@@ -1,4 +1,4 @@
-// classifyHorror y cleanTitle frente a analytics.py, con detalles frescos de la Games API (o su caché); sale con 1 si difieren.
+// classifyHorror y cleanTitle = analytics.py, con la Games API (o su caché); sale con 1 si difieren.
 //   node cloudflare/test/horror.parity.mjs [--fresh]
 //   node cloudflare/test/horror.parity.mjs --det fichero.json
 

@@ -273,7 +273,7 @@ for (let round = 0; round < ROUNDS; round++) {
         R() < 0.2 ? (R() < 0.5 ? 0 : null) : int(1, 1e6), R() < 0.2 ? null : int(0, 1e6), R() < 0.2 ? null : int(0, 1e5)]);
     }
     await insert("daily", DAILY_COLS, rows);
-    // Orden de cierres: los días en orden, uno repetido (votos nuevos del mismo día) y uno viejo fuera de orden
+    // Días en orden, uno repetido (votos nuevos del mismo día) y uno viejo fuera de orden
     const order = [...days.slice(0, 12), days[11], days[3], ...days.slice(12)];
     const revote = async d => db.prepare("UPDATE daily SET favorites = favorites + 1, up = COALESCE(up, 0) + 2 WHERE date = ?1").bind(d).run();
     const run = async fn => { for (const [i, d] of order.entries()) { if (i === 12) await revote(d); await fn(d, i); } };
