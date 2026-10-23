@@ -1,28 +1,19 @@
-/**
- * config.js — Configuración única del tracker (Worker, Workflow y navegador).
- *
- * Es un módulo ES sin dependencias: lo importan el Worker (muestreo, horror,
- * Telegram) y el dashboard (métricas), que lo descarga de /config.js.
- * Port fiel de config.py.
- */
+// Port fiel de config.py: un cambio aquí va también allí.
 
-// ─── Recolección ──────────────────────────────────────────────────────────────
-export const TRACK_MIN_PLAYERS = 300;     // por debajo de esto no se toman muestras
-export const UNTRACK_AFTER_DAYS = 3;      // días seguidos por debajo → deja de seguirse
-export const SAMPLE_RETENTION_DAYS = 8;   // muestras de cada hora en D1 (el resto vive en `daily`)
-export const DATA_RETENTION_DAYS = 365;   // filas diarias y puestos en listas: se borran al pasar un año
-export const RADAR_EVERY_HOURS = 3;       // el radar (Rolimons) se lee cada 3 h: para su dato diario basta
-export const EXPORT_DAILY_DAYS = 24;      // filas de serie diaria por juego en /api/export (últimas N filas; 24 = paridad con Python)
-export const EXPORT_SAMPLE_HOURS = 48;    // horas de muestras intradía en /api/export
-export const HISTORY_DAYS = 365;          // días de serie en /api/history/:id (semana, mes y año de la ficha)
-export const HISTORY_SAMPLE_DAYS = 2;     // días de muestras en /api/history/:id (la vista "Día", por horas)
+export const TRACK_MIN_PLAYERS = 300;
+export const UNTRACK_AFTER_DAYS = 3;
+export const SAMPLE_RETENTION_DAYS = 8;
+export const DATA_RETENTION_DAYS = 365;
+export const RADAR_EVERY_HOURS = 3;       // para el dato diario basta
+export const EXPORT_DAILY_DAYS = 24;      // 24 = paridad con Python
+export const EXPORT_SAMPLE_HOURS = 48;
+export const HISTORY_DAYS = 365;
+export const HISTORY_SAMPLE_DAYS = 2;
 
-// Hasta 2 días después no se marca ningún juego como "recién detectado"
-// (al empezar, todo el catálogo es nuevo para el tracker).
+// Al empezar todo el catálogo es nuevo: nadie es «recién detectado» los 2 primeros días.
 export const SCAN_START = "2026-10-02";
 
-// Palabras que el buscador oficial de Roblox recorre por turnos (1 por muestreo,
-// cada hora: cada palabra sale ~1,5 veces al día sin forzar el límite del buscador)
+// 1 palabra por hora: cada una ~1,5 veces al día sin forzar el límite del buscador.
 export const SEARCH_QUERIES = [
   "horror", "killer", "jumpscare", "escape monster", "haunted", "scary",
   "backrooms", "nightmare", "anomaly", "survive the night", "creepy", "fnaf",
@@ -31,26 +22,19 @@ export const SEARCH_QUERIES = [
 export const SEARCH_QUERIES_PER_RUN = 1;
 export const SEARCH_PAGES_PER_QUERY = 3;
 
-// ─── Radar y juegos seguidos ──────────────────────────────────────────────────
-// El radar mira en cada muestreo todos los juegos con ≥ TRACK_MIN_PLAYERS (la
-// lista de Rolimons: 1 petición) y guarda de cada uno un solo dato al día.
-// Solo los juegos SEGUIDOS (elegidos una vez al día) tienen muestras cada hora,
-// votos y salen en la web y en Telegram.
 export const SELECTION = {
-  top: 10,                 // los que más jugadores tienen, en cada pestaña
-  emerging_general: 150,   // mejores candidatos a emergente (todo Roblox)
-  emerging_horror: 50,     // mejores candidatos a emergente de horror
-  keep_factor: 1.5,        // un juego ya seguido sigue mientras esté en el 150 % de su lista
+  top: 10,
+  emerging_general: 150,
+  emerging_horror: 50,
+  keep_factor: 1.5,
 };
 
-// ─── Categorías (pestañas del dashboard) ──────────────────────────────────────
 // Con min_players = TRACK_MIN_PLAYERS cada pestaña lista todos sus juegos seguidos.
 export const CATEGORIES = {
-  general: { label: "General", icon: "🎮", min_players: 300, classifier: "all" },
-  horror: { label: "Horror", icon: "👻", min_players: 300, classifier: "horror" },
+  general: { label: "General", icon: "🎮", min_players: TRACK_MIN_PLAYERS, classifier: "all" },
+  horror: { label: "Horror", icon: "👻", min_players: TRACK_MIN_PLAYERS, classifier: "horror" },
 };
 
-// ─── Clasificación de horror ──────────────────────────────────────────────────
 export const HORROR = {
   threshold: 5,
   name_strong: [
@@ -104,41 +88,30 @@ export const HORROR = {
   force_exclude: [],
 };
 
-// ─── Emergentes ───────────────────────────────────────────────────────────────
 export const EMERGING = {
   max_visits: 30_000_000,
   min_players: 300,
   max_age_days: 120,
   min_score: 45,
   max_results: 24,
-  // Listas oficiales de Roblox que cuentan como señal de "está despegando"
   roblox_sorts: ["up-and-coming", "top-trending"],
 };
 
-// ─── Eventos / picos ──────────────────────────────────────────────────────────
 export const EVENTS = {
   window_days: 7,
   mad_k: 3.5,
   min_ratio: 1.6,
-  spike_now_ratio: 1.8,      // «Pico ahora»: la muestra de ahora frente a la mediana de los máximos de 7 días
-  spike_weekday_ratio: 1.5,  // y frente al máximo del mismo día de la semana de hace 1-3 semanas
+  spike_now_ratio: 1.8,
+  spike_weekday_ratio: 1.5,
 };
 
-// ─── Telegram ─────────────────────────────────────────────────────────────────
-// Telegram es más exclusivo que la web: solo avisa de juegos que ya están
-// petando. Con los datos del 2 al 13/10/2026 (D1), la alerta antigua
-// (emergente ≥ 70 puntos, desde 300 jugadores) mandó ~170 avisos en 12 días;
-// con estos límites salen ~1 por día (todos los géneros), de juegos con
-// 40K-120K jugadores.
+// Medido 2–13/10/2026: con 70 puntos desde 300 jugadores, ~170 avisos en 12 días; así, ~1 al día.
 export const TELEGRAM = {
-  report_hour_utc: 18,     // el resumen diario sale en el primer muestreo desde esta hora
-  // Alerta «PETANDO» (una vez por juego, de cualquier género):
-  alert_min_players: 40_000,   // jugadores AHORA (última muestra)
-  alert_min_typical: 20_000,   // y jugadores típicos (mediana 24 h): sostenido, no un pico de una hora
-  alert_max_age_days: 120,     // juego nuevo (creado hace ≤ 120 días), no un clásico de siempre
+  report_hour_utc: 18,
+  alert_min_players: 40_000,
+  alert_min_typical: 20_000,   // sostenido, no un pico de una hora
+  alert_max_age_days: 120,     // juego nuevo, no un clásico de siempre
   max_alerts_per_run: 3,
-  // Resúmenes diario y semanal: solo juegos con al menos estos jugadores típicos.
-  // Una categoría sin ninguno no manda mensaje ese día.
   report_min_players: 10_000,
   list_size: 5,
   title_chars: 30,

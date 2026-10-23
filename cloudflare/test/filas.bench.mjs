@@ -1,48 +1,11 @@
-/**
- * filas.bench.mjs — Filas de D1 (leídas y escritas) de pasadas COMPLETAS del
- * muestreo: el Workflow `Sampler` de verdad, con Roblox y Rolimons simulados,
- * R2 en memoria y un D1 local (miniflare) del tamaño de producción.
- *
- *   node --import ./test/cf_loader.mjs test/filas.bench.mjs [hoy|regimen|anio|todos|regimen,anio] [--src=src] [-v] [--dia] [--seed]
- *     [--sin-topes] [--sin-cascada] [--exacto] [--salida=<carpeta>]
- *
- * El plan gratis da 5 M filas leídas al día a TODA la cuenta, y al pasarse D1
- * cae en todas las apps hasta las 00:00 UTC: esta prueba falla si una pasada se
- * pasa de su tope o si una consulta crece con el tamaño de la base.
- *
- * Escenarios (2.953 juegos, 2.797 en el radar, 242 seguidos, como el 05/10/2026):
- *   hoy      ~4 días de muestras, 10 filas diarias por juego, 3 días de puestos
- *   regimen  9 días de muestras, 30 filas diarias, 30 días de puestos
- *   anio     9 días de muestras, 365 filas diarias (~1 M), 365 días de puestos (~650 k)
- * La base se siembra una vez en test/.filas/<escenario>/semilla (--seed la
- * rehace) como estaba en producción antes de este cambio (con state.hist_agg)
- * y cada prueba trabaja sobre una copia.
- *
- * Pasadas: 23:00 (calentamiento: la primera tras desplegar, con lo que haya que
- * migrar) → 00:00 (la primera del día: meta, cierre, selección, mantenimiento y
- * export_d nuevo) → 01:00 y 02:00 (normales) → 03:00 (con radar). Día ≈
- * 00:00 + 7 × radar + 16 × normal; con --dia se corren las 24 de verdad.
- *
- * Comprobaciones (salvo --sin-topes):
- *   - cada pasada, por debajo de TOPES (≈ 20 % sobre lo medido el 05/10/2026);
- *   - ninguna consulta lee > 20 % (y > 10.000 filas) más en `anio` que en
- *     `regimen` (misma pasada y misma consulta): eso es recorrer daily o
- *     sort_hits enteras, que crecen con los días.
- * Y con `regimen` (salvo --sin-cascada): «cascada» (un cierre que falla
- * siempre), «cortes» (dos pasadas que se cortan antes de las tareas del día
- * no les gastan los intentos, y maint borra lo que deja en tmp/run/ una pasada
- * cortada hace más de un día), «sin intento» (si no se puede apuntar el
- * intento de una tarea del día, no se hace) y «migración» (la primera pasada tras desplegar,
- * con state.hist_agg, es la de las 00:00: hist tiene que acabar igual que
- * recalculada desde daily, con y sin el esquema aplicado).
- * --src=<carpeta> mide otra versión del código (p. ej. una copia de main) con
- * los mismos datos: así se compara antes y después. --salida=<carpeta> guarda
- * el export y telegram.json de cada pasada (para `cmp -r` entre versiones).
- */
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+//   node --import ./test/cf_loader.mjs test/filas.bench.mjs [hoy|regimen|anio|todos|regimen,anio] [--src=src] [-v] [--dia] [--seed]
+//     [--sin-topes] [--sin-cascada] [--salida=<carpeta>]
+// D1 da 5 M filas leídas al día a TODA la cuenta y al pasarse cae hasta las 00:00 UTC: topes.
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { getPlatformProxy } from "wrangler";
+import { aplicarEsquema, contador, memBucket, rng } from "./comun.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
@@ -56,13 +19,7 @@ const SCEN = {
   regimen: { sampleDays: 9, dailyPerGame: 30, sortDays: 30 },
   anio: { sampleDays: 9, dailyPerGame: 365, sortDays: 365 },
 };
-// Topes por pasada (filas leídas), ~20 % sobre lo medido tras optimizar (05/10/2026, con --dia):
-//            00:00    normal (01:00 → 23:00)   radar (03:00)   día
-//   hoy      181 k    15 k → 21,6 k            24,7 k          691 k
-//   regimen  212 k    15 k → 21,6 k            24,7 k          722 k
-//   anio     217 k    15 k → 21,6 k            24,7 k          727 k
-// (la pasada normal crece durante el día: los que entran en la selección a las
-// 00:00 solo traen el relleno del radar y van sumando muestras de 48 h)
+// ~20 % sobre lo medido el 05/10/2026 con --dia (README, «Filas leídas por pasada»).
 const TOPES = {
   hoy: { "00:00": 217_000, normal: 26_000, radar: 30_000, dia: 830_000 },
   regimen: { "00:00": 254_000, normal: 26_000, radar: 30_000, dia: 866_000 },
@@ -76,16 +33,14 @@ if (scens.some(s => !SCEN[s])) throw new Error(`Escenario desconocido: ${wanted}
 
 const mod = f => import(pathToFileURL(resolve(SRC, f)).href);
 const D = await mod("db.js");
-const { Sampler } = await mod("sampler.js");
+const { DAILY_TRIES, Sampler } = await mod("sampler.js");
 const { classifyHorror } = await mod("horror.js");
 const { TRACK_MIN_PLAYERS } = await mod("config.js");
 const { espacioD1 } = await mod("stonks.js");
 
-// ─── El mundo simulado (determinista) ───────────────────────────────────────
 const NG = 2953, NT = 2797, NSEL = 242, NPLACES = 2582;
 const DAY0 = "2026-10-05";                       // día de la semilla (abierto); 2026-10-04 cerrado
 const T0 = D.dayStart(DAY0) + 22 * 60;           // última muestra de la semilla: 05/10 22:00
-const rng = seed => () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
 const R = rng(12345);
 const ids = [...new Set(Array.from({ length: NG + 50 }, () => 1_000_000 + Math.floor(R() * 10_767_000_000)))].slice(0, NG).sort((a, b) => a - b);
 const tracked = ids.slice(0, NT).sort(() => R() - 0.5);
@@ -162,30 +117,9 @@ function gameTuple(id) {
   return { universeId: id, rootPlaceId: pidOf(id), name: `Juego ${idx.get(id)}`, playerCount: playing(id, NOW_TS) };
 }
 
-// ─── R2 en memoria ──────────────────────────────────────────────────────────
-function memBucket() {
-  const store = new Map(), uploaded = new Map();   // uploaded: con la hora simulada
-  const text = async v => typeof v === "string" ? v : v instanceof ReadableStream ? new Response(v).text() : new TextDecoder().decode(v);
-  const obj = (k, t) => ({ key: k, size: Buffer.byteLength(t), text: async () => t, json: async () => JSON.parse(t), get body() { return new Response(t).body; }, httpEtag: "x" });
-  return {
-    store,
-    seed(k, t, date) { store.set(k, t); uploaded.set(k, date); },
-    async put(k, v) { const t = await text(v); store.set(k, t); uploaded.set(k, new Date(NOW_TS * 60000)); return { key: k, size: Buffer.byteLength(t) }; },
-    async get(k) { return store.has(k) ? obj(k, store.get(k)) : null; },
-    async head(k) { return store.has(k) ? obj(k, store.get(k)) : null; },
-    async list({ prefix = "", limit = 1000 } = {}) {
-      const keys = [...store.keys()].filter(k => k.startsWith(prefix)).sort().slice(0, limit);
-      return { objects: keys.map(key => ({ key, size: Buffer.byteLength(store.get(key)), uploaded: uploaded.get(key) })), truncated: false, delimitedPrefixes: [] };
-    },
-    async delete(keys) { for (const k of [].concat(keys)) { store.delete(k); uploaded.delete(k); } },
-  };
-}
-globalThis.FixedLengthStream ??= class { constructor() { const t = new TransformStream(); this.readable = t.readable; this.writable = t.writable; } };
 
-// ─── Semilla ────────────────────────────────────────────────────────────────
 async function seed(raw, s) {
-  const schema = readFileSync(resolve(ROOT, "schema.sql"), "utf8").replace(/--.*$/gm, "");
-  for (const q of schema.split(";").map(x => x.trim()).filter(Boolean)) await raw.prepare(q).run();
+  await aplicarEsquema(raw);
   const chunked = async (sql, rows, n = 20000) => {
     for (let i = 0; i < rows.length; i += n) await raw.prepare(sql).bind(JSON.stringify(rows.slice(i, i + n))).run();
   };
@@ -237,7 +171,6 @@ async function seed(raw, s) {
   for (const [k, v] of Object.entries(st)) await D.setState(raw, k, v);
 }
 
-/** Ficheros del radar de los dos días anteriores a la primera pasada (cierre y relleno). */
 function seedRadar(bucket) {
   for (const date of [D.addDays(DAY0, -1), DAY0]) {
     for (let h = 0; h < 24; h += 3) {
@@ -250,42 +183,11 @@ function seedRadar(bucket) {
   }
 }
 
-// ─── Contador de filas ──────────────────────────────────────────────────────
-function counting(raw, log, tagRef, fallos = new Set()) {
-  const add = (sql, meta) => log.push({ tag: tagRef.tag, sql: sql.replace(/\s+/g, " ").trim().slice(0, 80), read: meta?.rows_read ?? 0, written: meta?.rows_written ?? 0 });
-  // fallos: pasos cuyas escrituras (batch y run) fallan; tagRef.corte: un paso en el que falla todo (la ejecución se corta)
-  const corte = () => { if (tagRef.corte && tagRef.tag === tagRef.corte) throw new Error(`corte simulado en ${tagRef.tag}`); };
-  class Stmt {
-    constructor(s, sql) { this.s = s; this.sql = sql; }
-    bind(...a) { return new Stmt(this.s.bind(...a), this.sql); }
-    async all() { corte(); const r = await this.s.all(); add(this.sql, r.meta); return r; }
-    async run() {
-      corte();
-      if (fallos.has(tagRef.tag)) throw new Error(`fallo simulado en ${tagRef.tag}`);
-      const r = await this.s.run(); add(this.sql, r.meta); return r;
-    }
-    async raw(o) { return this.s.raw(o); }
-    // first() de D1 no devuelve meta: se hace con all() para contar sus filas
-    async first(col) { const row = (await this.all()).results[0]; return row ? (col ? row[col] : row) : null; }
-  }
-  return {
-    prepare: sql => new Stmt(raw.prepare(sql), sql),
-    async batch(list) {
-      corte();
-      if (fallos.has(tagRef.tag)) throw new Error(`fallo simulado en ${tagRef.tag}`);
-      const r = await raw.batch(list.map(x => x.s));
-      r.forEach((x, i) => add(list[i].sql, x.meta));
-      return r;
-    },
-    exec: sql => raw.exec(sql),
-  };
-}
 
-// ─── Una pasada: la cadena de ejecuciones del Workflow ─────────────────────
 async function pasada(env, tagRef, iso) {
   NOW_TS = D.minuteOf(Date.parse(iso));
   const queue = [{ id: `cron-${iso.slice(0, 16)}`, params: { now: iso } }];
-  env.SAMPLER = { create: async ({ id, params }) => { queue.push({ id, params }); return { id }; }, get: async () => ({ status: async () => ({}) }) };
+  env.SAMPLER = { create: async ({ id, params }) => { queue.push({ id, params }); return { id }; } };
   const errors = [];
   let summary = null;
   while (queue.length) {
@@ -324,9 +226,9 @@ async function scenario(name, { hours, fallos = new Set(), cortes = {}, work = "
   cpSync(seedDir, workDir, { recursive: true });
   const proxy = await getPlatformProxy({ configPath: resolve(HERE, "filas.wrangler.toml"), persist: { path: workDir } });
   const log = [], tagRef = { tag: "" };
-  const bucket = memBucket();
+  const bucket = memBucket(() => new Date(NOW_TS * 60000));
   seedRadar(bucket);
-  const env = { DB: counting(proxy.env.DB, log, tagRef, fallos), BUCKET: bucket };
+  const env = { DB: contador(proxy.env.DB, log, tagRef, fallos), BUCKET: bucket };
   if (alPrincipio) await alPrincipio(proxy.env.DB, bucket);
   const runs = [];
   for (const [k, iso] of hours.entries()) {
@@ -338,7 +240,6 @@ async function scenario(name, { hours, fallos = new Set(), cortes = {}, work = "
     const q = log.slice(i);
     const st = await D.getStates(proxy.env.DB, ["meta_day", "closed_day", "sel_day", "maint_day", "daily_tries"]);
     runs.push({ iso, hh, read: sum(q, "read"), written: sum(q, "written"), q, errors, summary, st });
-    // --salida=<carpeta>: el export de cada pasada, para compararlo con el de otra versión (cmp)
     if (arg("salida")) {
       mkdirSync(resolve(arg("salida"), name, work), { recursive: true });
       for (const k of ["export", "telegram"]) {
@@ -346,19 +247,14 @@ async function scenario(name, { hours, fallos = new Set(), cortes = {}, work = "
       }
     }
   }
-  // espacio() del Almacén: el desglose se rehace como mucho una vez al día
   let esp = null;
   if (espacio) {
     await proxy.env.DB.prepare("DELETE FROM state WHERE key = 'espacio'").run();
     const i = log.length;
     tagRef.tag = "espacio";
-    const r = await espacioD1(env.DB);
+    await espacioD1(env.DB);
     const q = log.slice(i);
-    esp = { read: sum(q, "read"), written: sum(q, "written"), q, tablas: r.base.tablas };
-    if (flag("--exacto")) {
-      const ex = await espacioD1(proxy.env.DB, { exacto: true });
-      esp.exacto = ex.base.tablas;
-    }
+    esp = { read: sum(q, "read"), written: sum(q, "written"), q };
   }
   const extra = alFinal ? await alFinal(proxy.env.DB, bucket) : null;
   await proxy.dispose();
@@ -366,7 +262,6 @@ async function scenario(name, { hours, fallos = new Set(), cortes = {}, work = "
 }
 
 const seeded = new Set();
-/** 05/10 23:00 (calentamiento) y `n` pasadas cada hora desde el 06/10 00:00. */
 const horas = n => [T0 + 60, ...Array.from({ length: n }, (_, h) => D.dayStart(D.addDays(DAY0, 1)) + h * 60)]
   .map(ts => new Date(ts * 60000).toISOString());
 
@@ -404,7 +299,7 @@ for (const name of scens) {
     ? day.reduce((a, r) => a + r[k], 0)
     : by("00")[k] + 7 * by("03")[k] + 8 * (by("01")[k] + by("02")[k]);
   const dia = total("read") + esp.read, diaW = total("written") + esp.written;
-  results[name] = { runs, dia };
+  results[name] = { runs };
   out(`\n══ ${name} (${SRC === resolve(ROOT, "src") ? "src" : SRC}) ══`);
   for (const r of runs) {
     printRun(r);
@@ -412,7 +307,6 @@ for (const name of scens) {
   }
   out(`espacio() (Almacén, desglose rehecho: 1 al día) ${fmt(esp.read).padStart(10)} leídas ${fmt(esp.written).padStart(8)} escritas`);
   if (VERBOSE) for (const x of esp.q) out(`        ${fmt(x.read).padStart(9)} r ${fmt(x.written).padStart(7)} w  ${x.sql}`);
-  if (esp.exacto) for (const t of esp.tablas) out(`        ${t.nombre.padEnd(10)} estimadas ${fmt(t.filas).padStart(9)} · exactas ${fmt(esp.exacto.find(e => e.nombre === t.nombre)?.filas ?? "?").padStart(9)}`);
   out(`Día (${flag("--dia") ? "24 pasadas" : "00:00 + 7 × radar + 16 × normal"} + espacio()): ${fmt(dia)} leídas, ${fmt(diaW)} escritas`);
   if (!flag("--sin-topes")) {
     const t = TOPES[name];
@@ -426,33 +320,29 @@ for (const name of scens) {
   }
 }
 
-// Un cierre que falla no repite cada hora las tareas del día: cada una tiene su
-// marca y como mucho DAILY_TRIES intentos (antes, ~450.000 filas por hora)
-if (scens.includes("regimen") && !flag("--sin-cascada")) {
+const extras = scens.includes("regimen") && !flag("--sin-cascada");
+const didMeta = r => r.q.some(x => x.sql.startsWith("UPDATE games SET place_id"));
+
+// Un cierre que falla no repite cada hora las tareas del día (antes, ~450.000 filas por hora)
+if (extras) {
   const { runs } = await scenario("regimen", { hours: horas(5), fallos: new Set(["close"]), work: "cascada" });
   out("\n══ cascada: el cierre falla siempre (regimen) ══");
-  const didMeta = r => r.q.some(x => x.sql.startsWith("UPDATE games SET place_id"));
   const didClose = r => r.errors.some(e => e.startsWith("close:"));
   for (const r of runs) {
     out(`${r.iso.slice(0, 16)}  ${fmt(r.read).padStart(10)} leídas${didMeta(r) ? "  meta" : ""}${didClose(r) ? "  cierre (falla)" : ""}`);
   }
   const later = runs.filter(r => ["02", "03", "04"].includes(r.hh));
-  const tope = TOPES.regimen.radar || Infinity;
+  const tope = TOPES.regimen.radar;
   const metaRuns = runs.filter(r => r.hh !== "cal" && didMeta(r)).length;
   const closeRuns = runs.filter(r => r.hh !== "cal" && didClose(r)).length;
-  if (metaRuns > 1 || closeRuns > 2 || later.some(r => r.read > tope)) {
+  if (metaRuns > 1 || closeRuns > DAILY_TRIES || later.some(r => r.read > tope)) {
     fail = true;
     out(`✗ cascada: meta en ${metaRuns} pasadas, cierre en ${closeRuns}; 02–04 h: ${later.map(r => fmt(r.read)).join(" / ")} leídas`);
-  } else out(`✓ cascada: meta en ${metaRuns} pasada, cierre en ${closeRuns} (tope ${2}); 02–04 h: ${later.map(r => fmt(r.read)).join(" / ")} leídas`);
+  } else out(`✓ cascada: meta en ${metaRuns} pasada, cierre en ${closeRuns} (tope ${DAILY_TRIES}); 02–04 h: ${later.map(r => fmt(r.read)).join(" / ")} leídas`);
 }
 
-// Una pasada que se corta antes de las tareas del día no gasta sus intentos:
-// a las 00:00 y a la 01:00 falla sample-list (sin safe(): la ejecución se
-// corta antes del meta, el cierre, select y maint) y a las 02:00 se hacen todas
-// Y lo que una pasada cortada deja en tmp/run/ (no llega a su `finish`) lo
-// borra maint cuando tiene más de un día; lo de las cortadas de hace 1–2 h se
-// queda (podría ser una pasada que sigue en marcha)
-if (scens.includes("regimen") && !flag("--sin-cascada")) {
+// Cortadas antes de las tareas del día no gastan intentos; maint borra su tmp/run/ pasado un día
+if (extras) {
   const VIEJO = "roblox-tracker/tmp/run/cron-2026-10-04T05:00/ids.json";
   const { runs, extra } = await scenario("regimen", {
     hours: horas(3), cortes: { "00": "sample-list-#", "01": "sample-list-#" }, work: "cortes",
@@ -475,16 +365,13 @@ if (scens.includes("regimen") && !flag("--sin-cascada")) {
   } else out(`✓ tmp/run: maint borra lo de una pasada cortada hace 2 días y deja lo de las de hace 1–2 h (${extra.cortadas} ficheros)`);
 }
 
-// Si no se puede apuntar el intento de una tarea del día (try-<tarea>), la
-// tarea no se hace en esa pasada: hecha sin apuntar no tiene tope. Aquí fallan
-// siempre los cuatro try-… y el cierre: antes se hacían las cuatro a las 00:00
-// y el cierre (que falla) se repetía cada hora, sin tope; ahora ninguna
-if (scens.includes("regimen") && !flag("--sin-cascada")) {
+// Sin apuntar el intento no se hace la tarea: hecha sin apuntar no tiene tope
+if (extras) {
   const tries = ["try-meta", "try-close", "try-select", "try-maint"];
   const { runs } = await scenario("regimen", { hours: horas(4), fallos: new Set([...tries, "close"]), work: "sin-intento" });
   out("\n══ sin intento: apuntar el intento falla siempre, y el cierre también (regimen) ══");
   const did = r => [
-    r.q.some(x => x.sql.startsWith("UPDATE games SET place_id")) && "meta",
+    didMeta(r) && "meta",
     (r.q.some(x => x.tag === "close") || r.errors.some(e => e.startsWith("close:"))) && "cierre",
     (r.q.some(x => x.tag === "select-plan") || r.errors.some(e => e.startsWith("select-plan:"))) && "select",
     (r.q.some(x => x.tag === "maint") || r.errors.some(e => e.startsWith("maint:"))) && "maint",
@@ -500,19 +387,13 @@ if (scens.includes("regimen") && !flag("--sin-cascada")) {
   } else out(`✓ sin intento: ninguna tarea del día sin su intento apuntado (${day.map(r => fmt(r.read)).join(" / ")} leídas)`);
 }
 
-// La primera pasada tras desplegar sobre una base con state.hist_agg es la de
-// las 00:00 (cierre, select y export): init pasa hist_agg a la tabla hist antes
-// de que nada la lea o escriba. hist tiene que acabar igual que recalculada
-// desde daily y el export no puede salir sin los datos de hist. Con el esquema
-// aplicado antes (tabla hist vacía) y sin él (la crea migrateHist).
-if (scens.includes("regimen") && !flag("--sin-cascada")) for (const esquema of [true, false]) {
-  const iso0 = new Date((D.dayStart(D.addDays(DAY0, 1))) * 60000).toISOString();
-  const schema = readFileSync(resolve(ROOT, "schema.sql"), "utf8").replace(/--.*$/gm, "");
+// 1ª pasada tras desplegar con hist_agg: hist igual que la de daily, con y sin el esquema aplicado
+if (extras) for (const esquema of [true, false]) {
   const { runs, extra } = await scenario("regimen", {
-    hours: [iso0, new Date((D.dayStart(D.addDays(DAY0, 1)) + 60) * 60000).toISOString()], work: "migracion",
+    hours: horas(2).slice(1), work: "migracion",
     alPrincipio: async db => {
       await db.prepare("DROP TABLE IF EXISTS hist").run();
-      if (esquema) for (const q of schema.split(";").map(x => x.trim()).filter(Boolean)) await db.prepare(q).run();
+      if (esquema) await aplicarEsquema(db);
     },
     alFinal: async (db, bucket) => {
       const exp = JSON.parse(bucket.store.get("roblox-tracker/data/export.json") || "{}");

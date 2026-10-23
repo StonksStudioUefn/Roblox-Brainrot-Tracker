@@ -1,24 +1,15 @@
-// Mide en Node la CPU de la parte de cómputo de cada paso del Workflow, con
-// respuestas reales guardadas. Cada medida corre en un proceso nuevo (sin JIT
-// caliente, como un isolate recién arrancado) con --single-threaded, N veces.
 //   node test/cpu_steps.mjs <dir_fixtures> [N]
-// Fixtures (ver README): games_pages.json, votes_pages.json (20 páginas de 50),
-// explore_pages.json, search_pages.json, rolimons.json, part-<i>.json (partes
-// del export en R2), telegram.json, ids.json.
-// La red, D1 y R2 no cuentan como CPU en Workers; aquí se simula lo que sí
-// cuenta: decodificar y parsear las respuestas, el cálculo y serializar.
+// Procesos Node nuevos (JIT frío, como un isolate recién arrancado); D1 y R2 no cuentan como CPU.
 import { readFileSync, readdirSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { enFrio, fmtMs } from "./comun.mjs";
 
-const SELF = fileURLToPath(import.meta.url);
-const LOADER = new URL("./cf_loader.mjs", import.meta.url).pathname;
 const dir = process.argv[2];
 
 if (process.env.CPU_STEP) {
   const step = process.env.CPU_STEP;
   const src = new URL("../src/", import.meta.url);
-  const { processGames, SAMPLE_CHUNK, META_CHUNK } = await import(new URL("sampler.js", src));
+  const { processGames, SAMPLE_CHUNK, META_CHUNK, TG_SCAN_GAMES } = await import(new URL("sampler.js", src));
   const { filterRolimons } = await import(new URL("sources.js", src));
   const tg = await import(new URL("telegram.js", src));
   const enc = new TextEncoder(), dec = new TextDecoder();
@@ -30,7 +21,6 @@ if (process.env.CPU_STEP) {
   const wire = obj => enc.encode(JSON.stringify({ results: [obj], success: true, meta: { rows_read: 1 } }));
   const parts = readdirSync(dir).filter(f => /^part-\d+\.json$/.test(f)).sort();
   const biggest = parts.map(f => read(f)).sort((a, b) => b.length - a.length)[0];
-  // Parte "en régimen": cada juego con 24 filas diarias y 16 muestras
   const steady = () => {
     const games = JSON.parse(`[${biggest}]`);
     for (const g of games) {
@@ -78,12 +68,10 @@ if (process.env.CPU_STEP) {
     const frag = step === "export-slice" ? biggest : steady();
     const w = wire({ frag, n: 1, last_ts: 1, ts24: "[1,2,3]" });
     fn = () => { const r = parse(w).results[0]; enc.encode(r.frag); return r.frag.length; };   // + put a R2 (UTF-8)
-  } else if (step === "export-join") {
-    fn = () => enc.encode(JSON.stringify({ generated_at: now, last_sample: now, samples_24h: 8 })).length;
   } else if (step === "tg-scan" || step === "tg-scan-steady") {
     const frag = step === "tg-scan" ? biggest : steady();
     const b = enc.encode(frag);
-    const n = JSON.parse(`[${frag}]`).length, k = Math.ceil(n / 100);
+    const n = JSON.parse(`[${frag}]`).length, k = Math.max(1, Math.ceil(n / TG_SCAN_GAMES));
     fn = () => tg.telegramScanText(`{"games":[${dec.decode(b)}]}`, { now, part: 0, parts: k }).length;
   } else if (step === "tg-reduce") {
     const rows = parts.flatMap(f => tg.telegramScanText(`{"games":[${read(f)}]}`, { now }));
@@ -93,20 +81,8 @@ if (process.env.CPU_STEP) {
     fn = () => {
       const { counts, ids } = tg.pickCandidates(JSON.parse(dec.decode(rowsWire)));
       const r = parse(w).results[0];
-      const text = `${JSON.stringify({ a: 1, totals: counts, telegram: { counts, total: 1, candidates: ids.size } }).slice(0, -1)},"games":[${r.frag}]}`;
+      const text = `${JSON.stringify({ a: 1, telegram: { counts, total: 1, candidates: ids.size } }).slice(0, -1)},"games":[${r.frag}]}`;
       return enc.encode(text).length;
-    };
-  } else if (step.startsWith("telegram")) {
-    const b = enc.encode(read("telegram.json"));
-    const force = step === "telegram-daily" ? "daily" : step === "telegram-weekly" ? "weekly" : undefined;
-    fn = async () => {
-      const r = await tg.runTelegram({
-        env: {}, exportData: parse(b), now, force, log: () => {},
-        getState: async () => ({ alerted: {}, last_daily: now.slice(0, 10), last_weekly: tg.isoWeek(new Date(now)) }),
-        setState: async () => {},
-        fetch: async () => new Response("{}"),
-      });
-      return r.messages;
     };
   }
   const t = process.cpuUsage();
@@ -118,16 +94,8 @@ if (process.env.CPU_STEP) {
 
 const N = Number(process.argv[3] || 5);
 const steps = ["explore-page", "explore-more", "search", "rolimons", "sample", "meta", "export-slice",
-  "export-slice-steady", "export-join", "tg-scan", "tg-scan-steady", "tg-reduce", "telegram", "telegram-daily", "telegram-weekly"];
+  "export-slice-steady", "tg-scan", "tg-scan-steady", "tg-reduce"];
 for (const s of steps) {
-  const ms = [];
-  let out;
-  for (let i = 0; i < N; i++) {
-    const r = JSON.parse(execFileSync(process.execPath, ["--single-threaded", "--no-warnings", "--import", LOADER, SELF, dir], {
-      env: { ...process.env, CPU_STEP: s },
-    }).toString());
-    ms.push(r.ms); out = r.out;
-  }
-  ms.sort((a, b) => a - b);
-  console.log(`${s.padEnd(20)} mediana ${ms[N >> 1].toFixed(2)} ms  (min ${ms[0].toFixed(2)} · max ${ms[N - 1].toFixed(2)})  [${out}]`);
+  const { ms, last } = enFrio(fileURLToPath(import.meta.url), [dir], { runs: N, env: { ...process.env, CPU_STEP: s } });
+  console.log(`${s.padEnd(20)} ${fmtMs(ms)}  [${last.out}]`);
 }

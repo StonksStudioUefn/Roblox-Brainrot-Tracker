@@ -1,14 +1,4 @@
-"""
-export_dashboard.py — Genera los JSON que lee dashboard.html.
-
-  data/dashboard.json  resumen de cada juego + listas por categoría (carga rápida)
-  data/history.json    series diarias e intradía (carga diferida)
-
-Iconos, miniaturas y descripciones no van aquí: la web los pide al Worker.
-
-Uso:
-  python export_dashboard.py
-"""
+"""Genera data/dashboard.json y history.json (referencia de metrics.js)."""
 
 import json
 from collections import defaultdict

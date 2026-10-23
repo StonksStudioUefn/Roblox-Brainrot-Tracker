@@ -1,14 +1,4 @@
-"""
-store.py — Lectura/escritura de los datos en disco.
-
-Formato (texto plano, para que git guarde solo las diferencias):
-  data/raw/AAAA-MM-DD.csv   muestras intradía   ts,universe_id,playing,visits
-  data/daily/AAAA-MM.csv    agregados por día   date,universe_id,n,median,mean,min,max,visits,favorites,up,down
-  data/games.json           ficha básica de cada juego {universe_id: {...}}
-
-Los ficheros viven en el bucket R2 de Cloudflare; remote.py los baja y los
-sube en cada ejecución.
-"""
+"""Datos en CSV y JSON de texto plano: así git guarda solo las diferencias."""
 
 import csv
 import json
@@ -27,7 +17,6 @@ def _int(v):
     return int(v) if v not in (None, "") else None
 
 
-# ─── Fichas de juegos ──────────────────────────────────────────────────────────
 def load_games() -> dict[int, dict]:
     if not GAMES_PATH.exists():
         return {}
@@ -46,7 +35,6 @@ def save_games(games: dict[int, dict]):
     )
 
 
-# ─── Muestras intradía ─────────────────────────────────────────────────────────
 def raw_path(d: date):
     return RAW_DIR / f"{d.isoformat()}.csv"
 
@@ -99,7 +87,6 @@ def prune_raw():
     return removed
 
 
-# ─── Agregados diarios ─────────────────────────────────────────────────────────
 def daily_path(month: str):
     return DAILY_DIR / f"{month}.csv"
 

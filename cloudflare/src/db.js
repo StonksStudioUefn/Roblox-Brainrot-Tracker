@@ -1,26 +1,12 @@
-/**
- * db.js — Acceso a D1: inserciones por lotes, cierre diario, export e historial.
- *
- * Idea general: el Worker apenas toca filas. Las filas viajan como UN parámetro
- * JSON (`json_each(?)`), así una sentencia inserta miles de filas sin pasar del
- * límite de 100 parámetros de D1 y sin construir SQL en JS, y los agregados y
- * el export los hace SQLite (window functions, json_group_array…): el Worker
- * solo recibe un string ya hecho.
- *
- * Escrituras: todos los UPSERT llevan `WHERE … IS NOT excluded…` para no
- * reescribir filas sin cambios (D1 cuenta filas escritas, no sentencias).
- *
- * Lecturas: `samples` no tiene índice por ts (ver schema.sql). Las consultas
- * por rango de tiempo recorren `games` y buscan por la clave primaria
- * (universe_id, ts) con CROSS JOIN, que obliga a SQLite a usar ese orden.
- */
+// Filas en UN parámetro JSON (json_each): D1 admite 100 parámetros por sentencia.
+// UPSERT con «IS NOT excluded»: D1 cuenta filas escritas, no sentencias.
+// samples no tiene índice por ts (schema.sql): por rango, desde games con CROSS JOIN por la clave.
 
 import {
   CATEGORIES, EMERGING, EXPORT_DAILY_DAYS, EXPORT_SAMPLE_HOURS,
   HISTORY_DAYS, HISTORY_SAMPLE_DAYS, TRACK_MIN_PLAYERS, UNTRACK_AFTER_DAYS,
 } from "./config.js";
 
-// ─── Tiempo ───────────────────────────────────────────────────────────────────
 // ts = minutos desde epoch UTC
 export const DAY_MIN = 1440;
 export const minuteOf = ms => Math.floor(ms / 60000);
@@ -28,37 +14,32 @@ export const isoMinute = ts => new Date(ts * 60000).toISOString().slice(0, 16) +
 export const isoDate = ts => new Date(ts * 60000).toISOString().slice(0, 10);
 export const dayStart = date => Date.parse(`${date}T00:00:00Z`) / 60000;
 export const addDays = (date, n) => isoDate(dayStart(date) + n * DAY_MIN);
+export const openDayOf = (closed, nowMs) => (closed ? addDays(closed, 1) : isoDate(minuteOf(nowMs)));
+// El export y /api/history cortan igual entre daily y samples: si no, un día sale 2 o 0 veces
+const clampOpenDay = (openDay, today) => (openDay && openDay < today ? openDay : today);
 
-// ─── Mediana y media con el redondeo de Python ───────────────────────────────
-// round() de Python redondea los .5 al par (8688,5 → 8688) y ROUND de SQLite
-// hacia arriba: con ROUND salía distinto el 30 % de las medianas de 2 muestras.
-// Se trabaja con enteros: la suma de los dos valores centrales (o el central)
-// y la suma total / n, redondeando al par a mano.
+// round() de Python lleva los .5 al par y ROUND de SQLite arriba: fallaba el 30 % de las medianas
+const halfEven = s => `${s} / 2 + (${s} % 2) * ((${s} / 2) % 2)`;
 const MID = "SUM(CASE WHEN rn IN ((cnt + 1) / 2, (cnt + 2) / 2) THEN p END)";
-/** Mediana (window: rn = ROW_NUMBER por p, cnt = COUNT) redondeada como Python. */
 export const MEDIAN_SQL = `(CASE WHEN MAX(cnt) % 2 = 1 THEN ${MID}
-  ELSE ${MID} / 2 + (${MID} % 2) * ((${MID} / 2) % 2) END)`;
-/** round(fmean(p)) de Python, con enteros. */
-export const MEAN_SQL = `(CASE
-  WHEN 2 * (SUM(p) % COUNT(*)) > COUNT(*) THEN SUM(p) / COUNT(*) + 1
-  WHEN 2 * (SUM(p) % COUNT(*)) < COUNT(*) THEN SUM(p) / COUNT(*)
-  ELSE SUM(p) / COUNT(*) + (SUM(p) / COUNT(*)) % 2 END)`;
-/** Lo mismo con la suma y el nº ya calculados (expresiones SQL). */
-export const MEAN_OF = (sum, n) => `(CASE
+  ELSE ${halfEven(MID)} END)`;
+const MEAN_OF = (sum, n) => `(CASE
   WHEN 2 * (${sum} % ${n}) > ${n} THEN ${sum} / ${n} + 1
   WHEN 2 * (${sum} % ${n}) < ${n} THEN ${sum} / ${n}
   ELSE ${sum} / ${n} + (${sum} / ${n}) % 2 END)`;
-/** Mediana redondeada como Python de los `n` elementos ORDENADOS del array JSON `a` que empiezan en `f`. */
-export const sortedMedian = (a, f, n) => {
+export const MEAN_SQL = MEAN_OF("SUM(p)", "COUNT(*)");
+// Mediana al par de los n elementos ORDENADOS del array JSON a, desde f
+const sortedMedian = (a, f, n) => {
   const mid = `(CASE WHEN ${n} % 2 = 1 THEN ${a} ->> (${f} + ${n} / 2) ELSE (${a} ->> (${f} + ${n} / 2 - 1)) + (${a} ->> (${f} + ${n} / 2)) END)`;
-  return `(CASE WHEN ${n} % 2 = 1 THEN ${mid} ELSE ${mid} / 2 + (${mid} % 2) * ((${mid} / 2) % 2) END)`;
+  return `(CASE WHEN ${n} % 2 = 1 THEN ${mid} ELSE ${halfEven(mid)} END)`;
 };
 
-// ─── Estado (tabla state, valores JSON) ──────────────────────────────────────
-export async function getState(db, key, fallback = null) {
+const parseValue = v => { try { return JSON.parse(v); } catch { return v; } };
+
+export async function getState(db, key) {
   const row = await db.prepare("SELECT value FROM state WHERE key = ?1").bind(key).first();
-  if (!row || row.value == null) return fallback;
-  try { return JSON.parse(row.value); } catch { return row.value; }
+  if (!row || row.value == null) return null;
+  return parseValue(row.value);
 }
 
 export function setStateStmt(db, key, value) {
@@ -77,30 +58,14 @@ export async function getStates(db, keys) {
     "SELECT key, value FROM state WHERE key IN (SELECT value FROM json_each(?1))",
   ).bind(JSON.stringify(keys)).all();
   const out = {};
-  for (const r of results) {
-    try { out[r.key] = JSON.parse(r.value); } catch { out[r.key] = r.value; }
-  }
+  for (const r of results) out[r.key] = parseValue(r.value);
   return out;
 }
 
-/** Suma rows_written de los resultados de un batch / run. */
-export function written(res) {
-  const list = Array.isArray(res) ? res : [res];
-  return list.reduce((a, r) => a + (r?.meta?.rows_written || 0), 0);
-}
+const metaSum = (res, k) => (Array.isArray(res) ? res : [res]).reduce((a, r) => a + (r?.meta?.[k] || 0), 0);
+export const written = res => metaSum(res, "rows_written");
 
-// ─── Descubrimiento (explore, search, rolimons) ──────────────────────────────
-/**
- * Juegos vistos en una fuente: [[universe_id, place_id, name], …].
- * Los nuevos entran con tracked=1; los existentes se vuelven a seguir si
- * estaban parados y se añade la fuente a `sources` si faltaba.
- * Solo escribe las filas que cambian.
- *
- * La fuente se busca en `sources` como texto (`instr` con la cadena JSON
- * entre comillas) y no con json_each: D1 cuenta como leída cada fila de un
- * json_each, y esto corre con cada página de explore y cada búsqueda.
- * `"explore"` con sus comillas solo casa con un elemento entero del array.
- */
+// instr y no json_each: D1 cuenta cada fila de un json_each, y esto va en cada página y búsqueda
 export function upsertDiscoveredStmt(db, rows, source, firstSeen) {
   const has = "instr(COALESCE(games.sources, '[]'), json_quote(?3)) > 0";
   return db.prepare(
@@ -121,10 +86,6 @@ export function upsertDiscoveredStmt(db, rows, source, firstSeen) {
   ).bind(JSON.stringify(rows), firstSeen, source);
 }
 
-/**
- * Puestos en listas: [[universe_id, sort_id, rank], …], solo de juegos que
- * están en `games`. Se guarda el mejor puesto del día.
- */
 export function sortHitsStmt(db, rows, date) {
   return db.prepare(
     `INSERT INTO sort_hits (universe_id, date, sort_id, rank)
@@ -135,8 +96,6 @@ export function sortHitsStmt(db, rows, date) {
   ).bind(JSON.stringify(rows), date);
 }
 
-// ─── Rolimons: caché place → universe ────────────────────────────────────────
-/** Devuelve los place_id de `pids` que no están en la caché `places`. */
 export async function unknownPlaces(db, pids) {
   const { results } = await db.prepare(
     `SELECT j.value AS pid FROM json_each(?1) j
@@ -145,7 +104,6 @@ export async function unknownPlaces(db, pids) {
   return results.map(r => r.pid);
 }
 
-/** Vuelve a seguir (y marca con "rolimons") los juegos conocidos de esos places. */
 export function retrackPlacesStmt(db, pids) {
   return db.prepare(
     `UPDATE games SET tracked = 1, low_since = NULL,
@@ -167,8 +125,6 @@ export function insertPlacesStmt(db, rows) {
   ).bind(JSON.stringify(rows));
 }
 
-// ─── Muestras ─────────────────────────────────────────────────────────────────
-/** Ids del radar (tracked = 1) o, con `selected`, solo los seguidos (sel = 1). */
 export async function trackedIds(db, { selected = false } = {}) {
   const { results } = await db.prepare(
     `SELECT universe_id AS id FROM games WHERE tracked = 1 ${selected ? "AND sel = 1" : ""} ORDER BY universe_id`,
@@ -176,13 +132,6 @@ export async function trackedIds(db, { selected = false } = {}) {
   return results.map(r => r.id);
 }
 
-// ─── Radar ────────────────────────────────────────────────────────────────────
-/**
- * Lecturas de Rolimons [[placeId, name, players], …] → `players` =
- * {universe_id: players} de los juegos del radar (tracked = 1), y `missing` =
- * los del radar que no tienen lectura (no salen en la lista que llega): esos
- * los lee la Games API en el paso radar-api.
- */
 export async function radarPlayers(db, list, today) {
   const { map, ids } = await radarPlaces(db, today);
   const out = {};
@@ -193,27 +142,18 @@ export async function radarPlayers(db, list, today) {
   return { players: out, missing: ids.filter(id => out[id] === undefined) };
 }
 
-/**
- * Map place_id → universe_id de los juegos del radar y la lista de sus ids,
- * guardados en state.radar_places (una fila: `pairs` y `nop`, los que no
- * tienen ningún place). Cruzar en SQL la lista de Rolimons (~3.500 places)
- * con places y games leía ~10.000 filas en cada lectura del radar (8 al
- * día); así se rehace una vez al día o cuando cambian places o tracked
- * (radarStaleStmt lo borra). Un juego que explore vuelve a seguir a media
- * tarde entra en el radar al día siguiente.
- * Los places son los de la caché y además games.place_id: los juegos que
- * entran por Explore o el buscador traen su place raíz, y sin él no se
- * cruzaban con Rolimons hasta resolverlo (tope RESOLVE_PER_DAY, y solo los
- * de ≥ TRACK_MIN_PLAYERS). Sin `nop` es una caché de antes: se rehace.
- */
-export async function radarPlaces(db, today) {
+// Cacheado: cruzarlo en SQL leía ~10.000 filas en cada lectura del radar (radarStaleStmt lo borra)
+async function cachedRadarPlaces(db, today) {
   const cached = await getState(db, "radar_places");
-  if (cached?.day === today && Array.isArray(cached.pairs) && Array.isArray(cached.nop)) {
-    const map = new Map(cached.pairs);
-    return { map, ids: [...new Set(map.values()), ...cached.nop] };
-  }
-  // UNION ALL y no UNION: el UNION deduplica en una tabla temporal y D1 cuenta
-  // sus filas; los repetidos los quita el Map
+  if (cached?.day !== today) return null;
+  const map = new Map(cached.pairs);
+  return { map, ids: [...new Set(map.values()), ...cached.nop] };
+}
+
+async function radarPlaces(db, today) {
+  const cached = await cachedRadarPlaces(db, today);
+  if (cached) return cached;
+  // UNION ALL: el UNION deduplica en una tabla temporal y D1 cuenta sus filas
   const { results } = await db.prepare(
     `SELECT place_id AS pid, universe_id AS id FROM games WHERE tracked = 1
      UNION ALL
@@ -228,24 +168,14 @@ export async function radarPlaces(db, today) {
   return { map, ids: [...withPlace, ...nop] };
 }
 
-/**
- * Cachés de state que dependen de tracked o places: se borran al cambiarlos.
- * Con `ifChanged`, solo si la sentencia de justo antes en el mismo batch ha
- * cambiado alguna fila (changes()): así va en la misma transacción, y si el
- * paso se repite tras escribir, no se queda sin borrar.
- */
+// ifChanged usa changes(): en el mismo batch (misma transacción); repetir el paso no lo deja vivo
 export const radarStaleStmt = (db, { ifChanged = false } = {}) =>
   db.prepare(`DELETE FROM state WHERE key IN ('radar_places', 'radar_counts')${ifChanged ? " AND changes() > 0" : ""}`);
 
-/** radar_counts también depende de sel (radar_places no): lo que borra select-apply si cambia algo (justo después de applySelectionStmt). */
+// radar_counts depende también de sel: va justo detrás de applySelectionStmt
 export const radarCountsStaleStmt = db => db.prepare("DELETE FROM state WHERE key = 'radar_counts' AND changes() > 0");
 
-/**
- * Un intento más de la tarea del día `task` en state.daily_tries
- * ({day, meta, close, select, maint}); otro día empieza de cero. Se escribe
- * al empezar la tarea (y no en init): una pasada que se corta antes no gasta
- * el intento, y repetir init no lo cuenta dos veces.
- */
+// Al empezar la tarea, no en init: una pasada cortada antes no gasta el intento
 export function countTryStmt(db, day, task) {
   return db.prepare(
     `INSERT INTO state (key, value) VALUES ('daily_tries', json_object('day', ?1, ?2, 1))
@@ -256,16 +186,16 @@ export function countTryStmt(db, day, task) {
   ).bind(day, task);
 }
 
-/** Mediana de una lista ORDENADA de enteros, con los .5 al par (round() de Python), como MEDIAN_SQL. */
-export function pyMedian(sorted) {
+// Igual que MEDIAN_SQL (lista ordenada)
+function pyMedian(sorted) {
   const n = sorted.length;
   if (n % 2) return sorted[(n - 1) / 2];
   const s = sorted[n / 2 - 1] + sorted[n / 2], h = Math.trunc(s / 2);
   return h + (s % 2) * (h % 2);
 }
 
-/** round(fmean) de Python con enteros, como MEAN_SQL. */
-export function pyMean(sum, n) {
+// Igual que MEAN_SQL
+function pyMean(sum, n) {
   const q = Math.trunc(sum / n), r2 = 2 * (sum % n);
   return r2 > n ? q + 1 : r2 < n ? q : q + (q % 2);
 }
@@ -273,38 +203,27 @@ export function pyMean(sum, n) {
 /** Parte (0..parts-1) de un universe_id escrito como texto: por su última cifra, sin pasarlo a número. */
 export const idPart = (key, parts) => key.charCodeAt(key.length - 1) % parts;
 
+export const splitByPart = (obj, parts) => {
+  const out = Array.from({ length: parts }, () => ({}));
+  for (const id in obj) out[idPart(id, parts)][id] = obj[id];
+  return out;
+};
+
 // Un fichero del radar tal como lo escribe JSON.stringify de {universe_id: jugadores}
 const RADAR_TEXT = /^\{(?:"\d+":(?:-?\d+(?:\.\d+)?|null),)*"\d+":(?:-?\d+(?:\.\d+)?|null)\}$/;
 
-/**
- * Los ficheros del radar de un día (texto) listos para radarReadingsPart: el
- * texto si tiene la forma de JSON.stringify (lo comprueba RADAR_TEXT entero,
- * así la expresión regular de cada parte no puede leer otra cosa que claves
- * y valores), el objeto si tiene otra forma, y nada si está vacío. Se hace
- * una vez por día y ejecución (sampler.js lo guarda para las partes).
- */
+// Con RADAR_TEXT entero, la expresión de cada parte solo puede leer claves y valores
 export function radarPrepare(texts) {
   const out = [];
   for (const text of texts) {
     if (RADAR_TEXT.test(text)) out.push(text);
     else if (text.trim() !== "{}") out.push(JSON.parse(text));
   }
-  out.checked = true;
   return out;
 }
 
-/**
- * Lecturas del radar de un día desde el texto de sus ficheros
- * (radar/<día>/<ts>.json, o lo que da radarPrepare), solo de los juegos de la
- * parte `part` de `parts`.
- * → Map universe_id (texto) → [jugadores de cada fichero…] (sin los null)
- * Una expresión regular (código nativo) saca solo los juegos de la parte, por
- * la última cifra del id: JSON.parse y recorrer los objetos (~2.800 juegos ×
- * 8 ficheros) costaba ~30 ms de CPU en frío. Un fichero con otra forma se
- * parsea entero.
- */
-export function radarReadingsPart(texts, part = 0, parts = 1) {
-  const files = texts.checked ? texts : radarPrepare(texts);
+// Expresión regular por parte: JSON.parse de ~2.800 juegos × 8 ficheros costaba ~30 ms en frío
+export function radarReadingsPart(files, part, parts) {
   const digits = [..."0123456789"].filter(d => idPart(d, parts) === part).join("");
   const rx = new RegExp(`"(\\d*[${digits}])":(-?\\d+(?:\\.\\d+)?)[,}]`, "g");
   const out = new Map();
@@ -323,22 +242,11 @@ export function radarReadingsPart(texts, part = 0, parts = 1) {
   return out;
 }
 
-/**
- * Filas diarias del radar: `readings` = lecturas por juego (Map de
- * radarReadingsPart u objeto {universe_id: [jugadores (o null)…]}) y `meta` =
- * {universe_id: [playing, visits]} (Games API del meta diario, de los juegos
- * no seguidos). Con `parts`, del meta solo los de la parte `part`.
- * → [[id, n, mediana, media, mín, máx, visitas], …]
- * Se calcula aquí y no en SQL: desmontar las lecturas con json_each y
- * ordenarlas con ROW_NUMBER leía ~230.000 filas (~10 por lectura) para
- * escribir ~2.800. Mismo redondeo que el cierre desde samples.
- */
+// En JS y no en SQL: json_each + ROW_NUMBER leía ~230.000 filas para escribir ~2.800
 export function radarDailyRows(readings, meta, part = 0, parts = 1) {
   const rows = [], seen = new Set();
   const mt = meta || {};
-  const own = readings instanceof Map;
-  for (const [key, vals] of own ? readings : Object.entries(readings || {})) {
-    const ps = own ? vals : vals.filter(p => p != null);
+  for (const [key, ps] of readings || []) {
     const n = ps.length;
     if (!n) continue;
     // Por inserción: son ≤ 8 lecturas, y sin llamar a un comparador por cada par
@@ -361,11 +269,6 @@ export function radarDailyRows(readings, meta, part = 0, parts = 1) {
   return rows;
 }
 
-/**
- * Escribe las filas de radarDailyRows en `daily` de `date`. Un juego que ya
- * tiene fila del día (de sus muestras) solo la cambia si el radar tiene más
- * lecturas; las visitas solo se rellenan si faltaban.
- */
 export function radarCloseStmt(db, date, rows) {
   return db.prepare(
     `INSERT INTO daily (universe_id, date, n, median, mean, min, max, visits)
@@ -383,24 +286,21 @@ export function radarCloseStmt(db, date, rows) {
   ).bind(JSON.stringify(rows || []), date);
 }
 
-/**
- * Datos para elegir los juegos seguidos: los del radar con universe_id en
- * [lo, hi], con las últimas `days` filas diarias hasta `before` (excluido).
- * → [[id, horror, sel, created, first_seen, first_day, sorts, d], …] (d como en el export)
- * Las filas diarias salen de la clave primaria hacia atrás y se dan la vuelta
- * aquí: ordenarlas otra vez en SQL contaba cada fila dos veces.
- */
-export async function radarSlice(db, { lo, hi, days, before, today }) {
+// select elige con los mismos puestos que enseña el export
+const sortsSql = (id, day) => `json(COALESCE((SELECT json_group_object(k.sort_id, k.rank) FROM sort_hits k
+  WHERE k.universe_id = ${id} AND k.date = ${day} AND k.sort_id NOT LIKE 'search:%'), '{}'))`;
+
+// Al revés por la clave y se les da la vuelta aquí: ordenarlas en SQL contaba cada fila dos veces
+export async function radarSlice(db, { lo, hi, days, today }) {
   const { results } = await db.prepare(
     `SELECT json_array(g.universe_id, COALESCE(g.horror, 0), COALESCE(g.sel, 0), g.created, g.first_seen,
        (SELECT first_day FROM hist WHERE universe_id = g.universe_id),
-       json(COALESCE((SELECT json_group_object(k.sort_id, k.rank) FROM sort_hits k
-              WHERE k.universe_id = g.universe_id AND k.date = ?5 AND k.sort_id NOT LIKE 'search:%'), '{}')),
+       ${sortsSql("g.universe_id", "?4")},
        json(COALESCE((SELECT json_group_array(json_array(r.date, r.median, r.min, r.max, r.n, r.visits)) FROM (
               SELECT date, median, min, max, n, visits FROM daily
               WHERE universe_id = g.universe_id AND date < ?4 ORDER BY date DESC LIMIT ?3) r), '[]'))) AS row
      FROM games g WHERE g.tracked = 1 AND g.universe_id BETWEEN ?1 AND ?2`,
-  ).bind(lo, hi, days, before, today).all();
+  ).bind(lo, hi, days, today).all();
   return results.map(r => {
     const row = JSON.parse(r.row);
     row[7].reverse();
@@ -408,20 +308,11 @@ export async function radarSlice(db, { lo, hi, days, before, today }) {
   });
 }
 
-/**
- * Ids del radar para repartir select en trozos: los de state.radar_places si
- * es de hoy (la lectura del radar ya la ha hecho) y si no, de games (una
- * pasada por la clave primaria; rehacer radar_places leería ~8.000 filas).
- */
+// Si radar_places es de hoy, de ahí: rehacerlo leería ~8.000 filas
 export async function radarIds(db, today) {
-  const cached = await getState(db, "radar_places");
-  if (cached?.day === today && Array.isArray(cached.pairs) && Array.isArray(cached.nop)) {
-    return [...new Set([...cached.pairs.map(p => p[1]), ...cached.nop])];
-  }
-  return trackedIds(db);
+  return (await cachedRadarPlaces(db, today))?.ids ?? trackedIds(db);
 }
 
-/** Rangos [lo, hi] de ~`size` ids cada uno que cubren todos los universe_id (el primero desde 0, el último hasta el máximo). */
 export function idRanges(ids, size) {
   const sorted = [...ids].sort((a, b) => a - b);
   const los = [];
@@ -431,7 +322,6 @@ export function idRanges(ids, size) {
   return los.map((lo, i) => [lo, i + 1 < los.length ? los[i + 1] - 1 : Number.MAX_SAFE_INTEGER]);
 }
 
-/** sel = 1 para `ids` y 0 para el resto (solo escribe los que cambian). */
 export function applySelectionStmt(db, ids) {
   return db.prepare(
     `UPDATE games SET sel = (universe_id IN (SELECT value FROM json_each(?1)))
@@ -439,14 +329,9 @@ export function applySelectionStmt(db, ids) {
   ).bind(JSON.stringify(ids));
 }
 
-/**
- * Juegos en el radar y seguidos (para la cabecera del export). Contarlos lee
- * `games` entera (~3.000 filas) y el export corre cada hora: se guarda en
- * state.radar_counts para el día y se borra cuando select o maint cambian sel
- * o tracked (radarStaleStmt). Los que explore añade durante el día se cuentan
- * al día siguiente.
- */
-export async function radarCounts(db, today = isoDate(minuteOf(Date.now()))) {
+// Cacheado del día: contarlos lee games entera (~3.000) y el export va cada hora
+export async function radarCounts(db) {
+  const today = isoDate(minuteOf(Date.now()));
   const cached = await getState(db, "radar_counts");
   if (cached?.day === today) return { radar: cached.radar, selected: cached.selected };
   const row = await db.prepare(
@@ -457,7 +342,6 @@ export async function radarCounts(db, today = isoDate(minuteOf(Date.now()))) {
   return out;
 }
 
-/** [[universe_id, playing, visits], …] con el mismo ts. Idempotente (OR IGNORE). */
 export function insertSamplesStmt(db, rows, ts) {
   return db.prepare(
     `INSERT OR IGNORE INTO samples (universe_id, ts, playing, visits)
@@ -465,16 +349,7 @@ export function insertSamplesStmt(db, rows, ts) {
   ).bind(JSON.stringify(rows), ts);
 }
 
-/**
- * Relleno de muestras con una lectura del radar: `text` es el fichero
- * radar/<día>/<ts>.json tal cual ({universe_id: jugadores}); lo lee SQLite,
- * porque parsear en el Worker los 16 ficheros de 48 h (~40 KB cada uno) se
- * comería los 10 ms del paso. Solo `ids` (cada uno buscado en el texto: un
- * json_each del fichero entero contaba sus ~2.800 juegos como filas leídas) y,
- * como en el muestreo, desde TRACK_MIN_PLAYERS. Sin visitas: el radar no las
- * tiene (el export y el cierre toman el máximo, que ignora los NULL). OR
- * IGNORE: una muestra que ya existe nunca se pisa, y repetirlo no escribe nada.
- */
+// En SQLite y no en el Worker: parsear 16 ficheros se come los 10 ms; OR IGNORE no pisa muestras
 export function backfillSamplesStmt(db, text, ts, ids) {
   return db.prepare(
     `INSERT OR IGNORE INTO samples (universe_id, ts, playing, visits)
@@ -483,10 +358,6 @@ export function backfillSamplesStmt(db, text, ts, ids) {
   ).bind(text, ts, JSON.stringify(ids), TRACK_MIN_PLAYERS);
 }
 
-/**
- * low_since: [[universe_id, playing], …]. Marca la fecha en que bajan de
- * TRACK_MIN_PLAYERS y la borra cuando vuelven a subir (solo escribe cambios).
- */
 export function lowSinceStmts(db, rows, today) {
   const low = [], high = [];
   for (const [id, p] of rows) (p >= TRACK_MIN_PLAYERS ? high : low).push(id);
@@ -502,16 +373,11 @@ export function lowSinceStmts(db, rows, today) {
   return out;
 }
 
-// ─── Meta diario ──────────────────────────────────────────────────────────────
-export const META_COLS = [
+const META_COLS = [
   "place_id", "name", "creator", "creator_verified", "created", "updated", "genre",
   "genre_l1", "genre_l2", "max_players", "horror", "horror_score", "horror_reasons",
 ];
 
-/**
- * rows: [[universe_id, ...META_COLS], …]. Solo escribe las fichas que cambian
- * (y entonces actualiza meta_date).
- */
 export function updateMetaStmt(db, rows, today) {
   const set = META_COLS.map((c, i) => `${c} = COALESCE(j.value ->> ${i + 1}, games.${c})`).join(", ");
   const diff = META_COLS.map((c, i) => `(j.value ->> ${i + 1}) IS NOT NULL AND games.${c} IS NOT (j.value ->> ${i + 1})`).join(" OR ");
@@ -522,18 +388,7 @@ export function updateMetaStmt(db, rows, today) {
   ).bind(JSON.stringify(rows), today);
 }
 
-// ─── Cierre del día ───────────────────────────────────────────────────────────
-/**
- * Cierra `date` desde samples: n, mediana, media, min, max y visitas.
- * `votes` = {universe_id: [favorites, up, down]} (o null) del meta diario. ON
- * CONFLICT DO UPDATE sin pisar los favoritos/votos ya guardados.
- * Todos los juegos con muestras del día (no solo los seguidos de ahora: los
- * que salen de la selección tienen muestras de antes de salir). El EXISTS
- * descarta por la clave primaria los que no tienen, sin materializarlos. Cada
- * juego lee sus muestras una vez, ya ordenadas por jugadores, y la mediana
- * sale de esa lista (sortedMedian): con ROW_NUMBER() y COUNT() OVER D1
- * contaba cada muestra varias veces más.
- */
+// Una lista ordenada por juego (sortedMedian): con ROW_NUMBER y COUNT OVER, D1 contaba más filas
 export function closeDayStmt(db, date, votes) {
   const start = dayStart(date);
   return db.prepare(
@@ -573,7 +428,6 @@ export function closeDayStmt(db, date, votes) {
   ).bind(start, start + DAY_MIN, date, JSON.stringify(votes || {}));
 }
 
-/** Favoritos y votos para un día ya cerrado (si el cierre no hacía falta). */
 export function applyVotesStmt(db, date, votes) {
   return db.prepare(
     `UPDATE daily SET favorites = COALESCE(j.value ->> 0, favorites),
@@ -584,16 +438,7 @@ export function applyVotesStmt(db, date, votes) {
   ).bind(JSON.stringify(votes || {}), date);
 }
 
-/**
- * Tabla `hist`: pico, fecha del pico, días, primer día, últimos favoritos y
- * votos y último día de TODA la serie diaria de cada juego. Se mantiene al
- * cerrar cada día para que el export y select no lean `daily` entera.
- * Antes era la clave state.hist_agg (un JSON con todos los juegos en una
- * fila): crecía ~8 KB al día y chocaba con el tope de 2 MB por fila de D1.
- * `mergeHistStmt(date)` incorpora un día cerrado (UPSERT por juego, solo los
- * que cambian); `rebuildHistStmts` la recalcula entera (tras importar datos o
- * por /api/admin/rebuild).
- */
+// Tabla y no state.hist_agg: una fila con todos crecía ~8 KB/día hacia el tope de 2 MB por fila
 const HIST_COLS = "universe_id, peak, peak_date, days, first_day, favorites, up, down, last_date";
 
 export function mergeHistStmt(db, date) {
@@ -623,18 +468,12 @@ export function mergeHistStmt(db, date) {
   ).bind(date);
 }
 
-// La misma que en schema.sql: si se despliega el código antes de aplicar el
-// esquema, la crea migrateHist (sin ella fallarían el cierre y el export).
+// Igual que en schema.sql: si el código llega antes que el esquema, la crea migrateHist
 const HIST_DDL = `CREATE TABLE IF NOT EXISTS hist (
   universe_id INTEGER PRIMARY KEY, peak INTEGER, peak_date TEXT, days INTEGER, first_day TEXT,
   favorites INTEGER, up INTEGER, down INTEGER, last_date TEXT)`;
 
-/**
- * Pasa state.hist_agg (la forma de antes) a la tabla `hist` y borra la clave,
- * en un batch (las dos o ninguna). Va en el init de cada pasada: sin la
- * clave, no lee más que esa fila de state. Si la tabla ya tiene un juego, se
- * queda lo de la tabla.
- */
+// En cada init: sin la clave solo lee esa fila de state; si hist ya tiene el juego, se queda
 export async function migrateHist(db) {
   try {
     return await db.batch(migrateHistStmts(db));
@@ -645,7 +484,7 @@ export async function migrateHist(db) {
   }
 }
 
-export function migrateHistStmts(db) {
+function migrateHistStmts(db) {
   return [
     db.prepare(
       `INSERT INTO hist (${HIST_COLS})
@@ -658,6 +497,9 @@ export function migrateHistStmts(db) {
 }
 
 /** Recalcula `hist` desde `daily` (lee daily entera: solo para el admin). */
+const lastBy = (name, col, alias, cond) => `${name} AS (SELECT id, ${alias} FROM (SELECT universe_id AS id, ${col} AS ${alias},
+         ROW_NUMBER() OVER (PARTITION BY universe_id ORDER BY date DESC) AS rn FROM daily WHERE ${cond}) WHERE rn = 1)`;
+
 export function rebuildHistStmts(db) {
   return [
     db.prepare("DELETE FROM hist"),
@@ -670,21 +512,9 @@ export function rebuildHistStmts(db) {
          SELECT d.universe_id AS id, MIN(d.date) AS pd FROM daily d JOIN a ON a.id = d.universe_id AND d.max = a.peak
          GROUP BY d.universe_id
        ),
-       fv AS (
-         SELECT id, fav FROM (SELECT universe_id AS id, favorites AS fav,
-                ROW_NUMBER() OVER (PARTITION BY universe_id ORDER BY date DESC) AS rn
-                FROM daily WHERE favorites > 0) WHERE rn = 1
-       ),
-       vu AS (
-         SELECT id, up FROM (SELECT universe_id AS id, up,
-                ROW_NUMBER() OVER (PARTITION BY universe_id ORDER BY date DESC) AS rn
-                FROM daily WHERE up IS NOT NULL) WHERE rn = 1
-       ),
-       vd AS (
-         SELECT id, down FROM (SELECT universe_id AS id, down,
-                ROW_NUMBER() OVER (PARTITION BY universe_id ORDER BY date DESC) AS rn
-                FROM daily WHERE down IS NOT NULL) WHERE rn = 1
-       )
+       ${lastBy("fv", "favorites", "fav", "favorites > 0")},
+       ${lastBy("vu", "up", "up", "up IS NOT NULL")},
+       ${lastBy("vd", "down", "down", "down IS NOT NULL")}
        INSERT INTO hist (${HIST_COLS})
        SELECT a.id, a.peak, pk.pd, a.days, a.first_day, fv.fav, vu.up, vd.down, a.last
        FROM a LEFT JOIN pk ON pk.id = a.id LEFT JOIN fv ON fv.id = a.id
@@ -695,12 +525,10 @@ export function rebuildHistStmts(db) {
   ];
 }
 
-/** Juegos que no salen en `daily` desde antes de `cutoffDate` (sus filas ya se han podado). */
 export function pruneHistStmt(db, cutoffDate) {
   return db.prepare("DELETE FROM hist WHERE last_date < ?1").bind(cutoffDate);
 }
 
-// ─── Poda y untrack ───────────────────────────────────────────────────────────
 /** Borra muestras con ts < cutoff (buscando por clave primaria juego a juego). */
 export function pruneSamplesStmt(db, cutoffTs) {
   return db.prepare(
@@ -709,21 +537,12 @@ export function pruneSamplesStmt(db, cutoffTs) {
   ).bind(cutoffTs);
 }
 
-/**
- * Lo que tiene más de un año: filas diarias y puestos en listas anteriores a
- * `cutoffDate`. Por clave primaria juego a juego (solo lee las filas viejas).
- */
+// Por clave primaria juego a juego: solo lee las filas viejas
 export function pruneOldStmts(db, cutoffDate) {
-  return [
-    db.prepare(`DELETE FROM daily WHERE date < ?1 AND universe_id IN (SELECT universe_id FROM games)`).bind(cutoffDate),
-    db.prepare(`DELETE FROM sort_hits WHERE date < ?1 AND universe_id IN (SELECT universe_id FROM games)`).bind(cutoffDate),
-  ];
+  return ["daily", "sort_hits"].map(t =>
+    db.prepare(`DELETE FROM ${t} WHERE date < ?1 AND universe_id IN (SELECT universe_id FROM games)`).bind(cutoffDate));
 }
 
-/**
- * tracked=0 para los que llevan UNTRACK_AFTER_DAYS por debajo del mínimo,
- * salvo que hayan salido en explore o search (sort_hits) hoy o ayer.
- */
 export function untrackStmt(db, today) {
   const limit = addDays(today, -UNTRACK_AFTER_DAYS);
   const yesterday = addDays(today, -1);
@@ -735,73 +554,25 @@ export function untrackStmt(db, today) {
   ).bind(limit, yesterday);
 }
 
-// ─── Export (/api/export = R2 data/export.json, y data/telegram.json) ────────
-/**
- * El export se genera por TROZOS de juegos (rangos de universe_id): recibir de
- * D1 un JSON de ~2 MB cuesta ~13 ms de CPU solo en decodificarlo, y el plan
- * gratis da 10 ms por paso. Cada trozo devuelve los objetos de sus juegos ya
- * serializados (texto separado por comas) y se guarda en R2; el paso final los
- * une en `data/export.json` con un stream (sin pasar el contenido por JS).
- *
- * data/telegram.json (candidatos de Telegram) lo calcula sampler.js con
- * telegramScanText/pickCandidates de telegram.js sobre las partes, y copia de
- * esas mismas partes los juegos elegidos (no vuelve a D1).
- *
- * Lecturas: el export corre cada hora y era el ~57 % de las filas leídas del
- * día (límite de 5 M en el plan gratis). D1 cuenta cada fila que pasa por un
- * cursor: tablas, CTE materializadas, ordenaciones, ventanas y también las de
- * json_each. Por eso cada juego recorre sus muestras UNA vez (en orden de la
- * clave primaria, sin ordenar) y todo lo demás sale de ese recorrido o de
- * funciones JSON escalares (json_set, json_insert…), que no recorren filas.
- */
+// Por trozos: decodificar un JSON de ~2 MB de D1 cuesta ~13 ms de CPU (tope 10 ms por paso)
+// D1 cuenta cada fila de un cursor (CTE, ventanas, json_each): cada juego lee sus muestras UNA vez
 
-/** Rangos de universe_id con ~`size` juegos seguidos cada uno. → [[lo, hi], …] */
-export async function exportPlan(db, size, { selected = false } = {}) {
-  const { results } = await db.prepare(
-    `SELECT universe_id AS lo FROM (
-       SELECT universe_id, ROW_NUMBER() OVER (ORDER BY universe_id) - 1 AS rn FROM games
-       WHERE tracked = 1 ${selected ? "AND sel = 1" : ""})
-     WHERE rn % ?1 = 0 ORDER BY lo`,
-  ).bind(size).all();
-  const los = results.map(r => r.lo);
-  if (!los.length) return [[0, Number.MAX_SAFE_INTEGER]];
-  los[0] = 0;   // el primer rango empieza en 0 y el último acaba en el máximo
-  return los.map((lo, i) => [lo, i + 1 < los.length ? los[i + 1] - 1 : Number.MAX_SAFE_INTEGER]);
-}
-
-/** ts de la última muestra (state.last_sample_ts; si falta, se busca en samples). */
 export async function lastSampleTs(db) {
-  const v = await getState(db, "last_sample_ts");
-  if (Number.isFinite(Number(v)) && v) return Number(v);
-  // Sin índice por ts esto recorre la tabla: solo pasa tras una migración
-  const row = await db.prepare("SELECT MAX(ts) AS ts FROM samples").first();
-  return row?.ts ?? null;
+  const v = Number(await getState(db, "last_sample_ts"));
+  return v || null;
 }
 
-/**
- * state.export_d = {day: openDay, g: {universe_id: entrada}}: las filas
- * cerradas de `daily` que salen en `d`, que no cambian hasta que se cierra
- * otro día (y entonces cambia openDay). Se calculan una vez al día por juego
- * en vez de leer ~24 filas por juego en cada export. Las muestras NO se
- * guardan aquí: se leen siempre de `samples`, así que da igual cuándo se
- * inserten (también las de fechas pasadas). Quien reescriba filas cerradas de
- * `daily` fuera del cierre (import, rebuild) tiene que borrar esta clave.
- */
-export const EXPORT_D_KEY = "export_d";
+// Cerradas de daily, una vez al día; quien reescriba daily fuera del cierre borra esta clave
+const EXPORT_D_KEY = "export_d";
 
 export function dropExportCacheStmt(db) {
   return db.prepare("DELETE FROM state WHERE key = ?1").bind(EXPORT_D_KEY);
 }
 
-// Días sin cerrar que puede tocar la ventana de muestras (48 h tocan como
-// mucho 3 fechas; la 4ª por si entra una pasada más nueva que lastTs).
+// 48 h tocan 3 fechas como mucho; la 4ª por si llega una pasada más nueva que lastTs
 const OPEN_DAYS = [0, 1, 2, 3];
 
-// Entrada de un juego (?9 = filas de `d`, ?10 = openDay, como en buildExportSlice):
-// [filas cerradas asc ([fecha, mediana, mín, máx, n, null], las últimas ?9 antes
-// de openDay), [[índice, visitas] de las 2 últimas de esas filas con visitas, la
-// más reciente primero]]. Las visitas van aparte porque cuáles se enseñan depende
-// de los días abiertos de cada export.
+// [filas cerradas asc, [[índice, visitas]…]]: visitas aparte, dependen de los días abiertos
 const closedEntrySql = id => `(SELECT json_array(
     (SELECT json_group_array(json_array(date, median, min, max, n, NULL) ORDER BY date) FROM (
        SELECT date, median, min, max, n FROM daily
@@ -815,41 +586,24 @@ const closedEntrySql = id => `(SELECT json_array(
   FROM (SELECT COALESCE((SELECT date FROM daily WHERE universe_id = ${id} AND date < ?10
                          ORDER BY date DESC LIMIT 1 OFFSET ?9 - 1), '') AS lo) w)`;
 
-// Juegos del trozo: los de la lista ?13 o los del rango (y seguidos si ?15).
-// La rama que no toca se descarta antes de recorrer nada.
-const SLICE_GAMES = `g0 AS (
-      SELECT universe_id AS id FROM games
-      WHERE ?13 IS NULL AND universe_id BETWEEN ?11 AND ?12 AND (?15 = 0 OR sel = 1)
-      UNION ALL
-      SELECT value FROM json_each(?13) WHERE ?13 IS NOT NULL
-    )`;
+const SLICE_GAMES = "g0 AS (SELECT value AS id FROM json_each(?13))";
 
-/**
- * Un trozo del export: los juegos con universe_id en [lo, hi] o los de `ids`
- * que cumplen el filtro del contrato (`filter: false`, todos los que tengan
- * muestras). Con `ids` se usa y se completa state.export_d.
- * → { frag: '{…},{…}', n, last_ts, ts24: [ts…], meta }
- */
-export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi = Number.MAX_SAFE_INTEGER, ids = null, selected = false, filter = true }) {
+export async function buildExportSlice(db, { nowMs, lastTs, openDay, ids }) {
   const now = minuteOf(nowMs);
   const today = isoDate(now);
-  openDay = openDay && openDay < today ? openDay : today;
+  openDay = clampOpenDay(openDay, today);
   lastTs = lastTs ?? now;
-  const sFrom = lastTs - EXPORT_SAMPLE_HOURS * 60;      // muestras: última − 48 h (incluida)
-  const cut24 = lastTs - 24 * 60;                        // máximo de 24 h para el filtro
+  const sFrom = lastTs - EXPORT_SAMPLE_HOURS * 60;
+  const cut24 = lastTs - 24 * 60;
   const openTs = Math.max(dayStart(openDay), sFrom);
   const binds = [
     sFrom, cut24,
     CATEGORIES.general.min_players, CATEGORIES.horror.min_players,
     EMERGING.max_visits, EMERGING.min_players,
-    openTs, today, EXPORT_DAILY_DAYS, openDay, lo, hi,
-    ids ? JSON.stringify(ids) : null, now - 24 * 60, selected ? 1 : 0,
-    filter ? 1 : 0, Math.floor(openTs / DAY_MIN), EXPORT_D_KEY,
+    openTs, today, EXPORT_DAILY_DAYS, openDay, null, null,
+    JSON.stringify(ids), now - 24 * 60, null,
+    null, Math.floor(openTs / DAY_MIN), EXPORT_D_KEY,
   ];
-  // Con una lista (los seguidos, ~200 juegos) las filas cerradas van a
-  // state.export_d; sin ella (aún sin selección: todo el radar) no caben en
-  // una fila de D1 y se leen de daily en cada export, como antes.
-  const cache = !!ids;
 
   // Días sin cerrar, de lo que deja cada juego en `a`: x[5] = jugadores de los
   // días abiertos ordenados por día y jugadores; el día k empieza en x[6 + 3k],
@@ -871,8 +625,7 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
   const sql = `
     WITH
     ${SLICE_GAMES},
-    -- Última muestra con visitas (t1) y la última ≥ 20 h anterior (t0): las
-    -- únicas de "s" que llevan visitas. Hacia atrás por la clave primaria.
+    -- t1: última muestra con visitas; t0: la última ≥ 20 h antes (las únicas de "s" con visitas)
     g1 AS (
       SELECT id, (SELECT ts FROM samples WHERE universe_id = g0.id AND ts >= ?1 AND visits IS NOT NULL
                   ORDER BY ts DESC LIMIT 1) AS t1
@@ -883,10 +636,6 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
                       AND visits IS NOT NULL ORDER BY ts DESC LIMIT 1) AS t0
       FROM g1
     ),
-    -- Un solo recorrido de las muestras de 48 h de cada juego:
-    -- x = [último ts, máx 24 h, máx visitas, "s", ts de 24 h, jugadores de los
-    --      días abiertos ordenados (para las medianas), y por día abierto k
-    --      dónde empieza, cuántas muestras tiene y su máximo de visitas]
     a AS MATERIALIZED (
       SELECT g2.id, g2.t1, (SELECT json_array(
           MAX(ts), MAX(CASE WHEN ts >= ?2 THEN playing END), MAX(visits),
@@ -900,23 +649,18 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
       FROM g2
     ),
     st AS (SELECT id, t1, x, x ->> 1 AS max24, x ->> 2 AS visits FROM a WHERE x ->> 0 IS NOT NULL),
-    -- hv: la fila de hist del juego, aquí (MATERIALIZED) para leerla una vez
-    -- por juego y no en cada uso de games_json
+    -- MATERIALIZED: la fila de hist se lee una vez por juego, no en cada uso
     sel AS MATERIALIZED (
       SELECT g.*, st.max24, st.t1, st.x,
              (SELECT json_array(peak, peak_date, days, first_day, favorites, up, down) FROM hist
               WHERE universe_id = g.universe_id) AS hv
       FROM st CROSS JOIN games g ON g.universe_id = st.id
-      WHERE ?16 = 0
-         OR st.max24 >= ?3
+      WHERE st.max24 >= ?3
          OR (g.horror = 1 AND st.max24 >= ?4)
          OR (st.max24 >= ?6 AND COALESCE(st.visits, (SELECT d.visits FROM daily d WHERE d.universe_id = g.universe_id
                AND d.visits IS NOT NULL ORDER BY d.date DESC LIMIT 1)) < ?5)   -- sin visitas conocidas, no
     ),
-    -- Días sin cerrar (pmx/pday/pdays/pfirst = pico, su día, nº de días y el primero)
-    -- y filas cerradas de daily (ce: de state.export_d o, si falta, de daily).
-    -- Sin caché, MATERIALIZED: ce se usa varias veces y cada uso volvería a leer daily
-    s3 AS ${cache ? "" : "MATERIALIZED "}(
+    s3 AS (
       SELECT s.*, ${days} AS pdays, ${vdays} AS pvdays, ${pmx} AS pmx,
              CASE ${K.map(k => `WHEN ${k.has} THEN ${k.day}`).join(" ")} END AS pfirst,
              COALESCE(json_extract((SELECT CASE WHEN value ->> '$.day' = ?10 THEN value END FROM state WHERE key = ?18),
@@ -940,18 +684,13 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
         'horror', json(CASE WHEN s.horror = 1 THEN 'true' ELSE 'false' END),
         'horror_score', COALESCE(s.horror_score, 0),
         'horror_reasons', json(COALESCE(s.horror_reasons, '[]')),
-        'sorts', json(COALESCE((SELECT json_group_object(k.sort_id, k.rank) FROM sort_hits k
-                       WHERE k.universe_id = s.universe_id AND k.date = ?8 AND k.sort_id NOT LIKE 'search:%'), '{}')),
+        'sorts', ${sortsSql("s.universe_id", "?8")},
         'favorites', s.hv ->> 4, 'up', s.hv ->> 5, 'down', s.hv ->> 6,
         'peak', CASE WHEN s.pmx > COALESCE(s.hv ->> 0, -1) THEN s.pmx ELSE s.hv ->> 0 END,
         'peak_date', CASE WHEN s.pmx > COALESCE(s.hv ->> 0, -1) THEN s.pday ELSE s.hv ->> 1 END,
         'days_tracked', COALESCE(s.hv ->> 2, 0) + s.pdays,
         'first_day', COALESCE(s.hv ->> 3, s.pfirst),
-        -- Últimas ?9 filas: las cerradas (sin las ?dropn más viejas) y los días
-        -- abiertos. visits solo en las 2 últimas filas que la tienen (lo único
-        -- que usa metrics.js): primero las de los días abiertos y, si faltan, las
-        -- cerradas. Las rutas '$.x' no existen en un array: json_set/json_insert/
-        -- json_remove las ignoran, y así cada paso es condicional sin repetir texto.
+        -- '$.x' no existe en un array: json_set/insert/remove la ignoran y cada paso es condicional
         'd', json(json_insert(json_remove(json_set(s.ce -> 0,
                  CASE WHEN s.pvdays < 2 AND json_array_length(s.ce -> 1) >= 1 AND (s.ce ->> '$[1][0][0]') >= s.dropn
                       THEN '$[' || (s.ce ->> '$[1][0][0]') || '][5]' ELSE '$.x' END, s.ce ->> '$[1][0][1]',
@@ -972,11 +711,10 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
       (SELECT MAX(x ->> 0) FROM a) AS last_ts,
       (SELECT json_group_array(json(x -> 4)) FROM a WHERE x ->> 0 IS NOT NULL) AS ts24`;
 
-  const stmts = [db.prepare(sql).bind(...binds)];
-  if (cache) {
-    // Filas cerradas de los juegos que aún no están en state.export_d (con un
-    // día nuevo, todos): una escritura al día, o cuando cambia la selección.
-    stmts.unshift(db.prepare(`
+  // Filas cerradas de los juegos que aún no están en state.export_d (con un
+  // día nuevo, todos): una escritura al día, o cuando cambia la selección.
+  const res = await db.batch([
+    db.prepare(`
       WITH
       ${SLICE_GAMES},
       c AS (SELECT CASE WHEN value ->> '$.day' = ?10 THEN value END AS j FROM state WHERE key = ?18),
@@ -985,39 +723,33 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
       SELECT ?18, json_object('day', ?10, 'g', json_patch(COALESCE((SELECT j FROM c) -> '$.g', '{}'),
                                                           json_group_object(id, json(${closedEntrySql("miss.id")}))))
       FROM miss WHERE true HAVING COUNT(*) > 0
-      ON CONFLICT (key) DO UPDATE SET value = excluded.value WHERE state.value IS NOT excluded.value`).bind(...binds));
-  }
-  const res = await db.batch(stmts);
-  const main = res[res.length - 1];
-  const row = main.results?.[0] || {};
+      ON CONFLICT (key) DO UPDATE SET value = excluded.value WHERE state.value IS NOT excluded.value`).bind(...binds),
+    db.prepare(sql).bind(...binds),
+  ]);
+  const row = res[1].results?.[0] || {};
   const ts24 = [...new Set(JSON.parse(row.ts24 || "[]").flat())];
   return {
     frag: row.frag || "",
     n: row.n || 0,
     last_ts: row.last_ts ?? null,
     ts24,
-    meta: {
-      rows_read: res.reduce((t, r) => t + (r.meta?.rows_read || 0), 0),
-      rows_written: res.reduce((t, r) => t + (r.meta?.rows_written || 0), 0),
-    },
+    meta: { rows_read: metaSum(res, "rows_read"), rows_written: written(res) },
   };
 }
 
-/** Cabecera común de export.json y telegram.json. */
-export function exportHeader({ nowMs, lastTs, ts24, radar = null }) {
+export function exportHeader({ nowMs, lastTs, ts24, radar }) {
   return {
     generated_at: new Date(nowMs).toISOString().slice(0, 19) + "Z",
     last_sample: lastTs != null ? isoMinute(lastTs) : null,
     samples_24h: new Set(ts24).size,
-    ...(radar ? { radar_games: radar.radar, selected_games: radar.selected } : {}),
+    radar_games: radar.radar, selected_games: radar.selected,
   };
 }
 
-// ─── /api/history/:id ─────────────────────────────────────────────────────────
 export async function history(db, id, { nowMs = Date.now(), openDay } = {}) {
   const now = minuteOf(nowMs);
   const today = isoDate(now);
-  openDay = openDay && openDay < today ? openDay : today;
+  openDay = clampOpenDay(openDay, today);
   const dFrom = addDays(today, -(HISTORY_DAYS - 1));
   const rFrom = now - HISTORY_SAMPLE_DAYS * DAY_MIN;
   const openTs = dayStart(openDay);
@@ -1052,8 +784,7 @@ export async function history(db, id, { nowMs = Date.now(), openDay } = {}) {
   return row.out;
 }
 
-// ─── Importación (migración) ──────────────────────────────────────────────────
-export const IMPORT_TABLES = {
+const IMPORT_TABLES = {
   games: {
     pk: ["universe_id"],
     cols: ["universe_id", "place_id", "name", "creator", "creator_verified", "created", "updated",
@@ -1070,11 +801,7 @@ export const IMPORT_TABLES = {
   state: { pk: ["key"], cols: ["key", "value"] },
 };
 
-/**
- * UPSERT genérico: `columns` ⊆ columnas de la tabla (debe incluir la clave),
- * `rows` = arrays en ese orden. Solo escribe filas nuevas o distintas, así
- * que se puede repetir sin duplicar ni gastar escrituras.
- */
+// Solo escribe lo nuevo o distinto: repetirlo no duplica ni gasta escrituras
 export function importStmt(db, table, columns, rows) {
   const t = IMPORT_TABLES[table];
   if (!t) throw new Error(`Tabla no permitida: ${table}`);

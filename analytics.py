@@ -1,13 +1,4 @@
-"""
-analytics.py — Clasificación, métricas robustas, eventos y emergentes.
-
-Ideas clave:
-  · El valor de cada día es la MEDIANA de sus muestras, no una foto suelta.
-  · Los días que se salen mucho de su entorno (eventos, updates con pico)
-    se marcan y no cuentan para las medias ni las tendencias.
-  · Las tendencias se calculan con la pendiente de Theil–Sen sobre el
-    logaritmo, que es robusta: un día raro no la arrastra.
-"""
+"""Mediana por día y Theil–Sen sobre el log: robustos, un día raro no arrastra la media."""
 
 import math
 import re
@@ -16,7 +7,6 @@ from datetime import date, datetime, timedelta
 
 from config import EMERGING, EVENTS, HORROR, SCAN_START
 
-# ─── Utilidades ────────────────────────────────────────────────────────────────
 def parse_ts(s: str | None) -> datetime | None:
     if not s:
         return None
@@ -36,7 +26,6 @@ def clip(x, lo=0.0, hi=1.0):
     return max(lo, min(hi, x))
 
 
-# ─── Títulos ───────────────────────────────────────────────────────────────────
 EMOJI_RE = re.compile(
     "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF"
     "\U00002190-\U000021FF\U00002B00-\U00002BFF\U00003000-\U0000303F"
@@ -46,7 +35,6 @@ TAG_RE = re.compile(r"[\[\(【]([^\]\)】]{1,30})[\]\)】]")
 
 
 def clean_title(name: str) -> tuple[str, list[str]]:
-    """'[⚙️UPD 6] Anime Dice 🎲' → ('Anime Dice', ['UPD 6'])."""
     name = name or ""
     tags = []
     for m in TAG_RE.finditer(name):
@@ -61,7 +49,6 @@ def clean_title(name: str) -> tuple[str, list[str]]:
     return title, tags[:3]
 
 
-# ─── Clasificación de horror ───────────────────────────────────────────────────
 def _kw_regex(words):
     # Inicio de palabra obligatorio; el final puede seguir (monster → monsters)
     return [(w, re.compile(r"(?<![a-z0-9])" + re.escape(w))) for w in words]
@@ -119,11 +106,7 @@ def horror_score(g: dict, uid: int) -> tuple[int, list[str]]:
 
 
 def is_horror(g: dict, uid: int) -> tuple[bool, int, list[str]]:
-    """Horror = llega al umbral Y tiene al menos una señal fuerte.
-
-    Así un juego de "escapar" genérico (género Escape + palabra "escape")
-    no entra solo por señales débiles.
-    """
+    """Umbral Y una señal fuerte: un «escape» genérico no entra solo con señales débiles."""
     s, r = horror_score(g, uid)
     return s >= HORROR["threshold"] and _has_strong(g, uid), s, r
 
@@ -141,17 +124,8 @@ def _has_strong(g: dict, uid: int) -> bool:
     )
 
 
-# ─── Series y eventos ──────────────────────────────────────────────────────────
 def flag_events(values: list[float], dates: list[str]) -> list[bool]:
-    """Marca días de evento: picos que se salen de su entorno y luego bajan.
-
-    · Se compara con los días de antes Y con los de después: si el salto se
-      mantiene es crecimiento real, no un evento (clave para los emergentes).
-    · No cuenta si se explica por el día de la semana (los sábados siempre hay
-      más gente): se compara con el mismo día de las semanas anteriores.
-    · El último día no se marca (aún no se sabe si se mantiene); para eso está
-      el aviso de "pico ahora".
-    """
+    """Picos frente a antes Y después (si se mantiene, es crecimiento) y al mismo día de la semana."""
     w = EVENTS["window_days"] // 2
     by_date = dict(zip(dates, values))
     flags = []
@@ -176,7 +150,6 @@ def flag_events(values: list[float], dates: list[str]) -> list[bool]:
 
 
 def theil_sen_daily_growth(values: list[float]) -> float | None:
-    """Crecimiento diario típico (%), robusto a valores sueltos."""
     pts = [(i, math.log(v)) for i, v in enumerate(values) if v and v > 0]
     if len(pts) < 4:
         return None
@@ -190,9 +163,7 @@ def window_median(samples: list[tuple[datetime, int]], start: datetime, end: dat
     return (statistics.median(vals), len(vals)) if vals else (None, 0)
 
 
-# ─── Métricas por juego ────────────────────────────────────────────────────────
 def game_metrics(daily: list[dict], raw: list[dict], meta: dict, now: datetime) -> dict:
-    """`daily`: filas del juego ordenadas por fecha. `raw`: muestras recientes."""
     samples = sorted((parse_ts(r["ts"]), r["playing"]) for r in raw)
     samples = [s for s in samples if s[0]]
     values = [d["median"] for d in daily]
@@ -293,10 +264,8 @@ def game_metrics(daily: list[dict], raw: list[dict], meta: dict, now: datetime) 
     }
 
 
-# ─── Estado y puntuaciones ─────────────────────────────────────────────────────
 def status(m: dict) -> str:
-    """Combina el cambio de 24 h con la tendencia de varios días: si se
-    contradicen, manda la tendencia (más difícil de engañar con un pico)."""
+    """Si 24 h y tendencia se contradicen, manda la tendencia: un pico no la engaña."""
     g, t = m["growth_24h"], m["trend"]
     if g is None and t is None:
         return "new"
@@ -313,7 +282,6 @@ def status(m: dict) -> str:
 
 
 def momentum_score(m: dict) -> int:
-    """0-100: crecimiento sostenido (no picos sueltos) ponderado por tamaño."""
     t = m["trend"] or 0
     g24 = m["growth_24h"] or 0
     g7 = m["growth_7d"] or 0
@@ -325,7 +293,6 @@ def momentum_score(m: dict) -> int:
 
 
 def emerging(m: dict) -> tuple[int, list[str]] | None:
-    """Devuelve (puntuación, motivos) si el juego cumple los requisitos."""
     cfg = EMERGING
     visits, typical = m["visits"], m["typical"] or 0
     if visits is None or visits > cfg["max_visits"] or typical < cfg["min_players"]:

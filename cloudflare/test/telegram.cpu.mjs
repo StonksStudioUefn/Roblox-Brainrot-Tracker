@@ -1,31 +1,14 @@
-/**
- * telegram.cpu.mjs — CPU del paso de Telegram, en procesos Node NUEVOS (JIT
- * frío, como un isolate recién arrancado) y en caliente.
- *
- *   node cloudflare/test/telegram.cpu.mjs <export.json> <now ISO> [--runs=5]
- *
- * Con el export completo dado se preparan dos exports REDUCIDOS (lo que será
- * data/telegram.json): el real (hoy casi todos los juegos tienen 2–3 días de
- * serie) y uno "en régimen" (serie alargada a 21 días con valores sintéticos y
- * algún pico, como estará en unas semanas). Para cada uno, en un proceso nuevo:
- *   paso telegram: JSON.parse del reducido + runTelegram (buildDashboard de los
- *     candidatos + mensajes), sin credenciales ni red. Tres casos: pasada sin
- *     nada que enviar (todo avisado: atajo sin buildDashboard), pasada con
- *     alertas posibles, y diario + semanal (dos runTelegram).
- * Y, aparte, el prefiltro de respaldo (telegramCandidates sobre el export
- * completo, con su JSON.parse), que es lo que costaría reducir en el Worker.
- */
+// node test/telegram.cpu.mjs <export.json> <now ISO> [--runs=5] — CPU del paso telegram.
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { cpuMs as cpu, rng } from "./comun.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
-const cpu = () => { const u = process.cpuUsage(); return (u.user + u.system) / 1000; };
 const median = a => [...a].sort((x, y) => x - y)[a.length >> 1];
 
-// ─── Hijo: una medida en frío y luego en caliente ─────────────────────────────
 if (process.argv[2] === "--child") {
   const [mode, file, now] = process.argv.slice(3);
   globalThis.fetch = () => { throw new Error("red prohibida"); };
@@ -56,15 +39,13 @@ if (process.argv[2] === "--child") {
   process.exit(0);
 }
 
-// ─── Padre ────────────────────────────────────────────────────────────────────
 const [file, now] = process.argv.slice(2);
 const runs = Number((process.argv.find(a => a.startsWith("--runs=")) || "--runs=5").slice(7));
 const { telegramCandidates } = await import("../src/telegram.js");
 const dir = mkdtempSync(join(tmpdir(), "tg-cpu-"));
 
 function steady(ex) {
-  let seed = 12345;
-  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  const rnd = rng(12345);
   for (const g of ex.games) {
     const d = g.d;
     if (!d.length) continue;
@@ -93,7 +74,7 @@ for (const [name, ex] of Object.entries(sets)) {
     ["quiet", redPath, "paso telegram, pasada sin nada que enviar (atajo)"],
     ["normal", redPath, "paso telegram, pasada con alertas posibles"],
     ["daily", redPath, "paso telegram, diario + semanal"],
-    ["candidates", fullPath, "respaldo: export completo + telegramCandidates"],
+    ["candidates", fullPath, "export completo + telegramCandidates"],
   ]) {
     const rs = [];
     for (let i = 0; i < runs; i++) {

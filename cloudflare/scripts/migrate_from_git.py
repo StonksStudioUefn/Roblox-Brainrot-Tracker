@@ -1,28 +1,7 @@
 #!/usr/bin/env python3
-"""
-migrate_from_git.py — Sube los datos actuales del tracker (CSV/JSON del repo)
-a la versión Cloudflare (D1) por POST /api/admin/import, en lotes.
-
-Qué sube (pensado para no pasar del límite de 100.000 filas escritas/día de D1):
-  · games     data/games.json (~2.400). Se ignoran los campos antiguos
-              (description, icon, thumb, creator_type); el horror se calcula
-              aquí con analytics.is_horror (con la descripción si la hay) y la
-              descripción NO se sube. tracked=1 solo si tiene muestras en 48 h.
-  · places    place_id → universe_id (caché de Rolimons), de games.json.
-  · daily     data/daily/*.csv entero, salvo el día de hoy (UTC), que el
-              Worker calcula al vuelo desde las muestras (~27.000 filas).
-  · samples   data/raw/*.csv, solo las últimas 48 h.
-  · state     telegram = data/state.json; closed_day = ayer.
-  Al final llama a /api/admin/rebuild (agregados de la historia + export).
-
-Es re-ejecutable: el import hace UPSERT y solo escribe filas nuevas o
-distintas, así que repetirlo no duplica ni gasta escrituras.
-
-Uso:
-  python cloudflare/scripts/migrate_from_git.py --url https://roblox-tracker.<cuenta>.workers.dev \\
-      [--ref origin/main | --dir /ruta/al/repo]  [--token …]  [--dry-run]
-
-  El token sale de --token o de la variable ADMIN_TOKEN.
+"""migrate_from_git.py --url … [--ref | --dir] [--token] [--dry-run]
+Re-ejecutable: el import hace UPSERT y no gasta escrituras al repetirse.
+Solo 48 h de muestras: el tope de D1 es 100.000 filas escritas al día.
 """
 
 import argparse
@@ -47,7 +26,6 @@ DROPPED = {"description", "icon", "thumb", "creator_type"}
 SAMPLE_HOURS = 48
 
 
-# ─── Lectura (git o carpeta) ──────────────────────────────────────────────────
 class Source:
     def __init__(self, ref=None, root=None):
         self.ref, self.root = ref, Path(root) if root else None
@@ -69,6 +47,11 @@ class Source:
         p = self.root / path
         return p.read_text(encoding="utf-8") if p.exists() else None
 
+    def csv_rows(self, prefix, since=None):
+        for path in self.list(prefix):
+            if path.endswith(".csv") and (since is None or Path(path).stem >= since):
+                yield from csv.DictReader(io.StringIO(self.read(path) or ""))
+
 
 def _int(v):
     if v in (None, ""):
@@ -83,41 +66,27 @@ def ts_minutes(iso):
     return int(datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp() // 60)
 
 
-# ─── Construcción de filas ────────────────────────────────────────────────────
 def build(src, now):
     today = now.date().isoformat()
     yesterday = (now.date() - timedelta(days=1)).isoformat()
     cut = int(now.timestamp() // 60) - SAMPLE_HOURS * 60
 
-    # Muestras de las últimas 48 h
     samples = []
-    for path in src.list("data/raw"):
-        if not path.endswith(".csv"):
+    for r in src.csv_rows("data/raw", (now.date() - timedelta(days=3)).isoformat()):
+        try:
+            ts = ts_minutes(r["ts"])
+        except (KeyError, ValueError):
             continue
-        day = Path(path).stem
-        if day < (now.date() - timedelta(days=3)).isoformat():
+        if ts < cut:
             continue
-        for r in csv.DictReader(io.StringIO(src.read(path) or "")):
-            try:
-                ts = ts_minutes(r["ts"])
-            except (KeyError, ValueError):
-                continue
-            if ts < cut:
-                continue
-            samples.append([int(r["universe_id"]), ts, _int(r["playing"]), _int(r.get("visits"))])
+        samples.append([int(r["universe_id"]), ts, _int(r["playing"]), _int(r.get("visits"))])
     recent = {s[0] for s in samples}
 
-    # Serie diaria (sin el día en curso). Los favoritos/votos que tracker.py ya
-    # guardó HOY pasan a la fila de AYER, que es donde los deja el Worker
-    # (así el export da los mismos "últimos conocidos" que Python).
+    # Votos de HOY a la fila de AYER: ahí los deja el Worker (mismos «últimos conocidos» que Python).
     daily = []
     last_day = None
     today_votes = {}
-    rows_csv = []
-    for path in src.list("data/daily"):
-        if not path.endswith(".csv"):
-            continue
-        rows_csv.extend(csv.DictReader(io.StringIO(src.read(path) or "")))
+    rows_csv = list(src.csv_rows("data/daily"))
     for r in rows_csv:
         if r.get("date") == today:
             today_votes[int(r["universe_id"])] = (_int(r["favorites"]), _int(r["up"]), _int(r["down"]))
@@ -133,7 +102,6 @@ def build(src, now):
                       _int(r["up"]), _int(r["down"])])
         last_day = max(last_day or r["date"], r["date"])
 
-    # Fichas
     raw_games = json.loads(src.read("data/games.json") or "{}")
     games, places = [], []
     horror_n = 0
@@ -176,7 +144,6 @@ def build(src, now):
     }, {"horror": horror_n, "tracked": len(recent & {g[0] for g in games}), "last_day": last_day}
 
 
-# ─── Subida ───────────────────────────────────────────────────────────────────
 def post(url, token, path, body, retries=5):
     data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     for attempt in range(retries):
@@ -203,7 +170,7 @@ def main():
     ap.add_argument("--url", help="URL del Worker (p. ej. https://roblox-tracker.<cuenta>.workers.dev)")
     ap.add_argument("--token", default=os.environ.get("ADMIN_TOKEN"))
     g = ap.add_mutually_exclusive_group()
-    g.add_argument("--ref", default=None, help="rama/commit de git (por defecto origin/main)")
+    g.add_argument("--ref", default="origin/main", help="rama/commit de git (por defecto origin/main)")
     g.add_argument("--dir", help="carpeta que contiene data/ (en vez de git)")
     ap.add_argument("--now", help="instante 'ahora' en ISO (por defecto, ahora)")
     ap.add_argument("--batch", type=int, default=1000, help="filas por petición")
@@ -213,7 +180,7 @@ def main():
 
     now = (datetime.fromisoformat(args.now.replace("Z", "+00:00")) if args.now
            else datetime.now(timezone.utc))
-    src = Source(root=args.dir) if args.dir else Source(ref=args.ref or "origin/main")
+    src = Source(root=args.dir) if args.dir else Source(ref=args.ref)
     tables, info = build(src, now)
     print(f"▶ Migración ({'git ' + src.ref if src.ref else src.root}) · ahora {now:%Y-%m-%dT%H:%MZ}")
     for t, (_, rows) in tables.items():

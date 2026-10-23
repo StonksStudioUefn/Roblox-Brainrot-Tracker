@@ -1,15 +1,4 @@
-"""Referencia en Python para telegram.test.mjs: ejecuta notifier.main() (el de
-producción) con un `now` fijo, un dashboard y un estado dados, y sin enviar nada.
-
-  python notifier_ref.py --now 2026-10-03T19:00:00Z --dashboard d.json --state s.json -- --dry-run --daily
-
-Lo que va detrás de `--` son los argumentos de notifier.py. Las credenciales de
-Telegram se quitan del entorno: sin ellas notifier.send() solo imprime (y, sin
---dry-run, cuenta como enviado y guarda el estado, como en producción).
-El estado se copia a un fichero temporal: nunca se toca data/state.json.
-
-Salida (JSON): {"stdout": "...", "messages": [[texto, game_id], ...], "state": {...}}
-"""
+"""notifier.main() sin credenciales ni tocar data/state.json (estado en un temporal)."""
 import argparse
 import contextlib
 import io

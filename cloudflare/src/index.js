@@ -1,46 +1,9 @@
-/**
- * Roblox Tracker — Worker de Cloudflare (plan gratis).
- *
- * robloxtracker.stonksstudio.com (detrás de Cloudflare Access):
- *   GET /                    dashboard (R2 site/dashboard.html)
- *   GET /favicon.svg         (R2 site/favicon.svg)
- *   GET /config.js /metrics.js /horror.js   módulos ES compartidos con el Worker
- *   GET /api/export          R2 data/export.json
- *   GET /api/history/<id>    serie diaria + muestras (D1)
- *   GET /api/live?ids=…      jugadores ahora + icono (Roblox en directo)
- *   GET /api/thumbs?ids=…    miniaturas 16:9
- *   GET /api/game/<id>       ficha en vivo
- *
- * Admin (en cualquier host, "Authorization: Bearer <ADMIN_TOKEN>"):
- *   POST /api/admin/run      lanza un muestreo  {daily? (true | ["meta", "close", "select", "maint"]), select?, skip?: [...], only?: [...], telegram_force?, now?}
- *   GET  /api/admin/status   estado (state + instancia) ?id=<instancia> &counts=1 (estimado) | &counts=exacto
- *   GET  /api/admin/espacio  lo que ocupa la base D1 (lo mismo que espacio() para el Almacén) ?exacto=1
- *   POST /api/admin/import   {table, columns, rows}  (migración, por lotes)
- *   POST /api/admin/rebuild  recalcula la tabla hist desde daily y lanza un export
- *   POST /api/admin/export   lanza un Workflow que solo regenera el export
- *   POST /api/admin/backfill {ids?}  copia a samples las lecturas del radar de 48 h (por defecto, de los seguidos)
- *
- * *.workers.dev no pasa por Access: ahí solo responde /api/admin/*; todo lo
- * demás es 404.
- *
- * Los módulos que descarga el navegador se incrustan como texto al empaquetar
- * (`import … with { type: "text" }`, lo resuelve esbuild en `wrangler deploy`
- * / `wrangler deploy --dry-run --outdir dist`), así que web y Worker usan
- * siempre el mismo código. El esquema (schema.sql) NO se incrusta: wrangler
- * trata los .sql como módulo aparte; se aplica con `wrangler d1 execute`.
- *
- * Bindings: DB (D1), BUCKET (R2 común `stonks-archivos`: el tracker solo usa su
- * carpeta `roblox-tracker/`, ver stonks.js), SAMPLER (Workflow). Secrets:
- * ADMIN_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID. El entrypoint `Operaciones`
- * (stonks.js) es para el Almacén de STONKS: espacio() y nombres().
- */
-
 import configSrc from "./config.js" with { type: "text" };
 import metricsSrc from "./metrics.js" with { type: "text" };
 import horrorSrc from "./horror.js" with { type: "text" };
 
-import { dropExportCacheStmt, getState, getStates, history, importStmt, isoDate, minuteOf, radarCounts, rebuildHistStmts, written } from "./db.js";
-import { chunks, iconsUrl, thumbsUrl, URLS, UA } from "./sources.js";
+import { dropExportCacheStmt, getState, getStates, history, importStmt, minuteOf, openDayOf, radarCounts, rebuildHistStmts, written } from "./db.js";
+import { chunks, gamesUrl, iconsUrl, thumbsUrl, UA } from "./sources.js";
 import { espacioD1, withApp } from "./stonks.js";
 import { backfillFromRadar } from "./sampler.js";
 
@@ -57,6 +20,11 @@ const TYPES = {
   svg: "image/svg+xml",
   text: "text/plain; charset=utf-8",
 };
+const PAGE = ["site/dashboard.html", TYPES.html, "no-cache"];
+const SITE = {
+  "/": PAGE, "/index.html": PAGE, "/dashboard.html": PAGE,
+  "/favicon.svg": ["site/favicon.svg", TYPES.svg, "public, max-age=3600"],
+};
 const MODULES = { "/config.js": configSrc, "/metrics.js": metricsSrc, "/horror.js": horrorSrc };
 
 export default {
@@ -66,6 +34,7 @@ export default {
     const path = url.pathname;
     try {
       if (path.startsWith("/api/admin/")) return await admin(req, env, url);
+      // *.workers.dev no pasa por Access: ahí solo /api/admin/*, que pide ADMIN_TOKEN.
       if (url.hostname.endsWith(".workers.dev")) return text("No encontrado", 404);
       if (req.method !== "GET" && req.method !== "HEAD") return text("Método no permitido", 405);
 
@@ -99,7 +68,6 @@ export default {
   },
 };
 
-// ─── Respuestas ─────────────────────────────────────────────────────────────
 function json(data, status = 200, maxAge = 0) {
   return new Response(typeof data === "string" ? data : JSON.stringify(data), {
     status,
@@ -111,8 +79,12 @@ function text(body, status = 200) {
   return new Response(body, { status, headers: { "content-type": TYPES.text } });
 }
 
+const isId = s => /^\d{1,20}$/.test(s || "");
+const shotOf = t => (t?.thumbnails || []).find(s => s.state === "Completed")?.imageUrl ?? null;
+const done = i => (i?.state === "Completed" ? i.imageUrl : null);
+
 function parseIds(url, max) {
-  const ids = [...new Set((url.searchParams.get("ids") || "").split(",").map(s => s.trim()).filter(s => /^\d{1,20}$/.test(s)))];
+  const ids = [...new Set((url.searchParams.get("ids") || "").split(",").map(s => s.trim()).filter(isId))];
   return ids.slice(0, max);
 }
 
@@ -125,22 +97,12 @@ async function getJson(url, cacheTtl) {
   return r.json();
 }
 
-// ─── Web (R2) ───────────────────────────────────────────────────────────────
 async function site(env, path) {
-  let key;
-  if (path === "/" || path === "/index.html" || path === "/dashboard.html") key = "site/dashboard.html";
-  else if (path === "/favicon.svg") key = "site/favicon.svg";
-  else return text("No encontrado", 404);
+  if (!SITE[path]) return text("No encontrado", 404);
+  const [key, type, cache] = SITE[path];
   const obj = await env.BUCKET.get(key);
   if (!obj) return text("No encontrado", 404);
-  const ext = key.split(".").pop();
-  return new Response(obj.body, {
-    headers: {
-      "content-type": TYPES[ext] || "application/octet-stream",
-      "cache-control": ext === "html" ? "no-cache" : "public, max-age=3600",
-      etag: obj.httpEtag,
-    },
-  });
+  return new Response(obj.body, { headers: { "content-type": type, "cache-control": cache, etag: obj.httpEtag } });
 }
 
 async function exportFile(req, env) {
@@ -148,27 +110,24 @@ async function exportFile(req, env) {
   const obj = await env.BUCKET.get("data/export.json", inm ? { onlyIf: { etagDoesNotMatch: inm.replace(/^W\//, "").replace(/"/g, "") } } : undefined);
   if (!obj) return json({ error: "Todavía no hay export" }, 404);
   const headers = { "content-type": TYPES.json, "cache-control": "public, max-age=60", etag: obj.httpEtag };
-  if (!("body" in obj) || !obj.body) return new Response(null, { status: 304, headers });
+  if (!obj.body) return new Response(null, { status: 304, headers });
   return new Response(obj.body, { headers });
 }
 
 async function historyRoute(env, id) {
-  if (!/^\d{1,20}$/.test(id || "")) return json({ error: "id no válido" }, 400);
-  const closed = await getState(env.DB, "closed_day");
+  if (!isId(id)) return json({ error: "id no válido" }, 400);
   const nowMs = Date.now();
-  const today = isoDate(minuteOf(nowMs));
-  const openDay = closed ? new Date(Date.parse(`${closed}T00:00:00Z`) + 86400000).toISOString().slice(0, 10) : today;
+  const openDay = openDayOf(await getState(env.DB, "closed_day"), nowMs);
   const out = await history(env.DB, Number(id), { nowMs, openDay });
   if (!out) return json({ error: "No encontrado" }, 404);
   return json(out, 200, 300);
 }
 
-// ─── En vivo (port de worker/worker.js) ─────────────────────────────────────
 async function live(url) {
   const ids = parseIds(url, MAX_LIVE_IDS);
   if (!ids.length) return json({ error: "Faltan ids" }, 400);
   const [games, icons] = await Promise.all([
-    Promise.all(chunks(ids, 50).map(c => getJson(`${URLS.games}?universeIds=${c.join(",")}`, 30))),
+    Promise.all(chunks(ids, 50).map(c => getJson(gamesUrl(c), 30))),
     Promise.all(chunks(ids, 100).map(c => getJson(iconsUrl(c), 21600).catch(() => ({ data: [] })))),
   ]);
   const out = {};
@@ -176,9 +135,7 @@ async function live(url) {
     for (const g of page.data || []) out[g.id] = { playing: g.playing, visits: g.visits, updated: g.updated };
   }
   for (const page of icons) {
-    for (const i of page.data || []) {
-      if (i.state === "Completed") (out[i.targetId] ||= {}).icon = i.imageUrl;
-    }
+    for (const i of page.data || []) if (done(i)) (out[i.targetId] ||= {}).icon = done(i);
   }
   return json({ ts: new Date().toISOString(), games: out }, 200, 20);
 }
@@ -188,33 +145,27 @@ async function thumbs(url) {
   if (!ids.length) return json({ error: "Faltan ids" }, 400);
   const data = await getJson(thumbsUrl(ids), 21600);
   const out = {};
-  for (const t of data.data || []) {
-    const shot = (t.thumbnails || []).find(s => s.state === "Completed");
-    if (shot) out[t.universeId] = shot.imageUrl;
-  }
+  for (const t of data.data || []) if (shotOf(t)) out[t.universeId] = shotOf(t);
   return json(out, 200, 3600);
 }
 
 async function game(id) {
-  if (!/^\d{1,20}$/.test(id || "")) return json({ error: "id no válido" }, 400);
+  if (!isId(id)) return json({ error: "id no válido" }, 400);
   const [info, shot, icon] = await Promise.all([
-    getJson(`${URLS.games}?universeIds=${id}`, 30),
+    getJson(gamesUrl([id]), 30),
     getJson(thumbsUrl([id]), 21600).catch(() => ({ data: [] })),
     getJson(iconsUrl([id], "256x256"), 21600).catch(() => ({ data: [] })),
   ]);
   const g = (info.data || [])[0];
   if (!g) return json({ error: "No encontrado" }, 404);
-  const thumb = ((shot.data || [])[0]?.thumbnails || []).find(s => s.state === "Completed");
-  const ic = (icon.data || [])[0];
   return json({
     id: g.id, name: g.name, description: g.description, playing: g.playing, visits: g.visits,
     favorites: g.favoritedCount, updated: g.updated, max_players: g.maxPlayers,
-    thumb: thumb?.imageUrl || null, icon: ic?.state === "Completed" ? ic.imageUrl : null,
+    thumb: shotOf((shot.data || [])[0]) || null, icon: done((icon.data || [])[0]),
     ts: new Date().toISOString(),
   }, 200, 30);
 }
 
-// ─── Admin ──────────────────────────────────────────────────────────────────
 async function authorized(req, env) {
   if (!env.ADMIN_TOKEN) return false;
   const got = new TextEncoder().encode(req.headers.get("authorization") || "");
@@ -247,14 +198,14 @@ async function admin(req, env, url) {
     if (action === "run") {
       const body = await readBody(req);
       const params = {};
-      // daily: true (todas las tareas del día) o una lista: ["close"], ["meta", "select"]…
-      if (Array.isArray(body.daily)) params.daily = body.daily.map(String);
+      const strs = v => (Array.isArray(v) ? v.map(String) : null);
+      if (strs(body.daily)) params.daily = strs(body.daily);
       else if (body.daily) params.daily = true;
       if (body.select) params.select = true;
-      if (Array.isArray(body.skip)) params.skip = body.skip.map(String);
+      if (strs(body.skip)) params.skip = strs(body.skip);
       if (body.telegram_force) params.telegram_force = String(body.telegram_force);
       if (body.now) params.now = new Date(body.now).toISOString();
-      if (Array.isArray(body.only)) params.only = body.only.map(String);
+      if (strs(body.only)) params.only = strs(body.only);
       const id = `manual-${stamp()}`;
       const inst = await env.SAMPLER.create({ id, params });
       return json({ id: inst.id, params });
@@ -272,15 +223,11 @@ async function admin(req, env, url) {
     // El export se hace por pasos (CPU): se lanza un Workflow que solo exporta
     if (action === "rebuild") {
       const res = await env.DB.batch([...rebuildHistStmts(env.DB), dropExportCacheStmt(env.DB)]);
-      const inst = await env.SAMPLER.create({ id: `export-${stamp()}`, params: { only: ["export"] } });
+      const inst = await launchExport(env);
       return json({ hist_written: written(res.slice(0, 2)), export_instance: inst.id });
     }
-    if (action === "export") {
-      const inst = await env.SAMPLER.create({ id: `export-${stamp()}`, params: { only: ["export"] } });
-      return json({ export_instance: inst.id });
-    }
-    // Para rellenar a mano los huecos de juegos ya seguidos (select solo
-    // rellena los que entran). Solo escribe las muestras que faltan.
+    if (action === "export") return json({ export_instance: (await launchExport(env)).id });
+    // select solo rellena los que entran; esto, los huecos de los ya seguidos.
     if (action === "backfill") {
       const body = await readBody(req);
       const ids = Array.isArray(body.ids) ? body.ids.map(Number).filter(Number.isSafeInteger) : null;
@@ -302,33 +249,21 @@ async function adminStatus(env, url) {
     try { out.instance = { id, ...(await (await env.SAMPLER.get(id)).status()) }; }
     catch (e) { out.instance = { id, error: String(e?.message || e) }; }
   }
-  const counts = url.searchParams.get("counts");
-  if (counts && counts !== "exacto") {
-    // Las filas del desglose de espacio() (de las últimas 24 h, y estimadas en
-    // daily y sort_hits): contarlas recorre todas las tablas (~60.000 filas hoy)
+  if (url.searchParams.get("counts")) {
+    // Del desglose de espacio(): contar de verdad recorre todas las tablas (~60.000 filas).
     const [esp, radar] = await Promise.all([espacioD1(env.DB), radarCounts(env.DB)]);
     const n = name => esp.base.tablas.find(t => t.nombre === name)?.filas ?? null;
     out.counts = {
       games: { n: n("games"), tracked: radar.radar }, places: n("places"), samples: n("samples"),
       daily: { n: n("daily"), last: out.state.closed_day ?? null }, sort_hits: n("sort_hits"), estimado: true,
     };
-  } else if (counts) {
-    const r = await env.DB.batch([
-      env.DB.prepare("SELECT COUNT(*) AS n, SUM(tracked = 1) AS tracked FROM games"),
-      env.DB.prepare("SELECT COUNT(*) AS n FROM places"),
-      env.DB.prepare("SELECT COUNT(*) AS n FROM samples"),
-      env.DB.prepare("SELECT COUNT(*) AS n, MAX(date) AS last FROM daily"),
-      env.DB.prepare("SELECT COUNT(*) AS n FROM sort_hits"),
-    ]);
-    out.counts = {
-      games: r[0].results[0], places: r[1].results[0].n, samples: r[2].results[0].n,
-      daily: r[3].results[0], sort_hits: r[4].results[0].n,
-    };
   }
   const head = await env.BUCKET.head("data/export.json");
   if (head) out.export = { size: head.size, uploaded: head.uploaded, meta: head.customMetadata };
   return json(out);
 }
+
+const launchExport = env => env.SAMPLER.create({ id: `export-${stamp()}`, params: { only: ["export"] } });
 
 function stamp() {
   return new Date().toISOString().slice(0, 19).replace(/[:]/g, "") + Math.random().toString(36).slice(2, 6);

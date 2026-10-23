@@ -156,10 +156,10 @@ va en todas las pasadas (las tareas del día: ver "Tareas del día y filas leíd
    `data/export.json` = cabecera + partes + cierre con un `FixedLengthStream` (las partes no pasan por JS).
    Los juegos van en orden de universe_id.
 8. **telegram.json**: `tg-scan-i-j` aplica `telegramScanText` (de `telegram.js`) a la parte i en trozos de
-   50 juegos; `tg-reduce` junta las filas y elige los candidatos con `pickCandidates`; `tg-pick-i` copia
+   `TG_SCAN_GAMES` (40) juegos; `tg-reduce` junta las filas y elige los candidatos con `pickCandidates`; `tg-pick-i` copia
    sus objetos del texto de la parte i (sin parsearlos ni volver a D1) y `tg-write` escribe R2
    **`data/telegram.json`**: mismo formato que el export, solo los candidatos (~60–90),
-   más `totals` y `telegram: {counts, total, candidates}` (cabeceras exactas: games, players, rising, falling
+   más `telegram: {counts, total, candidates}` (cabeceras exactas: games, players, rising, falling
    por categoría).
 9. **telegram**: lee `data/telegram.json` y llama a `runTelegram({ env, exportData, now, getState, setState,
    force })`.
@@ -242,7 +242,7 @@ El dashboard calcula los días de evento con `flagEvents`.
 ## Rutas del Worker
 
 (Admin: `POST /api/admin/run` `{daily?, skip?, only?, telegram_force?, now?}`, `GET /api/admin/status?id=&counts=1`
-(filas del desglose de `espacio()`; `counts=exacto` las cuenta recorriendo las tablas), `GET /api/admin/espacio[?exacto=1]`,
+(filas del desglose de `espacio()`), `GET /api/admin/espacio[?exacto=1]` (`exacto` las cuenta recorriendo las tablas),
 `POST /api/admin/import` `{table, columns, rows}`, `POST /api/admin/rebuild` (recalcula la tabla `hist` desde
 `daily` y lanza un export), `POST /api/admin/export` (lanza un Workflow solo de export), `POST /api/admin/backfill` `{ids?}`
 (muestras desde el radar de 48 h; ver «Radar y juegos seguidos»). El esquema se aplica con
@@ -308,7 +308,7 @@ la cambian). Error: «Too many subrequests by single Worker invocation».
 
 Solución (`sampler.js`):
 - **Cuenta común por invocación.** Cada pasada lleva un `Budget(INVOCATION_BUDGET = 46)` para toda la
-  invocación. Cada paso coge su parte con `SubBudget`.
+  invocación. Cada paso coge su parte con un `Budget(n, inv)` que descuenta también del de la invocación.
 - **Pasada en varias ejecuciones encadenadas.** Antes de un paso con red se comprueba si caben sus
   peticiones. Si no caben, se crea la siguiente ejecución (`<id>-s<N>`) con `phase` y `cursor`, y la
   actual termina. Las fases son discover → search → rolimons → resolve → sample → radar-api → finalize.
@@ -396,7 +396,7 @@ Se pasa de muestrear todo el catálogo (~2.500 juegos) a un **radar** de todo y
 ## En el ecosistema STONKS (03/10/2026)
 
 - R2: el binding `BUCKET` apunta al bucket común `stonks-archivos` y el código usa
-  `appBucket()` (`src/stonks.js`), que mete todas las claves en `roblox-tracker/`.
+  `withApp()` (`src/stonks.js`), que mete todas las claves en `roblox-tracker/`.
   El resto del código sigue con claves cortas (`data/export.json`, `radar/…`).
 - `export class Operaciones` (`src/stonks.js`), para el Almacén por service binding:
   `espacio()` → el `Espacio` del contrato del ecosistema con la base D1

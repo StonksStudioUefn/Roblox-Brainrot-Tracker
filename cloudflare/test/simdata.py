@@ -1,12 +1,4 @@
-"""
-simdata.py — Datos locales "tal como estaban" en un instante `now`.
-
-Lo usan make_export.py y py_dashboard.py para que Python y el export vean lo
-mismo: muestras con ts ≤ now y, para el día de `now`, la fila diaria PARCIAL
-calculada con esas muestras (como hace tracker.py en cada pasada y como hará
-db.js desde `samples`), en vez de la fila del CSV, que ya tiene el día entero.
-Favoritos y votos de hoy se conservan del CSV.
-"""
+"""Datos como estaban en now: la fila de hoy, PARCIAL desde las muestras, como tracker.py."""
 
 import csv
 import sys
@@ -25,7 +17,6 @@ def _int(v):
 
 
 def load(data: Path, now: datetime):
-    """→ (daily, raw): listas de dicts con el formato de store.read_all_daily / read_raw."""
     today, now_s = now.date().isoformat(), now.strftime("%Y-%m-%dT%H:%MZ")
     raw = []
     for p in sorted((data / "raw").glob("*.csv")):

@@ -1,32 +1,22 @@
-"""
-config.py — Configuración única del tracker (la usan todos los scripts).
-
-Aquí se ajustan umbrales, categorías, reglas de clasificación de horror y los
-criterios para detectar juegos emergentes. No hace falta tocar nada más.
-"""
+"""Umbrales y reglas del tracker: la única configuración (la copia src/config.js)."""
 
 from pathlib import Path
 
 ROOT = Path(__file__).parent
 DATA = ROOT / "data"
-RAW_DIR = DATA / "raw"          # muestras intradía: data/raw/AAAA-MM-DD.csv
-DAILY_DIR = DATA / "daily"      # agregados diarios: data/daily/AAAA-MM.csv
-GAMES_PATH = DATA / "games.json"          # ficha de cada juego (metadatos)
-DASHBOARD_PATH = DATA / "dashboard.json"  # resumen para el dashboard
-HISTORY_PATH = DATA / "history.json"      # series completas (carga diferida)
-STATE_PATH = DATA / "state.json"          # estado del notificador
+RAW_DIR = DATA / "raw"
+DAILY_DIR = DATA / "daily"
+GAMES_PATH = DATA / "games.json"
+DASHBOARD_PATH = DATA / "dashboard.json"
+HISTORY_PATH = DATA / "history.json"
+STATE_PATH = DATA / "state.json"
 
-# ─── Recolección ───────────────────────────────────────────────────────────────
-# Se guardan muestras de TODOS los juegos con al menos este nº de jugadores.
-# Es más bajo que el umbral de cada categoría para poder ver nacer a los
-# emergentes desde abajo.
+# Más bajo que el de cada categoría: así se ve nacer a los emergentes desde abajo.
 TRACK_MIN_PLAYERS = 300
 RAW_RETENTION_DAYS = 35         # días de muestras intradía que se conservan
-# Día en que empezó el escaneo de todo Roblox (antes solo había keywords).
-# Hasta 2 días después no se marca ningún juego como "recién detectado".
+# Hasta SCAN_START + 2 días nada es «recién detectado» (antes solo había keywords).
 SCAN_START = "2026-10-02"
 
-# ─── Categorías (pestañas del dashboard) ───────────────────────────────────────
 #   min_players → mínimo de jugadores típicos (mediana 24h) para salir en la lista
 #   classifier  → "all" (todo Roblox) u "horror" (ver HORROR más abajo)
 CATEGORIES = {
@@ -44,13 +34,7 @@ CATEGORIES = {
     },
 }
 
-# ─── Clasificación de horror ───────────────────────────────────────────────────
-# Cada señal suma puntos; un juego es de horror si llega a HORROR["threshold"].
-# Se mira el nombre, la descripción y los géneros de Roblox, así que entran
-# juegos que no dicen "horror" en el título (escapar de un monstruo, sobrevivir
-# a un asesino, backrooms, anomalías…).
-# Las etiquetas entre corchetes del nombre ("[HAUNTED]", "[🎃 HALLOWEEN]") se
-# ignoran porque suelen ser eventos temporales, salvo las de TAGS.
+# Las etiquetas entre corchetes se ignoran (suelen ser eventos temporales), salvo las de TAGS.
 HORROR = {
     "threshold": 5,
     # NOMBRE · señal fuerte (4 puntos)
@@ -103,8 +87,7 @@ HORROR = {
     },
     # Género antiguo de Roblox: lo elige el propio creador y existe "Horror"
     "legacy_genres": {"Horror": 5},
-    # Géneros nuevos de Roblox ("género/subgénero"). Roblox no tiene "Horror"
-    # en su taxonomía nueva, pero la mayoría caen en estos.
+    # Roblox no tiene «Horror» en su taxonomía nueva, pero la mayoría caen en estos.
     "genres": {
         "Survival/1 vs All": 2, "Survival/Escape": 2, "Survival/": 1,
         "Adventure/Story": 1, "Adventure/Exploration": 1,
@@ -114,8 +97,6 @@ HORROR = {
     "force_exclude": [],
 }
 
-# ─── Juegos emergentes ─────────────────────────────────────────────────────────
-# "Emergente" = poco conocido (pocas visitas totales) y empezando a petar.
 EMERGING = {
     "max_visits": 30_000_000,   # más visitas que esto → ya es conocido
     "min_players": 300,         # jugadores típicos mínimos para tenerlo en cuenta
@@ -124,9 +105,6 @@ EMERGING = {
     "max_results": 24,
 }
 
-# ─── Detección de eventos / picos ──────────────────────────────────────────────
-# Un día cuenta como "evento" si su valor se sale mucho de la mediana de los
-# días de alrededor; esos días NO cuentan para las medias.
 EVENTS = {
     "window_days": 7,      # ventana de la mediana móvil
     "mad_k": 3.5,          # cuántas desviaciones robustas (MAD) para marcar pico

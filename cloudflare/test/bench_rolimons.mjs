@@ -1,7 +1,15 @@
-// Mide la CPU del filtro de Rolimons (texto vs JSON.parse) con process.cpuUsage.
-// Uso: node test/bench_rolimons.mjs [fichero]   (sin fichero lo descarga)
 import { readFileSync } from "node:fs";
-import { filterRolimons, filterRolimonsParse } from "../src/sources.js";
+import { filterRolimons } from "../src/sources.js";
+
+function filterRolimonsParse(text, minPlayers) {
+  const data = JSON.parse(text);
+  const out = [];
+  for (const pid in data.games) {
+    const g = data.games[pid];
+    if (g && g[1] >= minPlayers) out.push([Number(pid), g[0], g[1]]);
+  }
+  return out;
+}
 
 const file = process.argv[2];
 const text = file ? readFileSync(file, "utf8")
@@ -20,5 +28,6 @@ const [c1, a] = cold(() => filterRolimons(text, 300));
 const [c2, b] = cold(() => filterRolimonsParse(text, 300));
 const same = a.length === b.length && a.every((x, i) => x[0] === b[i][0] && x[1] === b[i][1] && x[2] === b[i][2]);
 console.log(`bytes=${text.length} filtrados=${a.length} iguales=${same}`);
+if (!same) process.exitCode = 1;
 console.log(`primera llamada (sin JIT): escaneo ${c1.toFixed(2)} ms · JSON.parse ${c2.toFixed(2)} ms`);
 console.log(`media en caliente: escaneo ${cpu(() => filterRolimons(text, 300)).toFixed(2)} ms · JSON.parse ${cpu(() => filterRolimonsParse(text, 300)).toFixed(2)} ms`);

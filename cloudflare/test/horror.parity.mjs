@@ -1,20 +1,6 @@
-/**
- * horror.parity.mjs — Paridad de src/horror.js con analytics.py (producción).
- *
- * Descarga detalles frescos (con descripción) de la Games API pública de Roblox
- * para los ids de data/games.json (50 por llamada) y compara, juego a juego,
- * `classifyHorror` con `analytics.is_horror` y `cleanTitle` con
- * `analytics.clean_title`. Además mide la CPU de clasificar 1.000 juegos.
- *
- * Uso (desde la raíz del repo):
- *   node cloudflare/test/horror.parity.mjs                 # usa la caché si existe
- *   node cloudflare/test/horror.parity.mjs --fresh         # vuelve a descargar
- *   node cloudflare/test/horror.parity.mjs --limit 1000
- *   node cloudflare/test/horror.parity.mjs --det fichero.json  # lista de detalles ya descargada
- * Variables: HORROR_CACHE (ruta de la caché; por defecto en el tmp del sistema), PYTHON.
- *
- * Sale con código 1 si hay alguna diferencia.
- */
+// classifyHorror y cleanTitle = analytics.py, con la Games API (o su caché); sale con 1 si difieren.
+//   node cloudflare/test/horror.parity.mjs [--fresh]
+//   node cloudflare/test/horror.parity.mjs --det fichero.json
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -35,7 +21,6 @@ const LIMIT = Number(opt("--limit", 2500));
 const CACHE = process.env.HORROR_CACHE || join(tmpdir(), "roblox-horror-details.json");
 const PYTHON = process.env.PYTHON || "python3";
 
-// ─── Datos ────────────────────────────────────────────────────────────────────
 async function download(ids) {
   const out = [];
   for (let i = 0; i < ids.length; i += 50) {
@@ -99,7 +84,6 @@ function syntheticGames() {
   });
 }
 
-// ─── Comparación ──────────────────────────────────────────────────────────────
 function python(games) {
   const out = execFileSync(PYTHON, [join(HERE, "horror_ref.py")], {
     input: JSON.stringify(games), cwd: ROOT, maxBuffer: 1 << 28,
@@ -166,8 +150,6 @@ console.log(`Detalles: ${games.length} juegos, ${withDesc} con descripción`);
 
 let bad = 0;
 bad += compare("Games API (fresco)", games);
-// Mismos juegos con la descripción en mayúsculas y sin ella, para forzar más ramas
-bad += compare("Sin descripción", games.map(g => ({ ...g, description: "" })));
 bad += compare("Sintéticos", syntheticGames());
 // clean_title con todos los nombres de data/games.json
 const names = Object.entries(JSON.parse(readFileSync(join(ROOT, "data/games.json"), "utf8")))

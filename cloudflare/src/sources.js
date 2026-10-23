@@ -1,16 +1,3 @@
-/**
- * sources.js — Clientes de las APIs públicas que usa el muestreo.
- *
- *   Rolimons gamelist · Explore API · Search API · Games API · Votes API
- *   place → universe · iconos y miniaturas
- *
- * Todo pasa por `getJson()`, que reintenta con backoff y lleva la cuenta de
- * peticiones externas en un `Budget` (el plan gratis permite 50 por invocación:
- * cada paso del Workflow crea el suyo y no lo pasa de largo).
- *
- * Sin dependencias: funciona igual en el Worker y en Node ≥ 18 (para medir).
- */
-
 export const UA = "roblox-tracker/3.0 (+https://robloxtracker.stonksstudio.com)";
 
 export const URLS = {
@@ -26,60 +13,31 @@ export const URLS = {
 };
 
 export const GAMES_BATCH = 50;   // la Games API rechaza más de 50 ids ("Too many universe IDs")
-export const VOTES_BATCH = 50;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// Tope de cada intento (cabeceras y cuerpo). Sin él, una petición que se
-// queda colgada bloqueaba su paso hasta el timeout del Workflow (10 min, y
-// otra vez en cada reintento del paso)
+// Sin tope, una petición colgada bloqueaba su paso hasta el timeout del Workflow (10 min).
 export const FETCH_TIMEOUT_MS = 20_000;
 
-/** Cuenta las peticiones externas de una invocación y corta antes del límite. */
+// El tope de 50 subrequests es por invocación y varios pasos la comparten (visto en producción).
 export class Budget {
-  constructor(max = 45) { this.max = max; this.used = 0; }
+  constructor(max, parent = null) { this.max = max; this.parent = parent; this.used = 0; }
   take() {
-    if (this.used >= this.max) throw new BudgetError(`Presupuesto de peticiones agotado (${this.max})`);
+    if (this.used >= this.max) throw new Error(`Presupuesto de peticiones agotado (${this.max})`);
+    this.parent?.take();
     this.used++;
   }
-  get left() { return this.max - this.used; }
-}
-export class BudgetError extends Error {}
-
-/**
- * Presupuesto de un paso que además descuenta del de la invocación (`parent`).
- * En el plan gratis el límite de 50 peticiones externas es POR INVOCACIÓN y
- * varios pasos de un Workflow comparten invocación (comprobado en producción:
- * «Too many subrequests by single Worker invocation»), así que el Sampler lleva
- * un Budget por invocación y cada paso coge su parte de él.
- */
-export class SubBudget extends Budget {
-  constructor(parent, max) { super(max); this.parent = parent; }
-  take() {
-    if (this.used >= this.max) throw new BudgetError(`Presupuesto del paso agotado (${this.max})`);
-    this.parent.take();
-    this.used++;
-  }
-  get left() { return Math.min(this.max - this.used, this.parent.left); }
+  get left() { return Math.min(this.max - this.used, this.parent?.left ?? Infinity); }
 }
 
-/**
- * GET con reintentos. Devuelve el cuerpo (JSON o texto) o `null` si no hay datos.
- *  - 429 y 5xx: reintenta con backoff exponencial (respeta Retry-After).
- *  - otros 4xx: null sin reintentar.
- *  - `empty(data)`: si devuelve true, la respuesta cuenta como fallida y se
- *    reintenta (la Search API devuelve 200 vacío cuando se le pide mucho).
- *  - cada intento, como mucho `timeout` ms: si se pasa, es un fallo más (se
- *    reintenta y, si no hay datos, null).
- */
-export async function getJson(url, { budget, retries = 3, base = 800, text = false, empty, cf, timeout = FETCH_TIMEOUT_MS } = {}) {
+// empty(): la Search API da 200 vacío cuando se le pide mucho; cuenta como un fallo más.
+export async function getJson(url, { budget, retries = 3, base = 800, text = false, empty, timeout = FETCH_TIMEOUT_MS }) {
   let last = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
-    if (budget && budget.left <= 0) break;
-    budget?.take();
+    if (budget.left <= 0) break;
+    budget.take();
     try {
       const init = { headers: { "user-agent": UA, accept: "application/json" }, signal: AbortSignal.timeout(timeout) };
-      if (cf) init.cf = cf;
       const r = await fetch(url, init);
       if (r.ok) {
         const data = text ? await r.text() : await r.json();
@@ -94,7 +52,6 @@ export async function getJson(url, { budget, retries = 3, base = 800, text = fal
         if (ra > 0 && ra < 30) { await sleep(ra * 1000); continue; }
       }
     } catch (e) {
-      if (e instanceof BudgetError) throw e;
       last = String(e?.message || e);
     }
     if (attempt < retries) await sleep(base * 2 ** attempt + Math.random() * 300);
@@ -103,14 +60,14 @@ export async function getJson(url, { budget, retries = 3, base = 800, text = fal
   return null;
 }
 
-/** Ejecuta `fn` sobre `items` con como mucho `limit` en vuelo (Workers: 6 conexiones). */
+// Workers: 6 conexiones a la vez como mucho.
 export async function pool(items, limit, fn) {
   const out = new Array(items.length);
   let i = 0;
   const worker = async () => {
     while (i < items.length) {
       const k = i++;
-      out[k] = await fn(items[k], k);
+      out[k] = await fn(items[k]);
     }
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
@@ -123,21 +80,8 @@ export function chunks(arr, n) {
   return out;
 }
 
-// ─── Rolimons ─────────────────────────────────────────────────────────────────
-/**
- * Filtra el texto del gamelist de Rolimons sin JSON.parse.
- * Formato: {"success":true,"game_count":N,"games":{"<placeId>":["<name>",<players>,"<icon>"],…}}
- *
- * Una expresión regular (código nativo de V8) busca `",<jugadores>,` solo con
- * números ≥ 300; para cada acierto se retrocede con lastIndexOf hasta el
- * `"<placeId>":["`. Así solo se crean objetos para los ~2.100 juegos que pasan.
- * Devuelve [[placeId, name, players], …].
- *
- * Medido en Node 22 --single-threaded con el fichero real (1,05 MB, 7.602 juegos),
- * primera llamada (sin JIT, como en el Worker): JSON.parse + filtro 12–17 ms;
- * este escaneo ≈ 3,1 ms (ver README y test/bench_rolimons.mjs).
- */
-export function filterRolimons(text, minPlayers = 300) {
+// Sin JSON.parse: ~3 ms frente a 12–17 ms en frío con el fichero real (test/bench_rolimons.mjs).
+export function filterRolimons(text, minPlayers) {
   const rx = playersRegex(minPlayers);
   const out = [];
   let m;
@@ -162,25 +106,12 @@ export function filterRolimons(text, minPlayers = 300) {
   return out;
 }
 
-/** `",<n>,` o `",<n>]` con n ≥ min (prefiltro por nº de dígitos; el resto se comprueba después). */
 function playersRegex(min) {
-  const digits = String(Math.max(1, Math.floor(min))).length;
+  const digits = String(min).length;
   const lead = String(min)[0];
-  // Mismo nº de dígitos con primera cifra ≥ la de `min`, o más dígitos
   const same = `[${lead}-9]\\d{${digits - 1}}`;
   const more = `[1-9]\\d{${digits},}`;
   return new RegExp(`",(${same}|${more})[,\\]]`, "g");
-}
-
-/** El mismo filtro con JSON.parse (referencia para medir y comprobar). */
-export function filterRolimonsParse(text, minPlayers) {
-  const data = JSON.parse(text);
-  const out = [];
-  for (const pid in data.games) {
-    const g = data.games[pid];
-    if (g && g[1] >= minPlayers) out.push([Number(pid), g[0], g[1]]);
-  }
-  return out;
 }
 
 export async function fetchRolimons(budget, minPlayers) {
@@ -189,12 +120,10 @@ export async function fetchRolimons(budget, minPlayers) {
   return filterRolimons(text, minPlayers);
 }
 
-// ─── Explore API (listas oficiales de Roblox) ─────────────────────────────────
 function exploreParams(sessionId) {
   return `sessionId=${sessionId}&device=computer&country=all`;
 }
 
-/** Una página de get-sorts. → { sorts: {sortId: [[uid, placeId, name, players], …]}, pending: [[sortId, token, nº filas]], next } */
 export async function fetchSortsPage(budget, sessionId, token = null) {
   const url = `${URLS.sorts}?${exploreParams(sessionId)}${token ? `&sortsPageToken=${encodeURIComponent(token)}` : ""}`;
   const d = await getJson(url, { budget });
@@ -208,11 +137,10 @@ export async function fetchSortsPage(budget, sessionId, token = null) {
   return { sorts, pending, next: d.nextSortsPageToken || null };
 }
 
-/** Páginas siguientes de una lista (get-sort-content con pageToken). → [[uid, placeId, name, players], …] */
-export async function fetchSortContent(budget, sessionId, sortId, token, maxPages = 6) {
+export async function fetchSortContent(budget, sessionId, sortId, token, maxPages) {
   const out = [];
   let pt = token, n = 0;
-  while (pt && n < maxPages && budget.left > 0) {
+  while (pt && n < maxPages) {
     const url = `${URLS.sortContent}?${exploreParams(sessionId)}&sortId=${encodeURIComponent(sortId)}&pageToken=${encodeURIComponent(pt)}`;
     const d = await getJson(url, { budget });
     if (!d) break;
@@ -227,19 +155,14 @@ function gameTuple(g) {
   return [g.universeId, g.rootPlaceId || null, g.name || null, g.playerCount ?? null];
 }
 
-// ─── Search API ───────────────────────────────────────────────────────────────
-/**
- * Hasta `pages` páginas de omni-search para `query`. Devuelve [[uid, placeId, name, players], …]
- * en el orden de los resultados. Si se le pide mucho seguido, la API responde
- * 200 con `searchResults` vacío: la primera página se reintenta con espera
- * y entre páginas se esperan `gapMs`.
- */
-export async function fetchSearch(budget, query, { pages = 3, gapMs = 1200 } = {}) {
+const SEARCH_GAP_MS = 1200;
+
+export async function fetchSearch(budget, query, { pages }) {
   const sid = crypto.randomUUID();
   const out = [];
   let token = null;
   for (let p = 0; p < pages; p++) {
-    if (p) await sleep(gapMs);
+    if (p) await sleep(SEARCH_GAP_MS);
     const url = `${URLS.search}?searchQuery=${encodeURIComponent(query)}&sessionId=${sid}&pageType=all` +
       (token ? `&pageToken=${encodeURIComponent(token)}` : "");
     const d = await getJson(url, {
@@ -257,22 +180,12 @@ export async function fetchSearch(budget, query, { pages = 3, gapMs = 1200 } = {
   return out;
 }
 
-// ─── Games / Votes ────────────────────────────────────────────────────────────
-/**
- * Detalles de juegos en lotes de 50 (`concurrency` en paralelo).
- * Devuelve { data: [game…], failed: nº de lotes sin respuesta }.
- */
-export async function fetchGames(budget, ids, { concurrency = 4 } = {}) {
-  const res = await pool(chunks(ids, GAMES_BATCH), concurrency, c =>
-    getJson(`${URLS.games}?universeIds=${c.join(",")}`, { budget, retries: 2 }));
+async function fetchByIds(budget, base, ids) {
+  const res = await pool(chunks(ids, GAMES_BATCH), 4, c => getJson(`${base}?universeIds=${c.join(",")}`, { budget, retries: 2 }));
   return collect(res);
 }
-
-export async function fetchVotes(budget, ids, { concurrency = 4 } = {}) {
-  const res = await pool(chunks(ids, VOTES_BATCH), concurrency, c =>
-    getJson(`${URLS.votes}?universeIds=${c.join(",")}`, { budget, retries: 2 }));
-  return collect(res);
-}
+export const fetchGames = (budget, ids) => fetchByIds(budget, URLS.games, ids);
+export const fetchVotes = (budget, ids) => fetchByIds(budget, URLS.votes, ids);
 
 function collect(pages) {
   const data = [];
@@ -284,15 +197,15 @@ function collect(pages) {
   return { data, failed };
 }
 
-/** place_id → universe_id (una llamada por place). Devuelve [[placeId, universeId|null], …]. */
-export async function resolvePlaces(budget, placeIds, { concurrency = 5 } = {}) {
-  return pool(placeIds, concurrency, async pid => {
+export async function resolvePlaces(budget, placeIds) {
+  return pool(placeIds, 5, async pid => {
     const d = await getJson(`${URLS.placeUniverse}${pid}/universe`, { budget, retries: 1 });
     return [pid, d?.universeId || null];
   });
 }
 
-// ─── Iconos y miniaturas (rutas en vivo) ─────────────────────────────────────
+export const gamesUrl = ids => `${URLS.games}?universeIds=${ids.join(",")}`;
+
 export function iconsUrl(ids, size = "150x150") {
   return `${URLS.icons}?universeIds=${ids.join(",")}&size=${size}&format=Webp&returnPolicy=PlaceHolder`;
 }
