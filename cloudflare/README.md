@@ -12,7 +12,7 @@ La interfaz entre piezas está en [`CONTRACT.md`](CONTRACT.md).
 | `src/sources.js` | Clientes de Rolimons, Explore, Search, Games, Votes, place→universe, iconos |
 | `src/db.js` | SQL: inserciones (`json_each`), cierre diario, tabla `hist`, export por trozos, historial, import |
 | `scripts/migrate_from_git.py` | Sube los datos actuales del repo (git o carpeta) a D1 por `/api/admin/import` |
-| `test/` | `dev.sh`/`sync.sh` (servidor local), `cpu_steps.mjs` (CPU por paso), `bench_rolimons.mjs`, `cf_loader.mjs`, `export.bench.mjs` (filas leídas y salida del export contra un D1 local), `filas.bench.mjs` (filas de D1 de pasadas completas, con topes), `cierre.parity.mjs` y `cierre.cpu.mjs` (el cierre del día: mismo resultado que antes y su CPU), `sources.test.mjs` (tope de tiempo de cada petición) |
+| `test/` | `dev.sh`/`sync.sh` (servidor local), `cpu_steps.mjs` (CPU por paso), `bench_rolimons.mjs`, `cf_loader.mjs`, `export.bench.mjs` (filas leídas y salida del export contra un D1 local), `filas.bench.mjs` (filas de D1 de pasadas completas, con topes), `cierre.parity.mjs` y `cierre.cpu.mjs` (el cierre del día: mismo resultado que antes y su CPU), `sources.test.mjs` (tope de tiempo y de peticiones, y el filtro de Rolimons), `http.test.mjs` (reglas de host y `ADMIN_TOKEN`), `metrics.parity.mjs` (la salida de `buildDashboard`, fija; `--actualizar` la rehace), `comun.mjs` (el D1 y R2 de mentira, el generador y la medida en frío de todas) |
 
 ## Desarrollo y pruebas en local
 
@@ -20,8 +20,7 @@ La interfaz entre piezas está en [`CONTRACT.md`](CONTRACT.md).
 cd cloudflare
 npm install                       # solo wrangler (devDependency)
 test/dev.sh --port 8787           # wrangler dev --local sobre una copia en test/.build (estado en test/.state)
-                                  # ADMIN_TOKEN local = "test-admin"; si falta algún módulo de otro equipo,
-                                  # se puede poner un stub en test/stubs/ (se copia solo si no existe en src/)
+                                  # ADMIN_TOKEN local = "test-admin"
 test/sync.sh                      # tras editar src/: copia a test/.build (wrangler recarga solo)
 
 # Esquema en el D1 local
@@ -35,8 +34,7 @@ curl -X POST -H "Authorization: Bearer test-admin" http://127.0.0.1:8787/api/adm
 curl -H "Authorization: Bearer test-admin" "http://127.0.0.1:8787/api/admin/status?id=<id>&counts=1"
 # El cron: curl "http://127.0.0.1:8787/cdn-cgi/handler/scheduled?cron=0+*/3+*+*+*"
 
-# Reglas de host: workers.dev solo responde /api/admin/*
-curl -H "Host: roblox-tracker.x.workers.dev" http://127.0.0.1:8787/api/export     # → 404
+# Reglas de host (workers.dev solo responde /api/admin/*): las mira test/http.test.mjs
 
 # CPU de cada paso (Node, procesos en frío, --single-threaded) con respuestas reales guardadas
 node test/cpu_steps.mjs <carpeta_fixtures> 7
@@ -50,7 +48,8 @@ node --import ./test/cf_loader.mjs test/cierre.cpu.mjs       # close y close-rad
 cd cloudflare
 node --import ./test/cf_loader.mjs test/filas.bench.mjs todos     # filas de D1 por pasada: falla si se pasa de los topes
 node --import ./test/cf_loader.mjs test/cierre.parity.mjs         # el cierre da lo mismo que las consultas de antes
-node --test test/sources.test.mjs                                 # getJson: una petición colgada acaba en su tope (20 s)
+node --test test/sources.test.mjs                                 # getJson: tope de 20 s y de peticiones; filtro de Rolimons
+node --test test/http.test.mjs                                    # workers.dev solo /api/admin/*, ADMIN_TOKEN y uploader
 node --test test/telegram.test.mjs                                # necesitan data/ en la raíz del repo (los datos del
 node test/metrics.parity.mjs                                      #  03/10: git archive 99d2ee9 data | tar -x) y python3
 node test/horror.parity.mjs                                       # descarga de la Games API (o usa su caché)
@@ -162,7 +161,6 @@ parsear respuestas, calcular y serializar (esperar a la red, D1 o R2 no cuenta).
 | `radar-api` (~320 juegos) | 7 respuestas de la Games API (~450 KB) + leer y reescribir el fichero del radar (~48 KB) | ~4 (por debajo de `sample-i` medido en la misma máquina) |
 | `sample-i` con meta (50 juegos) | 1 respuesta + votos + `classifyHorror` de 50 | 3,9 |
 | `export-i` | recibir ~330 KB de D1 (hoy) / ~680 KB (parte grande en régimen) | 3,0 / 6,2 |
-| `export-join` | cabecera; las partes van en stream | 0,1 |
 | `tg-scan-i-j` (50 juegos) | decodificar la parte + `telegramScanText` (régimen; con 100 juegos ~9–13) | ~4 |
 | `tg-reduce` | `pickCandidates` (~1.000 filas) | < 2,4 |
 | `tg-pick-i` | decodificar la parte + copiar los ~70 candidatos (`pickGames`, parte de 416 KB) | ~2 |
@@ -180,8 +178,8 @@ pocas veces al día y Cloudflare tolera excesos ocasionales. Sin mensajes, ~6 ms
 
 Cierre del día (`test/cierre.cpu.mjs`, datos sintéticos del tamaño de producción: 2.800 juegos × 8
 lecturas, 56 ficheros de votos; medido el 05/10/2026 en otra máquina, compartida y ~2 veces más lenta que la
-de la tabla, mediana de 11): el paso `close` de antes, que juntaba todas las lecturas con `JSON.parse`,
-costaba **~32–55 ms**. Ahora `close` (votos y meta) ~4–8 ms y `close-radar-<día>-<k>` (1 de 10 partes: una
+de la tabla, mediana de 11): el paso `close` de antes del 05/10, que juntaba todas las lecturas con
+`JSON.parse`, costó **~32–55 ms** (ya no se mide). Ahora `close` (votos y meta) ~4–8 ms y `close-radar-<día>-<k>` (1 de 10 partes: una
 expresión regular saca del texto de los 8 ficheros los ids de su parte, y `radarDailyRows`) ~4–9 ms (mediana
 6,7) la primera de la ejecución (decodifica los 8 ficheros de R2 y comprueba su forma) y ~3–6 ms (mediana
 3,6) las demás, que reciben los ficheros ya leídos; en la máquina de la tabla, la mitad. Con 5 partes y sin

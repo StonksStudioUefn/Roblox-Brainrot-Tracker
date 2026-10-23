@@ -127,17 +127,6 @@ function playersRegex(min) {
   return new RegExp(`",(${same}|${more})[,\\]]`, "g");
 }
 
-/** El mismo filtro con JSON.parse (referencia para medir y comprobar). */
-export function filterRolimonsParse(text, minPlayers) {
-  const data = JSON.parse(text);
-  const out = [];
-  for (const pid in data.games) {
-    const g = data.games[pid];
-    if (g && g[1] >= minPlayers) out.push([Number(pid), g[0], g[1]]);
-  }
-  return out;
-}
-
 export async function fetchRolimons(budget, minPlayers) {
   const text = await getJson(URLS.rolimons, { budget, text: true, retries: 3, base: 2000 });
   if (!text || !text.includes('"games"')) return null;

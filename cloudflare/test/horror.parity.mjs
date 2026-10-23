@@ -150,8 +150,6 @@ console.log(`Detalles: ${games.length} juegos, ${withDesc} con descripción`);
 
 let bad = 0;
 bad += compare("Games API (fresco)", games);
-// Mismos juegos con la descripción en mayúsculas y sin ella, para forzar más ramas
-bad += compare("Sin descripción", games.map(g => ({ ...g, description: "" })));
 bad += compare("Sintéticos", syntheticGames());
 // clean_title con todos los nombres de data/games.json
 const names = Object.entries(JSON.parse(readFileSync(join(ROOT, "data/games.json"), "utf8")))

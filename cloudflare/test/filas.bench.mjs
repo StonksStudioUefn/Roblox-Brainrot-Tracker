@@ -1,10 +1,11 @@
 //   node --import ./test/cf_loader.mjs test/filas.bench.mjs [hoy|regimen|anio|todos|regimen,anio] [--src=src] [-v] [--dia] [--seed]
-//     [--sin-topes] [--sin-cascada] [--exacto] [--salida=<carpeta>]
+//     [--sin-topes] [--sin-cascada] [--salida=<carpeta>]
 // D1 da 5 M filas leídas al día a TODA la cuenta y al pasarse cae hasta las 00:00 UTC: topes.
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { getPlatformProxy } from "wrangler";
+import { aplicarEsquema, contador, memBucket, rng } from "./comun.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "..");
@@ -32,7 +33,7 @@ if (scens.some(s => !SCEN[s])) throw new Error(`Escenario desconocido: ${wanted}
 
 const mod = f => import(pathToFileURL(resolve(SRC, f)).href);
 const D = await mod("db.js");
-const { Sampler } = await mod("sampler.js");
+const { DAILY_TRIES, Sampler } = await mod("sampler.js");
 const { classifyHorror } = await mod("horror.js");
 const { TRACK_MIN_PLAYERS } = await mod("config.js");
 const { espacioD1 } = await mod("stonks.js");
@@ -40,7 +41,6 @@ const { espacioD1 } = await mod("stonks.js");
 const NG = 2953, NT = 2797, NSEL = 242, NPLACES = 2582;
 const DAY0 = "2026-10-05";                       // día de la semilla (abierto); 2026-10-04 cerrado
 const T0 = D.dayStart(DAY0) + 22 * 60;           // última muestra de la semilla: 05/10 22:00
-const rng = seed => () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
 const R = rng(12345);
 const ids = [...new Set(Array.from({ length: NG + 50 }, () => 1_000_000 + Math.floor(R() * 10_767_000_000)))].slice(0, NG).sort((a, b) => a - b);
 const tracked = ids.slice(0, NT).sort(() => R() - 0.5);
@@ -117,28 +117,9 @@ function gameTuple(id) {
   return { universeId: id, rootPlaceId: pidOf(id), name: `Juego ${idx.get(id)}`, playerCount: playing(id, NOW_TS) };
 }
 
-function memBucket() {
-  const store = new Map(), uploaded = new Map();   // uploaded: con la hora simulada
-  const text = async v => typeof v === "string" ? v : v instanceof ReadableStream ? new Response(v).text() : new TextDecoder().decode(v);
-  const obj = (k, t) => ({ key: k, size: Buffer.byteLength(t), text: async () => t, json: async () => JSON.parse(t), get body() { return new Response(t).body; }, httpEtag: "x" });
-  return {
-    store,
-    seed(k, t, date) { store.set(k, t); uploaded.set(k, date); },
-    async put(k, v) { const t = await text(v); store.set(k, t); uploaded.set(k, new Date(NOW_TS * 60000)); return { key: k, size: Buffer.byteLength(t) }; },
-    async get(k) { return store.has(k) ? obj(k, store.get(k)) : null; },
-    async head(k) { return store.has(k) ? obj(k, store.get(k)) : null; },
-    async list({ prefix = "", limit = 1000 } = {}) {
-      const keys = [...store.keys()].filter(k => k.startsWith(prefix)).sort().slice(0, limit);
-      return { objects: keys.map(key => ({ key, size: Buffer.byteLength(store.get(key)), uploaded: uploaded.get(key) })), truncated: false, delimitedPrefixes: [] };
-    },
-    async delete(keys) { for (const k of [].concat(keys)) { store.delete(k); uploaded.delete(k); } },
-  };
-}
-globalThis.FixedLengthStream ??= class { constructor() { const t = new TransformStream(); this.readable = t.readable; this.writable = t.writable; } };
 
 async function seed(raw, s) {
-  const schema = readFileSync(resolve(ROOT, "schema.sql"), "utf8").replace(/--.*$/gm, "");
-  for (const q of schema.split(";").map(x => x.trim()).filter(Boolean)) await raw.prepare(q).run();
+  await aplicarEsquema(raw);
   const chunked = async (sql, rows, n = 20000) => {
     for (let i = 0; i < rows.length; i += n) await raw.prepare(sql).bind(JSON.stringify(rows.slice(i, i + n))).run();
   };
@@ -202,40 +183,11 @@ function seedRadar(bucket) {
   }
 }
 
-function counting(raw, log, tagRef, fallos = new Set()) {
-  const add = (sql, meta) => log.push({ tag: tagRef.tag, sql: sql.replace(/\s+/g, " ").trim().slice(0, 80), read: meta?.rows_read ?? 0, written: meta?.rows_written ?? 0 });
-  // fallos: pasos cuyas escrituras fallan; corte: paso en el que falla todo (se corta la ejecución)
-  const corte = () => { if (tagRef.corte && tagRef.tag === tagRef.corte) throw new Error(`corte simulado en ${tagRef.tag}`); };
-  class Stmt {
-    constructor(s, sql) { this.s = s; this.sql = sql; }
-    bind(...a) { return new Stmt(this.s.bind(...a), this.sql); }
-    async all() { corte(); const r = await this.s.all(); add(this.sql, r.meta); return r; }
-    async run() {
-      corte();
-      if (fallos.has(tagRef.tag)) throw new Error(`fallo simulado en ${tagRef.tag}`);
-      const r = await this.s.run(); add(this.sql, r.meta); return r;
-    }
-    async raw(o) { return this.s.raw(o); }
-    // first() de D1 no devuelve meta: se hace con all() para contar sus filas
-    async first(col) { const row = (await this.all()).results[0]; return row ? (col ? row[col] : row) : null; }
-  }
-  return {
-    prepare: sql => new Stmt(raw.prepare(sql), sql),
-    async batch(list) {
-      corte();
-      if (fallos.has(tagRef.tag)) throw new Error(`fallo simulado en ${tagRef.tag}`);
-      const r = await raw.batch(list.map(x => x.s));
-      r.forEach((x, i) => add(list[i].sql, x.meta));
-      return r;
-    },
-    exec: sql => raw.exec(sql),
-  };
-}
 
 async function pasada(env, tagRef, iso) {
   NOW_TS = D.minuteOf(Date.parse(iso));
   const queue = [{ id: `cron-${iso.slice(0, 16)}`, params: { now: iso } }];
-  env.SAMPLER = { create: async ({ id, params }) => { queue.push({ id, params }); return { id }; }, get: async () => ({ status: async () => ({}) }) };
+  env.SAMPLER = { create: async ({ id, params }) => { queue.push({ id, params }); return { id }; } };
   const errors = [];
   let summary = null;
   while (queue.length) {
@@ -274,9 +226,9 @@ async function scenario(name, { hours, fallos = new Set(), cortes = {}, work = "
   cpSync(seedDir, workDir, { recursive: true });
   const proxy = await getPlatformProxy({ configPath: resolve(HERE, "filas.wrangler.toml"), persist: { path: workDir } });
   const log = [], tagRef = { tag: "" };
-  const bucket = memBucket();
+  const bucket = memBucket(() => new Date(NOW_TS * 60000));
   seedRadar(bucket);
-  const env = { DB: counting(proxy.env.DB, log, tagRef, fallos), BUCKET: bucket };
+  const env = { DB: contador(proxy.env.DB, log, tagRef, fallos), BUCKET: bucket };
   if (alPrincipio) await alPrincipio(proxy.env.DB, bucket);
   const runs = [];
   for (const [k, iso] of hours.entries()) {
@@ -300,13 +252,9 @@ async function scenario(name, { hours, fallos = new Set(), cortes = {}, work = "
     await proxy.env.DB.prepare("DELETE FROM state WHERE key = 'espacio'").run();
     const i = log.length;
     tagRef.tag = "espacio";
-    const r = await espacioD1(env.DB);
+    await espacioD1(env.DB);
     const q = log.slice(i);
-    esp = { read: sum(q, "read"), written: sum(q, "written"), q, tablas: r.base.tablas };
-    if (flag("--exacto")) {
-      const ex = await espacioD1(proxy.env.DB, { exacto: true });
-      esp.exacto = ex.base.tablas;
-    }
+    esp = { read: sum(q, "read"), written: sum(q, "written"), q };
   }
   const extra = alFinal ? await alFinal(proxy.env.DB, bucket) : null;
   await proxy.dispose();
@@ -351,7 +299,7 @@ for (const name of scens) {
     ? day.reduce((a, r) => a + r[k], 0)
     : by("00")[k] + 7 * by("03")[k] + 8 * (by("01")[k] + by("02")[k]);
   const dia = total("read") + esp.read, diaW = total("written") + esp.written;
-  results[name] = { runs, dia };
+  results[name] = { runs };
   out(`\n══ ${name} (${SRC === resolve(ROOT, "src") ? "src" : SRC}) ══`);
   for (const r of runs) {
     printRun(r);
@@ -359,7 +307,6 @@ for (const name of scens) {
   }
   out(`espacio() (Almacén, desglose rehecho: 1 al día) ${fmt(esp.read).padStart(10)} leídas ${fmt(esp.written).padStart(8)} escritas`);
   if (VERBOSE) for (const x of esp.q) out(`        ${fmt(x.read).padStart(9)} r ${fmt(x.written).padStart(7)} w  ${x.sql}`);
-  if (esp.exacto) for (const t of esp.tablas) out(`        ${t.nombre.padEnd(10)} estimadas ${fmt(t.filas).padStart(9)} · exactas ${fmt(esp.exacto.find(e => e.nombre === t.nombre)?.filas ?? "?").padStart(9)}`);
   out(`Día (${flag("--dia") ? "24 pasadas" : "00:00 + 7 × radar + 16 × normal"} + espacio()): ${fmt(dia)} leídas, ${fmt(diaW)} escritas`);
   if (!flag("--sin-topes")) {
     const t = TOPES[name];
@@ -373,27 +320,29 @@ for (const name of scens) {
   }
 }
 
+const extras = scens.includes("regimen") && !flag("--sin-cascada");
+const didMeta = r => r.q.some(x => x.sql.startsWith("UPDATE games SET place_id"));
+
 // Un cierre que falla no repite cada hora las tareas del día (antes, ~450.000 filas por hora)
-if (scens.includes("regimen") && !flag("--sin-cascada")) {
+if (extras) {
   const { runs } = await scenario("regimen", { hours: horas(5), fallos: new Set(["close"]), work: "cascada" });
   out("\n══ cascada: el cierre falla siempre (regimen) ══");
-  const didMeta = r => r.q.some(x => x.sql.startsWith("UPDATE games SET place_id"));
   const didClose = r => r.errors.some(e => e.startsWith("close:"));
   for (const r of runs) {
     out(`${r.iso.slice(0, 16)}  ${fmt(r.read).padStart(10)} leídas${didMeta(r) ? "  meta" : ""}${didClose(r) ? "  cierre (falla)" : ""}`);
   }
   const later = runs.filter(r => ["02", "03", "04"].includes(r.hh));
-  const tope = TOPES.regimen.radar || Infinity;
+  const tope = TOPES.regimen.radar;
   const metaRuns = runs.filter(r => r.hh !== "cal" && didMeta(r)).length;
   const closeRuns = runs.filter(r => r.hh !== "cal" && didClose(r)).length;
-  if (metaRuns > 1 || closeRuns > 2 || later.some(r => r.read > tope)) {
+  if (metaRuns > 1 || closeRuns > DAILY_TRIES || later.some(r => r.read > tope)) {
     fail = true;
     out(`✗ cascada: meta en ${metaRuns} pasadas, cierre en ${closeRuns}; 02–04 h: ${later.map(r => fmt(r.read)).join(" / ")} leídas`);
-  } else out(`✓ cascada: meta en ${metaRuns} pasada, cierre en ${closeRuns} (tope ${2}); 02–04 h: ${later.map(r => fmt(r.read)).join(" / ")} leídas`);
+  } else out(`✓ cascada: meta en ${metaRuns} pasada, cierre en ${closeRuns} (tope ${DAILY_TRIES}); 02–04 h: ${later.map(r => fmt(r.read)).join(" / ")} leídas`);
 }
 
 // Cortadas antes de las tareas del día no gastan intentos; maint borra su tmp/run/ pasado un día
-if (scens.includes("regimen") && !flag("--sin-cascada")) {
+if (extras) {
   const VIEJO = "roblox-tracker/tmp/run/cron-2026-10-04T05:00/ids.json";
   const { runs, extra } = await scenario("regimen", {
     hours: horas(3), cortes: { "00": "sample-list-#", "01": "sample-list-#" }, work: "cortes",
@@ -417,12 +366,12 @@ if (scens.includes("regimen") && !flag("--sin-cascada")) {
 }
 
 // Sin apuntar el intento no se hace la tarea: hecha sin apuntar no tiene tope
-if (scens.includes("regimen") && !flag("--sin-cascada")) {
+if (extras) {
   const tries = ["try-meta", "try-close", "try-select", "try-maint"];
   const { runs } = await scenario("regimen", { hours: horas(4), fallos: new Set([...tries, "close"]), work: "sin-intento" });
   out("\n══ sin intento: apuntar el intento falla siempre, y el cierre también (regimen) ══");
   const did = r => [
-    r.q.some(x => x.sql.startsWith("UPDATE games SET place_id")) && "meta",
+    didMeta(r) && "meta",
     (r.q.some(x => x.tag === "close") || r.errors.some(e => e.startsWith("close:"))) && "cierre",
     (r.q.some(x => x.tag === "select-plan") || r.errors.some(e => e.startsWith("select-plan:"))) && "select",
     (r.q.some(x => x.tag === "maint") || r.errors.some(e => e.startsWith("maint:"))) && "maint",
@@ -439,14 +388,12 @@ if (scens.includes("regimen") && !flag("--sin-cascada")) {
 }
 
 // 1ª pasada tras desplegar con hist_agg: hist igual que la de daily, con y sin el esquema aplicado
-if (scens.includes("regimen") && !flag("--sin-cascada")) for (const esquema of [true, false]) {
-  const iso0 = new Date((D.dayStart(D.addDays(DAY0, 1))) * 60000).toISOString();
-  const schema = readFileSync(resolve(ROOT, "schema.sql"), "utf8").replace(/--.*$/gm, "");
+if (extras) for (const esquema of [true, false]) {
   const { runs, extra } = await scenario("regimen", {
-    hours: [iso0, new Date((D.dayStart(D.addDays(DAY0, 1)) + 60) * 60000).toISOString()], work: "migracion",
+    hours: horas(2).slice(1), work: "migracion",
     alPrincipio: async db => {
       await db.prepare("DROP TABLE IF EXISTS hist").run();
-      if (esquema) for (const q of schema.split(";").map(x => x.trim()).filter(Boolean)) await db.prepare(q).run();
+      if (esquema) await aplicarEsquema(db);
     },
     alFinal: async (db, bucket) => {
       const exp = JSON.parse(bucket.store.get("roblox-tracker/data/export.json") || "{}");

@@ -4,9 +4,9 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { cpuMs as cpu, rng } from "./comun.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
-const cpu = () => { const u = process.cpuUsage(); return (u.user + u.system) / 1000; };
 const median = a => [...a].sort((x, y) => x - y)[a.length >> 1];
 
 if (process.argv[2] === "--child") {
@@ -45,8 +45,7 @@ const { telegramCandidates } = await import("../src/telegram.js");
 const dir = mkdtempSync(join(tmpdir(), "tg-cpu-"));
 
 function steady(ex) {
-  let seed = 12345;
-  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  const rnd = rng(12345);
   for (const g of ex.games) {
     const d = g.d;
     if (!d.length) continue;

@@ -1,16 +1,16 @@
-// node test/metrics.bench.mjs [export.json] — CPU de buildDashboard (150 y 1.000 juegos), un proceso nuevo por medida.
+// node test/metrics.bench.mjs [export.json] — CPU de buildDashboard (candidatos y 1.000 juegos), un proceso nuevo por medida.
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { telegramCandidates } from '../src/telegram.js';
+import { cpuMs as cpu, rng } from './comun.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const SRC = path.resolve(HERE, '../src');
 
 if (process.argv[2] === '--child') {
   const [file, metricsUrl, now] = process.argv.slice(3);
-  const cpu = () => { const u = process.cpuUsage(); return (u.user + u.system) / 1000; };
   const { buildDashboard } = await import(metricsUrl);
   const text = fs.readFileSync(file, 'utf8');
   let c0 = cpu();
@@ -26,8 +26,6 @@ if (process.argv[2] === '--child') {
   process.stdout.write(JSON.stringify({ games: E.games.length, kb: Math.round(text.length / 1024), parse, cold, coldWall, warm: warm[10], out: Object.keys(J.games).length }));
   process.exit(0);
 }
-
-function rng(seed) { return () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648); }
 
 function steadyExport(n, nowMs) {
   const r = rng(42), games = [];
@@ -55,26 +53,8 @@ function steadyExport(n, nowMs) {
   return { generated_at: new Date(nowMs).toISOString().slice(0, 19) + 'Z', last_sample: new Date((nowMin - 3) * 60000).toISOString().slice(0, 16) + 'Z', samples_24h: 8, games };
 }
 
-// Aproxima el prefiltro de Telegram con el propio export.
-function telegramSubset(E, max = 150) {
-  const med = a => { const b = [...a].sort((x, y) => x - y); return b.length ? b[b.length >> 1] : 0; };
-  const rows = E.games.map(g => {
-    const s = g.s || [], t1 = s.length ? s[s.length - 1][0] : 0;
-    const typ = med(s.filter(x => x[0] > t1 - 1440).map(x => x[1]));
-    const prev = med(s.filter(x => x[0] <= t1 - 1440).map(x => x[1]));
-    const visits = (g.d || []).reduce((v, r) => r[5] || v, null);
-    return { g, typ, growth: prev ? typ / prev : 0, visits };
-  });
-  const top = k => [...rows].sort((a, b) => b[k] - a[k]).slice(0, 60).map(x => x.g);
-  const em = rows.filter(x => (x.visits != null && x.visits < 30e6 && x.typ >= 300) || x.g.sorts?.['up-and-coming'])
-    .sort((a, b) => b.growth - a.growth).map(x => x.g);
-  const out = [...new Set([...top('growth'), ...top('typ'), ...em])].slice(0, max);
-  return { ...E, games: out };
-}
-
 async function main() {
-  const metricsUrl = fs.existsSync(path.join(SRC, 'horror.js')) ? pathToFileURL(path.join(SRC, 'metrics.js')).href : null;
-  if (!metricsUrl) throw new Error('falta src/horror.js');
+  const metricsUrl = pathToFileURL(path.join(HERE, '../src/metrics.js')).href;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bench-'));
   let file = process.argv[2];
   if (!file) {
@@ -86,9 +66,9 @@ async function main() {
   const st = steadyExport(1000, Date.parse(now));
   const sets = [
     ['real 1000', { ...E, games: E.games.slice(0, 1000) }],
-    ['real 150 (Telegram)', telegramSubset(E)],
+    ['real (candidatos de Telegram)', { ...E, games: telegramCandidates(E, { now }).games }],
     ['steady 1000', st],
-    ['steady 150 (Telegram)', telegramSubset(st)],
+    ['steady (candidatos de Telegram)', { ...st, games: telegramCandidates(st, { now }).games }],
     ['steady 2000', steadyExport(2000, Date.parse(now))],
   ];
 
@@ -103,7 +83,7 @@ async function main() {
       runs.push(JSON.parse(r.stdout));
     }
     const med = k => runs.map(x => x[k]).sort((a, b) => a - b)[2];
-    console.log(`${name.padEnd(24)} ${String(runs[0].games).padStart(6)} ${String(runs[0].kb).padStart(5)}   ${med('parse').toFixed(1).padStart(6)} ms   ${med('cold').toFixed(1).padStart(7)} ms / ${med('coldWall').toFixed(1).padStart(5)} ms     ${med('warm').toFixed(2).padStart(6)} ms`);
+    console.log(`${name.padEnd(32)} ${String(runs[0].games).padStart(6)} ${String(runs[0].kb).padStart(5)}   ${med('parse').toFixed(1).padStart(6)} ms   ${med('cold').toFixed(1).padStart(7)} ms / ${med('coldWall').toFixed(1).padStart(5)} ms     ${med('warm').toFixed(2).padStart(6)} ms`);
   }
   console.log('(mediana de 5 procesos nuevos; "1ª llamada" = isolate frío, que es lo que paga el Worker)');
 }

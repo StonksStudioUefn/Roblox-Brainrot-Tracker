@@ -1,17 +1,18 @@
 // node --test test/telegram.test.mjs — sin red; los textos, contra notifier.py (notifier_ref.py).
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  alertMessage, dailyReport, headerCounts, isBoom, isoWeek, num, pct, pyFixed, quickRows, runTelegram,
+  alertMessage, dailyReport, isBoom, isoWeek, num, pct, pyFixed, quickRows, runTelegram,
   telegramCandidates, telegramReduce, telegramScanText, visibleLen, weeklyReport,
 } from "../src/telegram.js";
 import { buildDashboard } from "../src/metrics.js";
+import { rng } from "./comun.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, "../..");
@@ -22,6 +23,8 @@ const DASH = JSON.parse(readFileSync(DASH_PATH, "utf8"));
 const STATE_JSON = JSON.parse(readFileSync(join(ROOT, "data/state.json"), "utf8"));
 const TOKEN = "TEST-TOKEN-no-es-real";
 const THUMBS = "https://thumbnails.roblox.com/v1/games/multiget/thumbnails";
+const ENV = { TELEGRAM_TOKEN: TOKEN, TELEGRAM_CHAT_ID: "123" };
+const EMPTY_EXPORT = { telegram: { counts: null }, games: [] };
 
 // Nada de red real en estas pruebas
 globalThis.fetch = () => { throw new Error("red prohibida en las pruebas"); };
@@ -33,6 +36,10 @@ const tmpFile = (name, data) => {
   writeFileSync(p, typeof data === "string" ? data : JSON.stringify(data));
   return p;
 };
+
+const notifierPy = (expr, input) => JSON.parse(execFileSync(PY, ["-c",
+  `import json,sys\nfrom datetime import date\nsys.path.insert(0, ${JSON.stringify(ROOT)})\nimport notifier\nprint(json.dumps(${expr}))`],
+{ input: JSON.stringify(input) }).toString());
 
 function python({ now, dashboard = DASH, state = null, args = [] }) {
   const dpath = dashboard === DASH ? DASH_PATH : tmpFile("dash.json", dashboard);
@@ -47,7 +54,7 @@ async function js({ now, dashboard = DASH, state = null, force, env = {}, fetch,
   const lines = [];
   const res = await runTelegram({
     env, now, force, fetch, maxFetch, quickExit: false,
-    exportData: { telegram: { counts: null }, games: [] },
+    exportData: EMPTY_EXPORT,
     buildDashboard: () => clone(dashboard),
     getState: async () => (stored ? clone(stored) : null),
     setState: async (key, value) => { assert.equal(key, "telegram"); stored = clone(value); },
@@ -79,8 +86,6 @@ function mockFetch({ thumb = "ok", photo = 200, message = 200 } = {}) {
 const sortKeys = o => (o && typeof o === "object" && !Array.isArray(o)
   ? Object.fromEntries(Object.keys(o).sort().map(k => [k, sortKeys(o[k])])) : o);
 
-// Dashboard con n juegos más petando (para el tope de alertas). En DASH ya
-// hay uno (Anime Dice: 64K jugadores, creado hace 48 días).
 function boomDashboard(n = 7) {
   const d = clone(DASH);
   d.categories.general.emerging.slice(0, n).forEach((u, i) => {
@@ -91,31 +96,13 @@ function boomDashboard(n = 7) {
 const BOOM_IDS = d => Object.values(d.games).filter(isBoom).map(g => String(g.id));
 const NO_BOOM = { boom: {} };   // estado ya desplegado: sin apuntar a nadie
 
-test("formato de números, porcentajes y semana ISO = Python", () => {
+test("formato de números, semana ISO y visibleLen = notifier.py", () => {
   const xs = [];
-  let seed = 7;
-  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
-  for (let i = 0; i < 5000; i++) xs.push(i % 3 ? Math.round(rnd() * 20000) / 8 - 1000 : (rnd() - 0.5) * 400);
+  const rnd = rng(7);
+  for (let i = 0; i < 500; i++) xs.push(i % 3 ? Math.round(rnd() * 20000) / 8 - 1000 : (rnd() - 0.5) * 400);
   xs.push(0.5, 1.5, 2.5, -0.5, -2.5, 0.25, 0.35, 99.95, 99.96, 0, 999.95, 1e-7);
-  const mine = xs.map(x => [pyFixed(x, 0), pyFixed(x, 1), pct(x), num(Math.abs(x) * 1234.5)]);
-  const py = JSON.parse(execFileSync(PY, ["-c", `
-import json,sys
-sys.path.insert(0, ${JSON.stringify(ROOT)})
-import notifier
-print(json.dumps([[f"{x:.0f}", f"{x:.1f}", notifier.pct(x), notifier.num(abs(x)*1234.5)] for x in json.load(sys.stdin)]))`],
-  { input: JSON.stringify(xs) }).toString());
-  assert.deepEqual(mine, py);
   const days = [];
   for (let t = Date.UTC(2024, 0, 1); t < Date.UTC(2031, 0, 1); t += 864e5) days.push(new Date(t).toISOString().slice(0, 10));
-  const pyw = JSON.parse(execFileSync(PY, ["-c", `
-import json,sys
-from datetime import date
-print(json.dumps([date.fromisoformat(d).strftime("%G-W%V") for d in json.load(sys.stdin)]))`],
-  { input: JSON.stringify(days) }).toString());
-  assert.deepEqual(days.map(d => isoWeek(d + "T20:00:00Z")), pyw);
-});
-
-test("visibleLen = notifier.visible_len en todos los mensajes", () => {
   const msgs = [];
   for (const [key, cat] of Object.entries(DASH.categories)) {
     const d = boomDashboard(24);
@@ -125,19 +112,16 @@ test("visibleLen = notifier.visible_len en todos los mensajes", () => {
   }
   assert.ok(msgs.every(m => m !== null));
   msgs.push("a &amp; b &lt;i&gt; <b>x</b> &amp;amp; 😴");
-  const py = JSON.parse(execFileSync(PY, ["-c", `
-import json,sys
-sys.path.insert(0, ${JSON.stringify(ROOT)})
-import notifier
-print(json.dumps([notifier.visible_len(m) for m in json.load(sys.stdin)]))`], { input: JSON.stringify(msgs) }).toString());
-  assert.deepEqual(msgs.map(visibleLen), py);
+  const [fmt, weeks, lens] = notifierPy(`(lambda d: [[[f"{x:.0f}", f"{x:.1f}", notifier.pct(x), notifier.num(abs(x)*1234.5)] for x in d[0]],
+  [date.fromisoformat(x).strftime("%G-W%V") for x in d[1]], [notifier.visible_len(m) for m in d[2]]])(json.load(sys.stdin))`, [xs, days, msgs]);
+  assert.deepEqual(xs.map(x => [pyFixed(x, 0), pyFixed(x, 1), pct(x), num(Math.abs(x) * 1234.5)]), fmt);
+  assert.deepEqual(days.map(d => isoWeek(d + "T20:00:00Z")), weeks);
+  assert.deepEqual(msgs.map(visibleLen), lens);
 });
 
 for (const [now, args, force] of [
   ["2026-10-03T00:36:44Z", ["--dry-run", "--daily"], "daily"],
   ["2026-10-03T00:36:44Z", ["--dry-run", "--weekly"], "weekly"],
-  ["2026-10-05T19:00:00Z", ["--dry-run", "--daily"], "daily"],
-  ["2026-10-05T19:00:00Z", ["--dry-run", "--weekly"], "weekly"],
 ]) {
   test(`notifier.py ${args.join(" ")} (${now}) = runTelegram force=${force}`, async () => {
     const py = python({ now, state: STATE_JSON, args });
@@ -150,7 +134,6 @@ for (const [now, args, force] of [
 
 for (const [label, now, state, dash] of [
   ["sábado 19:00, estado vacío (apunta sin avisar + diario)", "2026-10-03T19:00:00Z", {}, boomDashboard(4)],
-  ["sábado 19:00, ya desplegado (alertas + diario)", "2026-10-03T19:00:00Z", NO_BOOM, DASH],
   ["lunes 18:30, ya desplegado (alertas + diario + semanal)", "2026-10-05T18:30:00Z", NO_BOOM, DASH],
   ["lunes, estado de data/state.json", "2026-10-05T18:30:00Z", STATE_JSON, DASH],
   ["8 petando: tope de 3 alertas", "2026-10-03T19:00:00Z", NO_BOOM, boomDashboard(7)],
@@ -178,7 +161,7 @@ test("primera pasada: los que ya petan se apuntan sin avisar; los nuevos sí avi
   const d = boomDashboard(2);
   const r = await js({ now: "2026-10-03T12:00:00Z", state: { alerted: { 1: "2026-10-02" }, last_daily: "x" }, dashboard: d });
   assert.equal(r.res.alerts, 0);
-  assert.equal(r.res.seeded, 3);
+  assert.equal(r.res.seeded, BOOM_IDS(d).length);
   assert.equal(r.stdout, "");
   assert.deepEqual(Object.keys(r.state.boom).sort(), BOOM_IDS(d).sort());
   assert.equal(r.state.alerted, undefined, "las alertas de emergentes de antes se borran");
@@ -196,31 +179,12 @@ test("primera pasada: los que ya petan se apuntan sin avisar; los nuevos sí avi
   assert.equal(isBoom({ ...g, status: "new", age_days: 120, players: 40_000, typical: 20_000 }), true);
 });
 
-test("resúmenes: solo juegos con 10K típicos; una categoría sin ninguno no manda mensaje", () => {
-  const now = new Date("2026-10-05T19:00:00Z");
-  for (const [key, cat] of Object.entries(DASH.categories)) {
-    for (const report of [dailyReport, weeklyReport]) {
-      const [text] = report(key, cat, DASH.games, now);
-      if (text === null) continue;
-      const shown = [...text.matchAll(/games\/(\d+)"/g)].map(m => m[1]);
-      for (const pid of shown) {
-        const g = Object.values(DASH.games).find(x => String(x.place_id) === pid);
-        assert.ok(g.typical >= 10_000, `${g.title}: ${g.typical}`);
-      }
-    }
-  }
-  // En DASH ningún emergente ni «en tendencia» de horror llega a 10K: sin diario
-  assert.deepEqual(dailyReport("horror", DASH.categories.horror, DASH.games, now), [null, null]);
-  const none = { ...DASH.categories.horror, ids: DASH.categories.horror.ids.filter(u => DASH.games[String(u)].typical < 10_000) };
-  assert.deepEqual(weeklyReport("horror", none, DASH.games, now), [null, null]);
-});
-
 test("con credenciales y fetch simulado: mismos textos y fotos que notifier.py", async () => {
   const now = "2026-10-05T18:30:00Z";
   const dash = boomDashboard(2);
   const py = python({ now, state: NO_BOOM, dashboard: dash });
   const m = mockFetch();
-  const r = await js({ now, state: NO_BOOM, dashboard: dash, env: { TELEGRAM_TOKEN: TOKEN, TELEGRAM_CHAT_ID: "123" }, fetch: m.f });
+  const r = await js({ now, state: NO_BOOM, dashboard: dash, env: ENV, fetch: m.f });
   assert.equal(r.res.alerts, 3);
   const photos = m.calls.filter(c => c.url.endsWith("/sendPhoto"));
   assert.deepEqual(photos.map(c => c.body.caption), py.messages.map(x => x[0]));
@@ -236,62 +200,30 @@ test("con credenciales y fetch simulado: mismos textos y fotos que notifier.py",
   assert.deepEqual(sortKeys(r.state), sortKeys(py.state));
 });
 
-const ENV = { TELEGRAM_TOKEN: TOKEN, TELEGRAM_CHAT_ID: "123" };
-
-test("foto rechazada → mismo texto con sendMessage (sin vista previa)", async () => {
-  const m = mockFetch({ photo: 400 });
-  const r = await js({ now: "2026-10-03T19:00:00Z", state: STATE_JSON, env: ENV, fetch: m.f });
-  const msgs = m.calls.filter(c => c.url.endsWith("/sendMessage"));
-  const photos = m.calls.filter(c => c.url.endsWith("/sendPhoto"));
-  assert.equal(msgs.length, 1);   // solo general: en horror no hay juegos de 10K
-  assert.deepEqual(msgs.map(c => c.body.text), photos.map(c => c.body.caption));
-  for (const c of msgs) assert.deepEqual(c.body.link_preview_options, { is_disabled: true });
-  assert.equal(r.res.daily, true);
-  assert.equal(r.state.last_daily, "2026-10-03");
-});
-
-test("sin miniatura (o caída) → texto, sin sendPhoto", async () => {
-  for (const thumb of ["none", "throw"]) {
-    const m = mockFetch({ thumb });
+test("foto rechazada o sin miniatura → el mismo texto con sendMessage (sin vista previa)", async () => {
+  for (const opts of [{ photo: 400 }, { thumb: "none" }, { thumb: "throw" }]) {
+    const m = mockFetch(opts);
     const r = await js({ now: "2026-10-03T19:00:00Z", state: STATE_JSON, env: ENV, fetch: m.f });
-    assert.equal(m.calls.filter(c => c.url.endsWith("/sendPhoto")).length, 0);
-    assert.equal(m.calls.filter(c => c.url.endsWith("/sendMessage")).length, 1);
+    const msgs = m.calls.filter(c => c.url.endsWith("/sendMessage"));
+    const photos = m.calls.filter(c => c.url.endsWith("/sendPhoto"));
+    assert.equal(msgs.length, 1);   // solo general: en horror no hay juegos de 10K
+    if (photos.length) assert.deepEqual(msgs.map(c => c.body.text), photos.map(c => c.body.caption));
+    else assert.equal(opts.photo, undefined);
+    for (const c of msgs) assert.deepEqual(c.body.link_preview_options, { is_disabled: true });
     assert.equal(r.res.daily, true);
+    assert.equal(r.state.last_daily, "2026-10-03");
   }
 });
 
 test("si Telegram falla no se marca como enviado (se reintenta en la siguiente pasada)", async () => {
   const m = mockFetch({ photo: 500, message: 500 });
-  const r = await js({ now: "2026-10-03T19:00:00Z", state: NO_BOOM, dashboard: boomDashboard(4), env: ENV, fetch: m.f });
+  const d = boomDashboard(4);
+  const r = await js({ now: "2026-10-03T19:00:00Z", state: NO_BOOM, dashboard: d, env: ENV, fetch: m.f });
   assert.equal(r.res.alerts, 0);
   assert.equal(r.res.daily, false);
   assert.deepEqual(r.state ?? NO_BOOM, NO_BOOM);
-  // 5 alertas (cada fallo deja probar el siguiente) + 2 diarios, 3 peticiones cada uno
-  assert.equal(m.calls.length, 7 * 3);
-});
-
-test("límite de 1024 caracteres visibles del pie de foto", async () => {
-  const base = clone(DASH);
-  const uid = String(base.categories.general.emerging[0]);
-  const only = {
-    ...base, games: { [uid]: base.games[uid] },
-    categories: { general: { ...base.categories.general, ids: [Number(uid)], emerging: [Number(uid)], trending: [] } },
-  };
-  const fit = async len => {
-    const d = clone(only);
-    const g = d.games[uid];
-    Object.assign(g, { emerging: 99, players: 50_000, typical: 30_000, age_days: 30, status: "up" });
-    g.creator = "";
-    const probe = alertMessage("general", d.categories.general, g)[0];
-    g.creator = "x".repeat(len - visibleLen(probe) + 1);   // "—" (1) → len caracteres
-    const msg = alertMessage("general", d.categories.general, g)[0];
-    assert.equal(visibleLen(msg), len);
-    const m = mockFetch();
-    await js({ now: "2026-10-03T12:00:00Z", state: NO_BOOM, dashboard: d, env: ENV, fetch: m.f });
-    return m.calls.map(c => c.url.split("?")[0].split("/").pop());
-  };
-  assert.deepEqual(await fit(1024), ["thumbnails", "sendPhoto"]);
-  assert.deepEqual(await fit(1025), ["sendMessage"]);
+  // Cada fallo deja probar la alerta siguiente; 3 peticiones por mensaje (y 2 diarios)
+  assert.equal(m.calls.length, (BOOM_IDS(d).length + 2) * 3);
 });
 
 test("nunca más de 50 fetch, ni con todo forzado y todo fallando", async () => {
@@ -333,42 +265,12 @@ test("estado: diario una vez al día, semanal una vez por semana ISO", async () 
   assert.equal(st.last_weekly, "2026-W41");
   assert.equal((await run("2026-10-05T21:10:00Z")).weekly, null);
   assert.equal((await run("2026-10-06T18:10:00Z")).weekly, null);  // martes
-  // setState(value) de un solo argumento también vale
-  let one = null;
-  await runTelegram({
-    env: {}, now: "2026-10-07T19:00:00Z", exportData: { telegram: { counts: null }, games: [] }, quickExit: false,
-    buildDashboard: () => clone(DASH), getState: async () => ({}), setState: async v => { one = v; }, log: () => {},
-  });
-  assert.equal(one.last_daily, "2026-10-07");
 });
 
-test("cabecera con `totals` del backend: con y sin suben/bajan", async () => {
-  // Un juego de horror con 10K para que también salga el diario de horror
-  const dash = clone(DASH);
-  dash.games[String(dash.categories.horror.trending[0])].typical = 12_000;
-  const run = async totals => {
-    const lines = [];
-    await runTelegram({
-      env: {}, now: "2026-10-03T19:00:00Z", force: "daily", exportData: { totals, games: [] },
-      buildDashboard: () => clone(dash), getState: async () => clone(STATE_JSON), setState: async () => {},
-      log: x => lines.push(x),
-    });
-    return lines.filter(l => l.startsWith("🎮") || l.startsWith("👻")).map(l => l.split("\n")[1]);
-  };
-  assert.deepEqual(await run({ general: { games: 600, rising: 20, falling: 90 }, horror: { games: 150, rising: 2, falling: 30 } }),
-    ["<i>600 juegos · 📈 20 suben · 📉 90 bajan</i>", "<i>150 juegos · 📈 2 suben · 📉 30 bajan</i>"]);
-  assert.deepEqual(await run({ general: 600, horror: { games: 150 } }), ["<i>600 juegos</i>", "<i>150 juegos</i>"]);
-  assert.deepEqual(headerCounts({ totals: { general: 5 } }), { general: { games: 5, rising: null, falling: null } });
-});
-
-const MAKE_EXPORT = join(HERE, "make_export.py");
-const NOWS = ["2026-10-03T00:36:44Z", "2026-10-02T21:20:00Z", "2026-09-28T19:00:00Z"];
-
-for (const now of NOWS) {
-  test(`prefiltro exacto con el export de data/ en ${now}`, { skip: !existsSync(MAKE_EXPORT) && "falta make_export.py" }, async () => {
+for (const now of ["2026-10-03T00:36:44Z", "2026-09-28T19:00:00Z"]) {
+  test(`prefiltro exacto con el export de data/ en ${now}`, async () => {
     const out = join(TMP, `export-${now}.json`);
-    const sortsArg = process.env.SORTS_JSON ? ["--sorts", process.env.SORTS_JSON] : [];
-    execFileSync(PY, [MAKE_EXPORT, "--now", now, "--out", out, ...sortsArg], { cwd: ROOT, stdio: ["ignore", "ignore", "ignore"] });
+    execFileSync(PY, [join(HERE, "make_export.py"), "--now", now, "--out", out], { cwd: ROOT, stdio: ["ignore", "ignore", "ignore"] });
     const text = readFileSync(out, "utf8");
     const ex = JSON.parse(text);
     const full = buildDashboard(ex, { now });

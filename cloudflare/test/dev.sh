@@ -1,15 +1,10 @@
 #!/usr/bin/env bash
 # Uso: test/dev.sh [--port 8787]   (estado local en test/.state)
 set -euo pipefail
-shopt -s nullglob
 cd "$(dirname "$0")/.."
 rm -rf test/.build && mkdir -p test/.build/src
 cp -r src/. test/.build/src/
 cp schema.sql test/.build/
-for f in test/stubs/*.js; do
-  b=$(basename "$f")
-  [ -e "src/$b" ] || { echo "stub: $b"; cp "$f" "test/.build/src/$b"; }
-done
 # Sin la ruta del dominio (en local no hace falta)
 awk '/^routes = \[/{skip=1} skip&&/^\]/{skip=0;next} !skip' wrangler.toml > test/.build/wrangler.toml
 cd test/.build
