@@ -1,21 +1,5 @@
-/**
- * cierre.parity.mjs — Las consultas del cierre del día reescritas el 05/10/2026
- * para leer menos filas dan EXACTAMENTE lo mismo que las de antes, sobre un D1
- * local (miniflare) con datos aleatorios:
- *   - radarDailyRows (JS, también por partes desde el texto de los ficheros con
- *     radarReadingsPart) + radarCloseStmt  ==  radarCloseStmt de antes (SQL con ROW_NUMBER)
- *   - closeDayStmt (sortedMedian; muestras de los seguidos o de todos)  ==  closeDayStmt de antes
- *   - mergeHistStmt (tabla hist) y migrateHist  ==  mergeHistStmt de antes (state.hist_agg)
- *   - rebuildHistStmts  ==  rebuildHistStmt de antes
- * Mediana y media con los .5 al par (round() de Python), muestras repetidas,
- * nulos, juegos solo en el meta y filas que ya existían. Y además: ids que son
- * prefijo de otros, ficheros vacíos o solo con null, migrateHist repetido,
- * countTryStmt y las cachés que se borran solo si cambia algo (changes()).
- *
- *   node --import ./test/cf_loader.mjs test/cierre.parity.mjs [--seed=N] [--rondas=N]
- *
- * Sale con código 1 si algo no cuadra.
- */
+//   node --import ./test/cf_loader.mjs test/cierre.parity.mjs [--seed=N] [--rondas=N]
+// El cierre reescrito el 05/10/2026 para leer menos filas da EXACTAMENTE lo mismo que el de antes.
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -178,7 +162,6 @@ function old_rebuildHistStmt(db) {
   );
 }
 
-// ─── D1 local ───────────────────────────────────────────────────────────────
 const dir = mkdtempSync(join(tmpdir(), "cierre-parity-"));
 const proxy = await getPlatformProxy({ configPath: resolve(HERE, "filas.wrangler.toml"), persist: { path: dir } });
 const db = proxy.env.DB;
@@ -220,7 +203,6 @@ for (let round = 0; round < ROUNDS; round++) {
   // Valores en un rango estrecho: muchos empates y muchas medias y medianas en .5
   const p = () => (R() < 0.5 ? int(300, 312) : int(300, 4_000_000));
 
-  // ── closeDayStmt ──────────────────────────────────────────────────────────
   for (const onlySel of [true, false]) {
     await db.batch(["DELETE FROM samples", "DELETE FROM daily"].map(q => db.prepare(q)));
     const samples = [];
@@ -249,13 +231,11 @@ for (let round = 0; round < ROUNDS; round++) {
     }
   }
 
-  // ── radarCloseStmt ────────────────────────────────────────────────────────
   {
     // Algunos no están en games, y ids que son prefijo o sufijo de otros (12 → 123 → 1234…)
     const nested = [12, 123, 1234, 12345, 23, 2345, 345];
     await insert("games", ["universe_id", "tracked", "sel"], nested.filter(id => !ids.includes(id)).map(id => [id, 1, 0]));
     const pool = [...ids, ...nested, ...Array.from({ length: 20 }, () => int(9_100_000, 9_200_000)), 12_345_678_901];
-    // Los ficheros del día (radar/<día>/<ts>.json) y las lecturas por juego, como las juntaba el cierre de antes
     const files = Array.from({ length: 8 }, () => Object.fromEntries(pool.filter(() => R() < 0.6).map(id => [id, R() < 0.05 ? null : p()])));
     const readings = {}, meta = {};
     for (const f of files) for (const id in f) (readings[id] ||= []).push(f[id]);
@@ -274,9 +254,8 @@ for (let round = 0; round < ROUNDS; round++) {
       await db.prepare("DELETE FROM daily").run(); await insert("daily", cols, pre);
       await radarCloseStmt(db, DATE, radarDailyRows(r, m)).run();
       same(`radarCloseStmt ronda ${round} (lecturas=${!!r}, meta=${!!m})`, want, await dailyRows());
-      // Por partes desde el texto de los ficheros, como el paso close-radar-<día>-<k>
       for (const parts of [1, 4, 5, RADAR_CLOSE_PARTS]) {
-        for (const prepared of [false, true]) {   // el texto tal cual o ya pasado por radarPrepare (como en sampler.js)
+        for (const prepared of [false, true]) {
           await db.prepare("DELETE FROM daily").run(); await insert("daily", cols, pre);
           const files = prepared ? radarPrepare(texts) : texts;
           for (let k = 0; k < parts; k++) {
@@ -289,7 +268,6 @@ for (let round = 0; round < ROUNDS; round++) {
     }
   }
 
-  // ── hist: mergeHistStmt, migrateHist y rebuildHistStmts ───────────────────
   {
     await db.batch(["DELETE FROM daily", "DELETE FROM hist", "DELETE FROM state"].map(q => db.prepare(q)));
     const days = Array.from({ length: 25 }, (_, i) => addDays("2026-09-01", i));
@@ -310,7 +288,6 @@ for (let round = 0; round < ROUNDS; round++) {
 
     await run(d => old_mergeHistStmt(db, d).run(), order);
     const want = await aggJson();
-    // Con la tabla desde el principio
     await db.prepare("DELETE FROM daily").run(); await insert("daily", cols, snapshot);
     await run(d => mergeHistStmt(db, d).run(), order);
     same(`mergeHistStmt ronda ${round}`, want, await histJson());
@@ -328,7 +305,6 @@ for (let round = 0; round < ROUNDS; round++) {
     }
     same(`migrateHist a mitad ronda ${round}`, want, await histJson());
     same(`migrateHist borra hist_agg ronda ${round}`, {}, await aggJson());
-    // rebuild
     await old_rebuildHistStmt(db).run();
     const wantRebuild = await aggJson();
     await db.batch(rebuildHistStmts(db));

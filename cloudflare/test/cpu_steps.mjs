@@ -1,12 +1,5 @@
-// Mide en Node la CPU de la parte de cómputo de cada paso del Workflow, con
-// respuestas reales guardadas. Cada medida corre en un proceso nuevo (sin JIT
-// caliente, como un isolate recién arrancado) con --single-threaded, N veces.
 //   node test/cpu_steps.mjs <dir_fixtures> [N]
-// Fixtures (ver README): games_pages.json, votes_pages.json (20 páginas de 50),
-// explore_pages.json, search_pages.json, rolimons.json, part-<i>.json (partes
-// del export en R2), telegram.json, ids.json.
-// La red, D1 y R2 no cuentan como CPU en Workers; aquí se simula lo que sí
-// cuenta: decodificar y parsear las respuestas, el cálculo y serializar.
+// Procesos Node nuevos (JIT frío, como un isolate recién arrancado); D1 y R2 no cuentan como CPU.
 import { readFileSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -30,7 +23,6 @@ if (process.env.CPU_STEP) {
   const wire = obj => enc.encode(JSON.stringify({ results: [obj], success: true, meta: { rows_read: 1 } }));
   const parts = readdirSync(dir).filter(f => /^part-\d+\.json$/.test(f)).sort();
   const biggest = parts.map(f => read(f)).sort((a, b) => b.length - a.length)[0];
-  // Parte "en régimen": cada juego con 24 filas diarias y 16 muestras
   const steady = () => {
     const games = JSON.parse(`[${biggest}]`);
     for (const g of games) {
