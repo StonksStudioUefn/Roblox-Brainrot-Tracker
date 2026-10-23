@@ -175,7 +175,7 @@ def main():
     ap.add_argument("--url", help="URL del Worker (p. ej. https://roblox-tracker.<cuenta>.workers.dev)")
     ap.add_argument("--token", default=os.environ.get("ADMIN_TOKEN"))
     g = ap.add_mutually_exclusive_group()
-    g.add_argument("--ref", default=None, help="rama/commit de git (por defecto origin/main)")
+    g.add_argument("--ref", default="origin/main", help="rama/commit de git (por defecto origin/main)")
     g.add_argument("--dir", help="carpeta que contiene data/ (en vez de git)")
     ap.add_argument("--now", help="instante 'ahora' en ISO (por defecto, ahora)")
     ap.add_argument("--batch", type=int, default=1000, help="filas por petición")
@@ -185,7 +185,7 @@ def main():
 
     now = (datetime.fromisoformat(args.now.replace("Z", "+00:00")) if args.now
            else datetime.now(timezone.utc))
-    src = Source(root=args.dir) if args.dir else Source(ref=args.ref or "origin/main")
+    src = Source(root=args.dir) if args.dir else Source(ref=args.ref)
     tables, info = build(src, now)
     print(f"▶ Migración ({'git ' + src.ref if src.ref else src.root}) · ahora {now:%Y-%m-%dT%H:%MZ}")
     for t, (_, rows) in tables.items():

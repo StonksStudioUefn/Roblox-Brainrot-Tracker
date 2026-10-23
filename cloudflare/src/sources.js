@@ -13,43 +13,31 @@ export const URLS = {
 };
 
 export const GAMES_BATCH = 50;   // la Games API rechaza más de 50 ids ("Too many universe IDs")
-export const VOTES_BATCH = 50;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // Sin tope, una petición colgada bloqueaba su paso hasta el timeout del Workflow (10 min).
 export const FETCH_TIMEOUT_MS = 20_000;
 
-export class Budget {
-  constructor(max = 45) { this.max = max; this.used = 0; }
-  take() {
-    if (this.used >= this.max) throw new BudgetError(`Presupuesto de peticiones agotado (${this.max})`);
-    this.used++;
-  }
-  get left() { return this.max - this.used; }
-}
-export class BudgetError extends Error {}
-
 // El tope de 50 subrequests es por invocación y varios pasos la comparten (visto en producción).
-export class SubBudget extends Budget {
-  constructor(parent, max) { super(max); this.parent = parent; }
+export class Budget {
+  constructor(max, parent = null) { this.max = max; this.parent = parent; this.used = 0; }
   take() {
-    if (this.used >= this.max) throw new BudgetError(`Presupuesto del paso agotado (${this.max})`);
-    this.parent.take();
+    if (this.used >= this.max) throw new Error(`Presupuesto de peticiones agotado (${this.max})`);
+    this.parent?.take();
     this.used++;
   }
-  get left() { return Math.min(this.max - this.used, this.parent.left); }
+  get left() { return Math.min(this.max - this.used, this.parent?.left ?? Infinity); }
 }
 
 // empty(): la Search API da 200 vacío cuando se le pide mucho; cuenta como un fallo más.
-export async function getJson(url, { budget, retries = 3, base = 800, text = false, empty, cf, timeout = FETCH_TIMEOUT_MS } = {}) {
+export async function getJson(url, { budget, retries = 3, base = 800, text = false, empty, timeout = FETCH_TIMEOUT_MS }) {
   let last = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
-    if (budget && budget.left <= 0) break;
-    budget?.take();
+    if (budget.left <= 0) break;
+    budget.take();
     try {
       const init = { headers: { "user-agent": UA, accept: "application/json" }, signal: AbortSignal.timeout(timeout) };
-      if (cf) init.cf = cf;
       const r = await fetch(url, init);
       if (r.ok) {
         const data = text ? await r.text() : await r.json();
@@ -64,7 +52,6 @@ export async function getJson(url, { budget, retries = 3, base = 800, text = fal
         if (ra > 0 && ra < 30) { await sleep(ra * 1000); continue; }
       }
     } catch (e) {
-      if (e instanceof BudgetError) throw e;
       last = String(e?.message || e);
     }
     if (attempt < retries) await sleep(base * 2 ** attempt + Math.random() * 300);
@@ -80,7 +67,7 @@ export async function pool(items, limit, fn) {
   const worker = async () => {
     while (i < items.length) {
       const k = i++;
-      out[k] = await fn(items[k], k);
+      out[k] = await fn(items[k]);
     }
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
@@ -94,7 +81,7 @@ export function chunks(arr, n) {
 }
 
 // Sin JSON.parse: ~3 ms frente a 12–17 ms en frío con el fichero real (test/bench_rolimons.mjs).
-export function filterRolimons(text, minPlayers = 300) {
+export function filterRolimons(text, minPlayers) {
   const rx = playersRegex(minPlayers);
   const out = [];
   let m;
@@ -120,7 +107,7 @@ export function filterRolimons(text, minPlayers = 300) {
 }
 
 function playersRegex(min) {
-  const digits = String(Math.max(1, Math.floor(min))).length;
+  const digits = String(min).length;
   const lead = String(min)[0];
   const same = `[${lead}-9]\\d{${digits - 1}}`;
   const more = `[1-9]\\d{${digits},}`;
@@ -150,10 +137,10 @@ export async function fetchSortsPage(budget, sessionId, token = null) {
   return { sorts, pending, next: d.nextSortsPageToken || null };
 }
 
-export async function fetchSortContent(budget, sessionId, sortId, token, maxPages = 6) {
+export async function fetchSortContent(budget, sessionId, sortId, token, maxPages) {
   const out = [];
   let pt = token, n = 0;
-  while (pt && n < maxPages && budget.left > 0) {
+  while (pt && n < maxPages) {
     const url = `${URLS.sortContent}?${exploreParams(sessionId)}&sortId=${encodeURIComponent(sortId)}&pageToken=${encodeURIComponent(pt)}`;
     const d = await getJson(url, { budget });
     if (!d) break;
@@ -168,12 +155,14 @@ function gameTuple(g) {
   return [g.universeId, g.rootPlaceId || null, g.name || null, g.playerCount ?? null];
 }
 
-export async function fetchSearch(budget, query, { pages = 3, gapMs = 1200 } = {}) {
+const SEARCH_GAP_MS = 1200;
+
+export async function fetchSearch(budget, query, { pages }) {
   const sid = crypto.randomUUID();
   const out = [];
   let token = null;
   for (let p = 0; p < pages; p++) {
-    if (p) await sleep(gapMs);
+    if (p) await sleep(SEARCH_GAP_MS);
     const url = `${URLS.search}?searchQuery=${encodeURIComponent(query)}&sessionId=${sid}&pageType=all` +
       (token ? `&pageToken=${encodeURIComponent(token)}` : "");
     const d = await getJson(url, {
@@ -191,17 +180,12 @@ export async function fetchSearch(budget, query, { pages = 3, gapMs = 1200 } = {
   return out;
 }
 
-export async function fetchGames(budget, ids, { concurrency = 4 } = {}) {
-  const res = await pool(chunks(ids, GAMES_BATCH), concurrency, c =>
-    getJson(`${URLS.games}?universeIds=${c.join(",")}`, { budget, retries: 2 }));
+async function fetchByIds(budget, base, ids) {
+  const res = await pool(chunks(ids, GAMES_BATCH), 4, c => getJson(`${base}?universeIds=${c.join(",")}`, { budget, retries: 2 }));
   return collect(res);
 }
-
-export async function fetchVotes(budget, ids, { concurrency = 4 } = {}) {
-  const res = await pool(chunks(ids, VOTES_BATCH), concurrency, c =>
-    getJson(`${URLS.votes}?universeIds=${c.join(",")}`, { budget, retries: 2 }));
-  return collect(res);
-}
+export const fetchGames = (budget, ids) => fetchByIds(budget, URLS.games, ids);
+export const fetchVotes = (budget, ids) => fetchByIds(budget, URLS.votes, ids);
 
 function collect(pages) {
   const data = [];
@@ -213,8 +197,8 @@ function collect(pages) {
   return { data, failed };
 }
 
-export async function resolvePlaces(budget, placeIds, { concurrency = 5 } = {}) {
-  return pool(placeIds, concurrency, async pid => {
+export async function resolvePlaces(budget, placeIds) {
+  return pool(placeIds, 5, async pid => {
     const d = await getJson(`${URLS.placeUniverse}${pid}/universe`, { budget, retries: 1 });
     return [pid, d?.universeId || null];
   });

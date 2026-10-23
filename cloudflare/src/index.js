@@ -2,7 +2,7 @@ import configSrc from "./config.js" with { type: "text" };
 import metricsSrc from "./metrics.js" with { type: "text" };
 import horrorSrc from "./horror.js" with { type: "text" };
 
-import { dropExportCacheStmt, getState, getStates, history, importStmt, isoDate, minuteOf, radarCounts, rebuildHistStmts, written } from "./db.js";
+import { dropExportCacheStmt, getState, getStates, history, importStmt, minuteOf, openDayOf, radarCounts, rebuildHistStmts, written } from "./db.js";
 import { chunks, iconsUrl, thumbsUrl, URLS, UA } from "./sources.js";
 import { espacioD1, withApp } from "./stonks.js";
 import { backfillFromRadar } from "./sampler.js";
@@ -19,6 +19,11 @@ const TYPES = {
   js: "text/javascript; charset=utf-8",
   svg: "image/svg+xml",
   text: "text/plain; charset=utf-8",
+};
+const PAGE = ["site/dashboard.html", TYPES.html, "no-cache"];
+const SITE = {
+  "/": PAGE, "/index.html": PAGE, "/dashboard.html": PAGE,
+  "/favicon.svg": ["site/favicon.svg", TYPES.svg, "public, max-age=3600"],
 };
 const MODULES = { "/config.js": configSrc, "/metrics.js": metricsSrc, "/horror.js": horrorSrc };
 
@@ -89,20 +94,11 @@ async function getJson(url, cacheTtl) {
 }
 
 async function site(env, path) {
-  let key;
-  if (path === "/" || path === "/index.html" || path === "/dashboard.html") key = "site/dashboard.html";
-  else if (path === "/favicon.svg") key = "site/favicon.svg";
-  else return text("No encontrado", 404);
+  if (!SITE[path]) return text("No encontrado", 404);
+  const [key, type, cache] = SITE[path];
   const obj = await env.BUCKET.get(key);
   if (!obj) return text("No encontrado", 404);
-  const ext = key.split(".").pop();
-  return new Response(obj.body, {
-    headers: {
-      "content-type": TYPES[ext] || "application/octet-stream",
-      "cache-control": ext === "html" ? "no-cache" : "public, max-age=3600",
-      etag: obj.httpEtag,
-    },
-  });
+  return new Response(obj.body, { headers: { "content-type": type, "cache-control": cache, etag: obj.httpEtag } });
 }
 
 async function exportFile(req, env) {
@@ -110,16 +106,14 @@ async function exportFile(req, env) {
   const obj = await env.BUCKET.get("data/export.json", inm ? { onlyIf: { etagDoesNotMatch: inm.replace(/^W\//, "").replace(/"/g, "") } } : undefined);
   if (!obj) return json({ error: "Todavía no hay export" }, 404);
   const headers = { "content-type": TYPES.json, "cache-control": "public, max-age=60", etag: obj.httpEtag };
-  if (!("body" in obj) || !obj.body) return new Response(null, { status: 304, headers });
+  if (!obj.body) return new Response(null, { status: 304, headers });
   return new Response(obj.body, { headers });
 }
 
 async function historyRoute(env, id) {
   if (!/^\d{1,20}$/.test(id || "")) return json({ error: "id no válido" }, 400);
-  const closed = await getState(env.DB, "closed_day");
   const nowMs = Date.now();
-  const today = isoDate(minuteOf(nowMs));
-  const openDay = closed ? new Date(Date.parse(`${closed}T00:00:00Z`) + 86400000).toISOString().slice(0, 10) : today;
+  const openDay = openDayOf(await getState(env.DB, "closed_day"), nowMs);
   const out = await history(env.DB, Number(id), { nowMs, openDay });
   if (!out) return json({ error: "No encontrado" }, 404);
   return json(out, 200, 300);
@@ -231,13 +225,10 @@ async function admin(req, env, url) {
     // El export se hace por pasos (CPU): se lanza un Workflow que solo exporta
     if (action === "rebuild") {
       const res = await env.DB.batch([...rebuildHistStmts(env.DB), dropExportCacheStmt(env.DB)]);
-      const inst = await env.SAMPLER.create({ id: `export-${stamp()}`, params: { only: ["export"] } });
+      const inst = await launchExport(env);
       return json({ hist_written: written(res.slice(0, 2)), export_instance: inst.id });
     }
-    if (action === "export") {
-      const inst = await env.SAMPLER.create({ id: `export-${stamp()}`, params: { only: ["export"] } });
-      return json({ export_instance: inst.id });
-    }
+    if (action === "export") return json({ export_instance: (await launchExport(env)).id });
     // select solo rellena los que entran; esto, los huecos de los ya seguidos.
     if (action === "backfill") {
       const body = await readBody(req);
@@ -260,8 +251,7 @@ async function adminStatus(env, url) {
     try { out.instance = { id, ...(await (await env.SAMPLER.get(id)).status()) }; }
     catch (e) { out.instance = { id, error: String(e?.message || e) }; }
   }
-  const counts = url.searchParams.get("counts");
-  if (counts && counts !== "exacto") {
+  if (url.searchParams.get("counts")) {
     // Del desglose de espacio(): contar de verdad recorre todas las tablas (~60.000 filas).
     const [esp, radar] = await Promise.all([espacioD1(env.DB), radarCounts(env.DB)]);
     const n = name => esp.base.tablas.find(t => t.nombre === name)?.filas ?? null;
@@ -269,23 +259,13 @@ async function adminStatus(env, url) {
       games: { n: n("games"), tracked: radar.radar }, places: n("places"), samples: n("samples"),
       daily: { n: n("daily"), last: out.state.closed_day ?? null }, sort_hits: n("sort_hits"), estimado: true,
     };
-  } else if (counts) {
-    const r = await env.DB.batch([
-      env.DB.prepare("SELECT COUNT(*) AS n, SUM(tracked = 1) AS tracked FROM games"),
-      env.DB.prepare("SELECT COUNT(*) AS n FROM places"),
-      env.DB.prepare("SELECT COUNT(*) AS n FROM samples"),
-      env.DB.prepare("SELECT COUNT(*) AS n, MAX(date) AS last FROM daily"),
-      env.DB.prepare("SELECT COUNT(*) AS n FROM sort_hits"),
-    ]);
-    out.counts = {
-      games: r[0].results[0], places: r[1].results[0].n, samples: r[2].results[0].n,
-      daily: r[3].results[0], sort_hits: r[4].results[0].n,
-    };
   }
   const head = await env.BUCKET.head("data/export.json");
   if (head) out.export = { size: head.size, uploaded: head.uploaded, meta: head.customMetadata };
   return json(out);
 }
+
+const launchExport = env => env.SAMPLER.create({ id: `export-${stamp()}`, params: { only: ["export"] } });
 
 function stamp() {
   return new Date().toISOString().slice(0, 19).replace(/[:]/g, "") + Math.random().toString(36).slice(2, 6);

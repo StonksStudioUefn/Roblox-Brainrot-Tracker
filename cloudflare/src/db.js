@@ -14,6 +14,7 @@ export const isoMinute = ts => new Date(ts * 60000).toISOString().slice(0, 16) +
 export const isoDate = ts => new Date(ts * 60000).toISOString().slice(0, 10);
 export const dayStart = date => Date.parse(`${date}T00:00:00Z`) / 60000;
 export const addDays = (date, n) => isoDate(dayStart(date) + n * DAY_MIN);
+export const openDayOf = (closed, nowMs) => (closed ? addDays(closed, 1) : isoDate(minuteOf(nowMs)));
 
 // round() de Python lleva los .5 al par y ROUND de SQLite arriba: fallaba el 30 % de las medianas
 const MID = "SUM(CASE WHEN rn IN ((cnt + 1) / 2, (cnt + 2) / 2) THEN p END)";
@@ -23,19 +24,19 @@ export const MEAN_SQL = `(CASE
   WHEN 2 * (SUM(p) % COUNT(*)) > COUNT(*) THEN SUM(p) / COUNT(*) + 1
   WHEN 2 * (SUM(p) % COUNT(*)) < COUNT(*) THEN SUM(p) / COUNT(*)
   ELSE SUM(p) / COUNT(*) + (SUM(p) / COUNT(*)) % 2 END)`;
-export const MEAN_OF = (sum, n) => `(CASE
+const MEAN_OF = (sum, n) => `(CASE
   WHEN 2 * (${sum} % ${n}) > ${n} THEN ${sum} / ${n} + 1
   WHEN 2 * (${sum} % ${n}) < ${n} THEN ${sum} / ${n}
   ELSE ${sum} / ${n} + (${sum} / ${n}) % 2 END)`;
 // Mediana al par de los n elementos ORDENADOS del array JSON a, desde f
-export const sortedMedian = (a, f, n) => {
+const sortedMedian = (a, f, n) => {
   const mid = `(CASE WHEN ${n} % 2 = 1 THEN ${a} ->> (${f} + ${n} / 2) ELSE (${a} ->> (${f} + ${n} / 2 - 1)) + (${a} ->> (${f} + ${n} / 2)) END)`;
   return `(CASE WHEN ${n} % 2 = 1 THEN ${mid} ELSE ${mid} / 2 + (${mid} % 2) * ((${mid} / 2) % 2) END)`;
 };
 
-export async function getState(db, key, fallback = null) {
+export async function getState(db, key) {
   const row = await db.prepare("SELECT value FROM state WHERE key = ?1").bind(key).first();
-  if (!row || row.value == null) return fallback;
+  if (!row || row.value == null) return null;
   try { return JSON.parse(row.value); } catch { return row.value; }
 }
 
@@ -144,9 +145,9 @@ export async function radarPlayers(db, list, today) {
 }
 
 // Cacheado: cruzarlo en SQL leía ~10.000 filas en cada lectura del radar (radarStaleStmt lo borra)
-export async function radarPlaces(db, today) {
+async function radarPlaces(db, today) {
   const cached = await getState(db, "radar_places");
-  if (cached?.day === today && Array.isArray(cached.pairs) && Array.isArray(cached.nop)) {
+  if (cached?.day === today) {
     const map = new Map(cached.pairs);
     return { map, ids: [...new Set(map.values()), ...cached.nop] };
   }
@@ -184,7 +185,7 @@ export function countTryStmt(db, day, task) {
 }
 
 // Igual que MEDIAN_SQL (lista ordenada)
-export function pyMedian(sorted) {
+function pyMedian(sorted) {
   const n = sorted.length;
   if (n % 2) return sorted[(n - 1) / 2];
   const s = sorted[n / 2 - 1] + sorted[n / 2], h = Math.trunc(s / 2);
@@ -192,7 +193,7 @@ export function pyMedian(sorted) {
 }
 
 // Igual que MEAN_SQL
-export function pyMean(sum, n) {
+function pyMean(sum, n) {
   const q = Math.trunc(sum / n), r2 = 2 * (sum % n);
   return r2 > n ? q + 1 : r2 < n ? q : q + (q % 2);
 }
@@ -210,13 +211,11 @@ export function radarPrepare(texts) {
     if (RADAR_TEXT.test(text)) out.push(text);
     else if (text.trim() !== "{}") out.push(JSON.parse(text));
   }
-  out.checked = true;
   return out;
 }
 
 // Expresión regular por parte: JSON.parse de ~2.800 juegos × 8 ficheros costaba ~30 ms en frío
-export function radarReadingsPart(texts, part = 0, parts = 1) {
-  const files = texts.checked ? texts : radarPrepare(texts);
+export function radarReadingsPart(files, part, parts) {
   const digits = [..."0123456789"].filter(d => idPart(d, parts) === part).join("");
   const rx = new RegExp(`"(\\d*[${digits}])":(-?\\d+(?:\\.\\d+)?)[,}]`, "g");
   const out = new Map();
@@ -239,9 +238,7 @@ export function radarReadingsPart(texts, part = 0, parts = 1) {
 export function radarDailyRows(readings, meta, part = 0, parts = 1) {
   const rows = [], seen = new Set();
   const mt = meta || {};
-  const own = readings instanceof Map;
-  for (const [key, vals] of own ? readings : Object.entries(readings || {})) {
-    const ps = own ? vals : vals.filter(p => p != null);
+  for (const [key, ps] of readings || []) {
     const n = ps.length;
     if (!n) continue;
     // Por inserción: son ≤ 8 lecturas, y sin llamar a un comparador por cada par
@@ -282,17 +279,17 @@ export function radarCloseStmt(db, date, rows) {
 }
 
 // Al revés por la clave y se les da la vuelta aquí: ordenarlas en SQL contaba cada fila dos veces
-export async function radarSlice(db, { lo, hi, days, before, today }) {
+export async function radarSlice(db, { lo, hi, days, today }) {
   const { results } = await db.prepare(
     `SELECT json_array(g.universe_id, COALESCE(g.horror, 0), COALESCE(g.sel, 0), g.created, g.first_seen,
        (SELECT first_day FROM hist WHERE universe_id = g.universe_id),
        json(COALESCE((SELECT json_group_object(k.sort_id, k.rank) FROM sort_hits k
-              WHERE k.universe_id = g.universe_id AND k.date = ?5 AND k.sort_id NOT LIKE 'search:%'), '{}')),
+              WHERE k.universe_id = g.universe_id AND k.date = ?4 AND k.sort_id NOT LIKE 'search:%'), '{}')),
        json(COALESCE((SELECT json_group_array(json_array(r.date, r.median, r.min, r.max, r.n, r.visits)) FROM (
               SELECT date, median, min, max, n, visits FROM daily
               WHERE universe_id = g.universe_id AND date < ?4 ORDER BY date DESC LIMIT ?3) r), '[]'))) AS row
      FROM games g WHERE g.tracked = 1 AND g.universe_id BETWEEN ?1 AND ?2`,
-  ).bind(lo, hi, days, before, today).all();
+  ).bind(lo, hi, days, today).all();
   return results.map(r => {
     const row = JSON.parse(r.row);
     row[7].reverse();
@@ -303,7 +300,7 @@ export async function radarSlice(db, { lo, hi, days, before, today }) {
 // Si radar_places es de hoy, de ahí: rehacerlo leería ~8.000 filas
 export async function radarIds(db, today) {
   const cached = await getState(db, "radar_places");
-  if (cached?.day === today && Array.isArray(cached.pairs) && Array.isArray(cached.nop)) {
+  if (cached?.day === today) {
     return [...new Set([...cached.pairs.map(p => p[1]), ...cached.nop])];
   }
   return trackedIds(db);
@@ -326,7 +323,8 @@ export function applySelectionStmt(db, ids) {
 }
 
 // Cacheado del día: contarlos lee games entera (~3.000) y el export va cada hora
-export async function radarCounts(db, today = isoDate(minuteOf(Date.now()))) {
+export async function radarCounts(db) {
+  const today = isoDate(minuteOf(Date.now()));
   const cached = await getState(db, "radar_counts");
   if (cached?.day === today) return { radar: cached.radar, selected: cached.selected };
   const row = await db.prepare(
@@ -368,7 +366,7 @@ export function lowSinceStmts(db, rows, today) {
   return out;
 }
 
-export const META_COLS = [
+const META_COLS = [
   "place_id", "name", "creator", "creator_verified", "created", "updated", "genre",
   "genre_l1", "genre_l2", "max_players", "horror", "horror_score", "horror_reasons",
 ];
@@ -479,7 +477,7 @@ export async function migrateHist(db) {
   }
 }
 
-export function migrateHistStmts(db) {
+function migrateHistStmts(db) {
   return [
     db.prepare(
       `INSERT INTO hist (${HIST_COLS})
@@ -563,29 +561,13 @@ export function untrackStmt(db, today) {
 // Por trozos: decodificar un JSON de ~2 MB de D1 cuesta ~13 ms de CPU (tope 10 ms por paso)
 // D1 cuenta cada fila de un cursor (CTE, ventanas, json_each): cada juego lee sus muestras UNA vez
 
-export async function exportPlan(db, size, { selected = false } = {}) {
-  const { results } = await db.prepare(
-    `SELECT universe_id AS lo FROM (
-       SELECT universe_id, ROW_NUMBER() OVER (ORDER BY universe_id) - 1 AS rn FROM games
-       WHERE tracked = 1 ${selected ? "AND sel = 1" : ""})
-     WHERE rn % ?1 = 0 ORDER BY lo`,
-  ).bind(size).all();
-  const los = results.map(r => r.lo);
-  if (!los.length) return [[0, Number.MAX_SAFE_INTEGER]];
-  los[0] = 0;
-  return los.map((lo, i) => [lo, i + 1 < los.length ? los[i + 1] - 1 : Number.MAX_SAFE_INTEGER]);
-}
-
 export async function lastSampleTs(db) {
-  const v = await getState(db, "last_sample_ts");
-  if (Number.isFinite(Number(v)) && v) return Number(v);
-  // Sin índice por ts esto recorre la tabla: solo pasa tras una migración
-  const row = await db.prepare("SELECT MAX(ts) AS ts FROM samples").first();
-  return row?.ts ?? null;
+  const v = Number(await getState(db, "last_sample_ts"));
+  return v || null;
 }
 
 // Cerradas de daily, una vez al día; quien reescriba daily fuera del cierre borra esta clave
-export const EXPORT_D_KEY = "export_d";
+const EXPORT_D_KEY = "export_d";
 
 export function dropExportCacheStmt(db) {
   return db.prepare("DELETE FROM state WHERE key = ?1").bind(EXPORT_D_KEY);
@@ -608,15 +590,9 @@ const closedEntrySql = id => `(SELECT json_array(
   FROM (SELECT COALESCE((SELECT date FROM daily WHERE universe_id = ${id} AND date < ?10
                          ORDER BY date DESC LIMIT 1 OFFSET ?9 - 1), '') AS lo) w)`;
 
-// La rama que no toca se descarta antes de recorrer nada
-const SLICE_GAMES = `g0 AS (
-      SELECT universe_id AS id FROM games
-      WHERE ?13 IS NULL AND universe_id BETWEEN ?11 AND ?12 AND (?15 = 0 OR sel = 1)
-      UNION ALL
-      SELECT value FROM json_each(?13) WHERE ?13 IS NOT NULL
-    )`;
+const SLICE_GAMES = "g0 AS (SELECT value AS id FROM json_each(?13))";
 
-export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi = Number.MAX_SAFE_INTEGER, ids = null, selected = false, filter = true }) {
+export async function buildExportSlice(db, { nowMs, lastTs, openDay, ids }) {
   const now = minuteOf(nowMs);
   const today = isoDate(now);
   openDay = openDay && openDay < today ? openDay : today;
@@ -628,12 +604,10 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
     sFrom, cut24,
     CATEGORIES.general.min_players, CATEGORIES.horror.min_players,
     EMERGING.max_visits, EMERGING.min_players,
-    openTs, today, EXPORT_DAILY_DAYS, openDay, lo, hi,
-    ids ? JSON.stringify(ids) : null, now - 24 * 60, selected ? 1 : 0,
-    filter ? 1 : 0, Math.floor(openTs / DAY_MIN), EXPORT_D_KEY,
+    openTs, today, EXPORT_DAILY_DAYS, openDay, null, null,
+    JSON.stringify(ids), now - 24 * 60, null,
+    null, Math.floor(openTs / DAY_MIN), EXPORT_D_KEY,
   ];
-  // Sin lista (todo el radar) no caben en una fila de D1: se leen de daily en cada export
-  const cache = !!ids;
 
   // Días sin cerrar, de lo que deja cada juego en `a`: x[5] = jugadores de los
   // días abiertos ordenados por día y jugadores; el día k empieza en x[6 + 3k],
@@ -685,14 +659,12 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
              (SELECT json_array(peak, peak_date, days, first_day, favorites, up, down) FROM hist
               WHERE universe_id = g.universe_id) AS hv
       FROM st CROSS JOIN games g ON g.universe_id = st.id
-      WHERE ?16 = 0
-         OR st.max24 >= ?3
+      WHERE st.max24 >= ?3
          OR (g.horror = 1 AND st.max24 >= ?4)
          OR (st.max24 >= ?6 AND COALESCE(st.visits, (SELECT d.visits FROM daily d WHERE d.universe_id = g.universe_id
                AND d.visits IS NOT NULL ORDER BY d.date DESC LIMIT 1)) < ?5)   -- sin visitas conocidas, no
     ),
-    -- Sin caché, MATERIALIZED: ce se usa varias veces y cada uso volvería a leer daily
-    s3 AS ${cache ? "" : "MATERIALIZED "}(
+    s3 AS (
       SELECT s.*, ${days} AS pdays, ${vdays} AS pvdays, ${pmx} AS pmx,
              CASE ${K.map(k => `WHEN ${k.has} THEN ${k.day}`).join(" ")} END AS pfirst,
              COALESCE(json_extract((SELECT CASE WHEN value ->> '$.day' = ?10 THEN value END FROM state WHERE key = ?18),
@@ -744,11 +716,10 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
       (SELECT MAX(x ->> 0) FROM a) AS last_ts,
       (SELECT json_group_array(json(x -> 4)) FROM a WHERE x ->> 0 IS NOT NULL) AS ts24`;
 
-  const stmts = [db.prepare(sql).bind(...binds)];
-  if (cache) {
-    // Filas cerradas de los juegos que aún no están en state.export_d (con un
-    // día nuevo, todos): una escritura al día, o cuando cambia la selección.
-    stmts.unshift(db.prepare(`
+  // Filas cerradas de los juegos que aún no están en state.export_d (con un
+  // día nuevo, todos): una escritura al día, o cuando cambia la selección.
+  const res = await db.batch([
+    db.prepare(`
       WITH
       ${SLICE_GAMES},
       c AS (SELECT CASE WHEN value ->> '$.day' = ?10 THEN value END AS j FROM state WHERE key = ?18),
@@ -757,11 +728,10 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
       SELECT ?18, json_object('day', ?10, 'g', json_patch(COALESCE((SELECT j FROM c) -> '$.g', '{}'),
                                                           json_group_object(id, json(${closedEntrySql("miss.id")}))))
       FROM miss WHERE true HAVING COUNT(*) > 0
-      ON CONFLICT (key) DO UPDATE SET value = excluded.value WHERE state.value IS NOT excluded.value`).bind(...binds));
-  }
-  const res = await db.batch(stmts);
-  const main = res[res.length - 1];
-  const row = main.results?.[0] || {};
+      ON CONFLICT (key) DO UPDATE SET value = excluded.value WHERE state.value IS NOT excluded.value`).bind(...binds),
+    db.prepare(sql).bind(...binds),
+  ]);
+  const row = res[1].results?.[0] || {};
   const ts24 = [...new Set(JSON.parse(row.ts24 || "[]").flat())];
   return {
     frag: row.frag || "",
@@ -775,12 +745,12 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, lo = 0, hi 
   };
 }
 
-export function exportHeader({ nowMs, lastTs, ts24, radar = null }) {
+export function exportHeader({ nowMs, lastTs, ts24, radar }) {
   return {
     generated_at: new Date(nowMs).toISOString().slice(0, 19) + "Z",
     last_sample: lastTs != null ? isoMinute(lastTs) : null,
     samples_24h: new Set(ts24).size,
-    ...(radar ? { radar_games: radar.radar, selected_games: radar.selected } : {}),
+    radar_games: radar.radar, selected_games: radar.selected,
   };
 }
 
@@ -822,7 +792,7 @@ export async function history(db, id, { nowMs = Date.now(), openDay } = {}) {
   return row.out;
 }
 
-export const IMPORT_TABLES = {
+const IMPORT_TABLES = {
   games: {
     pk: ["universe_id"],
     cols: ["universe_id", "place_id", "name", "creator", "creator_verified", "created", "updated",

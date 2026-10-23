@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { after, before, test } from "node:test";
-import { Budget, SubBudget, filterRolimons, getJson } from "../src/sources.js";
+import { Budget, filterRolimons, getJson } from "../src/sources.js";
 
 let server, url;
 const hits = { cuelga: 0, cuerpo: 0, ok: 0, error: 0 };
@@ -42,7 +42,7 @@ test("una respuesta a tiempo no cambia", async () => {
 
 // Plan gratis: 50 peticiones por invocación, aunque al paso le quede presupuesto
 test("el presupuesto de la invocación corta los reintentos del paso", async () => {
-  const parent = new Budget(2), sub = new SubBudget(parent, 10);
+  const parent = new Budget(2), sub = new Budget(10, parent);
   assert.equal(await within(2000, getJson(url("error"), { budget: sub, retries: 5, base: 1, timeout: 200 })), null);
   assert.equal(hits.error, 2);
   assert.equal(parent.used, 2);

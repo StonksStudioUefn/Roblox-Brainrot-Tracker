@@ -81,7 +81,7 @@ if (process.env.CPU_STEP) {
     fn = () => {
       const { counts, ids } = tg.pickCandidates(JSON.parse(dec.decode(rowsWire)));
       const r = parse(w).results[0];
-      const text = `${JSON.stringify({ a: 1, totals: counts, telegram: { counts, total: 1, candidates: ids.size } }).slice(0, -1)},"games":[${r.frag}]}`;
+      const text = `${JSON.stringify({ a: 1, telegram: { counts, total: 1, candidates: ids.size } }).slice(0, -1)},"games":[${r.frag}]}`;
       return enc.encode(text).length;
     };
   }

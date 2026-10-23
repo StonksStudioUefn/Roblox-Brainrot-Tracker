@@ -4,15 +4,15 @@ import { CATEGORIES, EMERGING, TELEGRAM } from "./config.js";
 import { buildDashboard as metricsBuildDashboard, isRising, quickMetrics } from "./metrics.js";
 import { pyLen, pyRstrip } from "./horror.js";
 
-export const TELEGRAM_MAX_FETCH = 50;
-export const CAPTION_LIMIT = 1024;     // límite de Telegram para el texto de una foto
-export const STATE_KEY = "telegram";
+const TELEGRAM_MAX_FETCH = 50;
+const CAPTION_LIMIT = 1024;     // límite de Telegram para el texto de una foto
+const STATE_KEY = "telegram";
 const THUMBS_API = "https://thumbnails.roblox.com/v1/games/multiget/thumbnails";
 const DAYS = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"];
 const DAY_MS = 864e5;
 const DASHBOARD_URL = TELEGRAM.dashboard_url;
 
-export function h(s) {
+function h(s) {
   return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
@@ -47,20 +47,20 @@ export function pct(p) {
 }
 
 /** Recorta por code points, como Python. */
-export function short(title) {
+function short(title) {
   title = title || "?";
   if (pyLen(title) <= TELEGRAM.title_chars) return title;
   return pyRstrip(Array.from(title).slice(0, TELEGRAM.title_chars - 1).join("")) + "…";
 }
 
-const pyStr = v => (v === null || v === undefined ? "None" : v === true ? "True" : v === false ? "False" : String(v));
+const pyStr = v => (v == null ? "None" : String(v));
 
 const gameLink = g =>
   `<a href="https://www.roblox.com/games/${pyStr(g.place_id)}">${h(short(g.title))}</a>`;
 
 const cardLink = (key, g, text) => `<a href="${DASHBOARD_URL}#cat=${key}&amp;game=${pyStr(g.id)}">${text}</a>`;
 
-export function growth(g, arrow = false) {
+function growth(g, arrow = false) {
   const t = g.trend ?? null, g24 = g.growth_24h ?? null;
   let value, unit;
   if (t !== null && (Math.abs(t) >= 2 || g24 === null)) [value, unit] = [t, "/día"];
@@ -77,7 +77,7 @@ function entry(i, g, extra = [], medals = true) {
   return `${mark} ${gameLink(g)}${flag}\n      └ ${stats}`;
 }
 
-export function todayLabel(now) {
+function todayLabel(now) {
   const d = toDate(now);
   const dd = String(d.getUTCDate()).padStart(2, "0"), mm = String(d.getUTCMonth() + 1).padStart(2, "0");
   return `${DAYS[(d.getUTCDay() + 6) % 7]} ${dd}/${mm}`;
@@ -90,10 +90,10 @@ export function isBoom(g) {
     && g.status !== "down" && g.status !== "down2";
 }
 
-export function alertCategory(cats, g) {
+function alertCategory(cats, g) {
   const keys = Object.keys(cats);
-  return keys.find(k => CATEGORIES[k]?.classifier === "horror" && g.horror)
-    ?? keys.find(k => CATEGORIES[k]?.classifier === "all") ?? keys[0];
+  return keys.find(k => CATEGORIES[k].classifier === "horror" && g.horror)
+    ?? keys.find(k => CATEGORIES[k].classifier === "all");
 }
 
 const big = g => (g.typical || 0) >= TELEGRAM.report_min_players;
@@ -111,10 +111,7 @@ export function dailyReport(key, cat, games, now) {
 
   const lines = [
     `${cat.icon} <b>${h(cat.label.toUpperCase())}</b> · ${todayLabel(now)}`,
-    // Sin suben/bajan fiables se omiten: mejor nada que contarlos solo sobre los candidatos.
-    s.rising == null || s.falling == null
-      ? `<i>${s.games} juegos</i>`
-      : `<i>${s.games} juegos · 📈 ${s.rising} suben · 📉 ${s.falling} bajan</i>`,
+    `<i>${s.games} juegos · 📈 ${s.rising} suben · 📉 ${s.falling} bajan</i>`,
   ];
   if (emerging.length) {
     lines.push("", "🌱 <b>Emergentes</b>");
@@ -220,7 +217,7 @@ const CATS = Object.entries(CATEGORIES);
 
 export function quickRows(games, { now } = {}) {
   const rows = [];
-  for (const { g, m, em } of quickMetrics(games, { now: toDate(now) })) {
+  for (const { g, m, em } of quickMetrics(games, { now })) {
     const typ = m.typical || 0;
     let cat = 0;
     CATS.forEach(([, c], ci) => {
@@ -283,7 +280,7 @@ function reducedExport(head, games, counts, total) {
 
 const GAME_START = '{"id":';
 
-export function gameOffsets(text) {
+function gameOffsets(text) {
   const g = text.indexOf('"games":[');
   if (g < 0) throw new Error("export sin games");
   const out = [];
@@ -300,18 +297,6 @@ export function gameOffsets(text) {
   return out;
 }
 
-export function exportHead(text) {
-  const pick = re => {
-    const m = re.exec(text);
-    return m ? JSON.parse(m[1]) : null;
-  };
-  return {
-    generated_at: pick(/"generated_at":("[^"]*"|null)/),
-    last_sample: pick(/"last_sample":("[^"]*"|null)/),
-    samples_24h: pick(/"samples_24h":(\d+|null)/) ?? 0,
-  };
-}
-
 function parseSlice(text, offs, a, b) {
   if (a >= b) return [];
   let end = offs[b];
@@ -319,59 +304,38 @@ function parseSlice(text, offs, a, b) {
   return JSON.parse("[" + slice + "]");
 }
 
-export function telegramScanText(text, { now, part = 0, parts = 1 } = {}) {
+export function telegramScanText(text, { now, part = 0, parts = 1 }) {
   const offs = gameOffsets(text), n = offs.length - 1;
   const a = Math.floor(n * part / parts), b = Math.floor(n * (part + 1) / parts);
   const games = parseSlice(text, offs, a, b);
-  return quickRows(games, { now: now ?? exportHead(text).generated_at });
+  return quickRows(games, { now });
 }
 
-export function telegramReduce(text, rowParts) {
-  const rows = rowParts.flat();
-  const { counts, ids } = pickCandidates(rows);
-  const offs = gameOffsets(text), games = [];
+// Del texto del export, sin parsearlo. → { frag, n }
+export function pickGames(text, ids) {
+  const want = new Set(ids);
+  const offs = gameOffsets(text), out = [];
   for (let k = 0; k < offs.length - 1; k++) {
     const p = offs[k] + GAME_START.length;
-    const id = Number(text.slice(p, text.indexOf(",", p)));
-    if (ids.has(id)) games.push(...parseSlice(text, offs, k, k + 1));
+    if (!want.has(Number(text.slice(p, text.indexOf(",", p))))) continue;
+    out.push(text.slice(offs[k], offs[k + 1]).replace(/,$/, ""));
   }
-  return reducedExport(exportHead(text), games, counts, offs.length - 1);
-}
-
-// totals de data/telegram.json: { <cat>: n } o { <cat>: { games, players?, rising?, falling? } }
-export function headerCounts(exportData) {
-  if (exportData?.telegram?.counts) return exportData.telegram.counts;
-  const totals = exportData?.totals;
-  if (!totals || typeof totals !== "object") return null;
-  const out = {};
-  for (const [key, v] of Object.entries(totals)) {
-    const c = typeof v === "number" ? { games: v } : { ...(v || {}) };
-    if (c.rising == null || c.falling == null) { c.rising = null; c.falling = null; }
-    out[key] = c;
-  }
-  return out;
+  return { frag: out.join(","), n: out.length };
 }
 
 function applyCounts(dash, counts) {
   if (!counts) return;
   for (const [key, c] of Object.entries(counts)) {
     const cat = dash.categories?.[key];
-    if (!cat) continue;
-    const st = { ...cat.stats };
-    for (const [k, v] of Object.entries(c)) if (v !== undefined) st[k] = v;
-    cat.stats = st;
+    if (cat) cat.stats = { ...cat.stats, ...c };
   }
-}
-
-// El secret manda: el id migrado solo vale mientras siga el antiguo.
-export function chatFor(envChat, migrated) {
-  if (envChat && migrated?.to && String(migrated.from) === String(envChat)) return String(migrated.to);
-  return envChat;
 }
 
 function makeClient({ env, fetchImpl, log, maxFetch, migrated }) {
   const token = env?.TELEGRAM_TOKEN;
-  let chat = chatFor(env?.TELEGRAM_CHAT_ID, migrated);
+  // El secret manda: el id migrado solo vale mientras siga el antiguo.
+  const envChat = env?.TELEGRAM_CHAT_ID;
+  let chat = envChat && migrated?.to && String(migrated.from) === String(envChat) ? String(migrated.to) : envChat;
   const counter = { used: 0 };
   const moved = { to: null };   // id nuevo si Telegram avisa de que el grupo ha migrado
 
@@ -389,7 +353,7 @@ function makeClient({ env, fetchImpl, log, maxFetch, migrated }) {
       });
       const r = await call(`${THUMBS_API}?${q}`, {}, 15000);
       const j = await r.json();
-      const shots = ((j?.data || [{}])[0] || {}).thumbnails || [];
+      const shots = j?.data?.[0]?.thumbnails || [];
       return shots.find(s => s.state === "Completed")?.imageUrl ?? null;
     } catch {
       return null;
@@ -460,8 +424,8 @@ export async function runTelegram({
   const today = isoDay(nowD), week = isoWeek(nowD), hour = nowD.getUTCHours();
   const weekday = (nowD.getUTCDay() + 6) % 7;
 
-  // El export completo se reduce aquí solo como respaldo: cuesta más CPU.
-  const reduced = exportData?.telegram || exportData?.totals ? exportData : telegramCandidates(exportData, { now: nowD });
+  const reduced = exportData;
+  const counts = reduced.telegram?.counts ?? null;
 
   const loaded = getState ? await getState(STATE_KEY) : null;
   const state = loaded && typeof loaded === "object" ? structuredClone(loaded) : {};
@@ -470,7 +434,7 @@ export async function runTelegram({
   const result = {
     credentials: client.hasCredentials, alerts: 0, daily: null, weekly: null, messages: 0,
     candidates: reduced.games?.length ?? null, total: reduced.telegram?.total ?? null,
-    header: headerCounts(reduced) ? (reduced.telegram ? "exacta" : "totals") : "candidatos",
+    header: counts ? "exacta" : "candidatos",
   };
   const dueDaily = force === "daily" || (hour >= TELEGRAM.report_hour_utc && state.last_daily !== today);
   const dueWeekly = force === "weekly"
@@ -484,13 +448,12 @@ export async function runTelegram({
   }
 
   const dash = buildDashboard(reduced, { now: nowD });
-  applyCounts(dash, headerCounts(reduced));
+  applyCounts(dash, counts);
   const games = dash.games, cats = dash.categories;
 
   const save = async () => {
     if (!setState || JSON.stringify(state) === before) return;
-    if (setState.length >= 2) await setState(STATE_KEY, state);
-    else await setState(state);
+    await setState(STATE_KEY, state);
   };
 
   try {

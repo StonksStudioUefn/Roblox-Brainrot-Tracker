@@ -468,8 +468,6 @@
 import { buildDashboard, flagEvents, ROBLOX_SORT_POINTS } from '/metrics.js';
 import { EXPORT_DAILY_DAYS, HISTORY_DAYS, SELECTION, UNTRACK_AFTER_DAYS } from '/config.js';
 
-// La dirección antigua de GitHub Pages lleva a la nueva
-if (location.hostname.endsWith('github.io')) location.replace('https://robloxtracker.stonksstudio.com/' + location.hash);
 
 let RAW = null, EXPORT_AT = null;
 const HISTORY = {}, HISTORY_P = {};
@@ -491,6 +489,8 @@ const STATUS = {
   new:   { icon: '⏳', label: 'Midiendo' },
 };
 
+const sampleMs = t => Date.parse(t.replace('Z', ':00Z'));
+const lastSampleMs = r => (r.length ? sampleMs(r[r.length - 1][0]) : Date.now());
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 function num(n) {
   if (n == null) return '—';
@@ -679,11 +679,11 @@ function renderEmerging() {
     </button>`).join('');
 }
 
-function renderTop() {
-  const el = document.getElementById('top');
-  const list = (catData().top || []).map(G).filter(Boolean);
+function renderRows(elId, ids, empty, sub) {
+  const el = document.getElementById(elId);
+  const list = ids.map(G).filter(Boolean);
   if (!list.length) {
-    el.innerHTML = `<div class="empty" style="grid-column:1/-1"><b>Sin datos todavía</b>Aparecerán tras el próximo muestreo.</div>`;
+    el.innerHTML = `<div class="empty" style="grid-column:1/-1">${empty}</div>`;
     return;
   }
   el.innerHTML = list.map((g, i) => `
@@ -692,30 +692,15 @@ function renderTop() {
       ${icon(g, 'sm')}
       <div class="mid">
         <div class="t" title="${esc(g.name)}">${esc(g.title)}</div>
-        <div class="s">${num(g.typical)} · ${pct(g.growth_24h)} 24h${g.trend != null ? ` · ${pct(g.trend)}/día` : ''}</div>
+        <div class="s">${num(g.typical)} · ${pct(g.growth_24h)} 24h${sub(g)}</div>
       </div>
       ${spark(g.spark, g.spark_ev, 84, 28)}
     </button>`).join('');
 }
-
-function renderTrending() {
-  const el = document.getElementById('trending');
-  const list = catData().trending.map(G).filter(Boolean);
-  if (!list.length) {
-    el.innerHTML = `<div class="empty" style="grid-column:1/-1"><b>Nada en tendencia</b>Ningún juego de la lista está creciendo de forma sostenida.</div>`;
-    return;
-  }
-  el.innerHTML = list.map((g, i) => `
-    <button class="trow" data-id="${g.id}">
-      <span class="rank">${i + 1}</span>
-      ${icon(g, 'sm')}
-      <div class="mid">
-        <div class="t" title="${esc(g.name)}">${esc(g.title)}</div>
-        <div class="s">${num(g.typical)} · ${pct(g.growth_24h)} 24h · ${pct(g.trend)}/día</div>
-      </div>
-      ${spark(g.spark, g.spark_ev, 84, 28)}
-    </button>`).join('');
-}
+const renderTop = () => renderRows('top', catData().top || [], '<b>Sin datos todavía</b>Aparecerán tras el próximo muestreo.',
+  g => (g.trend != null ? ` · ${pct(g.trend)}/día` : ''));
+const renderTrending = () => renderRows('trending', catData().trending,
+  '<b>Nada en tendencia</b>Ningún juego de la lista está creciendo de forma sostenida.', g => ` · ${pct(g.trend)}/día`);
 
 function renderGenres() {
   const counts = {};
@@ -937,15 +922,14 @@ function updatePeak24(g, h) {
   const el = document.getElementById('d-peak24');
   if (!el || !h) return;
   const r = h.r || [];
-  const ms = t => Date.parse(t.replace('Z', ':00Z'));
-  const last = r.length ? ms(r[r.length - 1][0]) : Date.now();
+  const last = lastSampleMs(r);
   let best = null;
-  for (const [t, p] of r) if (ms(t) > last - 24 * 3600e3 && (!best || p > best[1])) best = [t, p];
+  for (const [t, p] of r) if (sampleMs(t) > last - 24 * 3600e3 && (!best || p > best[1])) best = [t, p];
   const live = (LIVE[g.id] || {}).playing;
   if (live != null && (!best || live > best[1])) best = [null, live];
   el.querySelector('.big-v').textContent = best ? num(best[1]) : '—';
   el.querySelector('small').textContent = !best ? 'sin muestras' : best[0]
-    ? new Date(ms(best[0])).toLocaleString('es', { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+    ? new Date(sampleMs(best[0])).toLocaleString('es', { weekday: 'short', hour: '2-digit', minute: '2-digit' })
     : 'ahora, en vivo';
 }
 
@@ -977,12 +961,11 @@ function drawChart(g) {
     // Eje de tiempo real: una muestra manual de las 1:20 no abre una división nueva.
     const HOUR = 3600e3;
     const r = h.r || [];
-    const ms = t => Date.parse(t.replace('Z', ':00Z'));
-    const last = r.length ? ms(r[r.length - 1][0]) : Date.now();
+    const last = lastSampleMs(r);
     const max = Math.ceil(last / HOUR) * HOUR, min = max - 24 * HOUR;
-    const day = r.filter(([t]) => ms(t) >= min);
+    const day = r.filter(([t]) => sampleMs(t) >= min);
     datasets = [{
-      label: 'Jugadores', data: day.map(([t, p]) => ({ x: ms(t), y: p })), borderColor: accent, backgroundColor: accent + '22',
+      label: 'Jugadores', data: day.map(([t, p]) => ({ x: sampleMs(t), y: p })), borderColor: accent, backgroundColor: accent + '22',
       fill: true, cubicInterpolationMode: 'monotone', pointRadius: day.length < 40 ? 2 : 0, borderWidth: 2,
     }];
     const every = w => [1, 2, 3, 4, 6].find(k => w / 24 * k >= 46) || 6;
@@ -1205,7 +1188,6 @@ async function init() {
   bind();
   try {
     RAW = compute(await fetchExport());
-    if (!RAW.games) throw new Error('formato antiguo');
   } catch (e) {
     console.error(e);
     document.querySelector('main').innerHTML = `<div class="empty" style="padding:80px 0"><b>No hay datos todavía</b>Se generan con el siguiente muestreo del Worker (cada hora).</div>`;

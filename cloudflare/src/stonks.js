@@ -7,13 +7,10 @@ const D1_TOPE = 500_000_000;   // D1: 500 MB por base en el plan gratis
 const MAX_RUTAS = 500;
 
 // En la carpeta roblox-tracker/ del bucket común: así sale en el Almacén.
-export function appBucket(bucket) {
-  if (!bucket || bucket.__app) return bucket;
+function appBucket(bucket) {
+  if (!bucket) return bucket;
   const k = key => PREFIX + key;
-  const short = o => ({
-    key: o.key.slice(PREFIX.length), size: o.size, etag: o.etag, httpEtag: o.httpEtag,
-    uploaded: o.uploaded, httpMetadata: o.httpMetadata, customMetadata: o.customMetadata,
-  });
+  const short = o => ({ key: o.key.slice(PREFIX.length), uploaded: o.uploaded });
   return {
     __app: true,
     get: (key, opts) => bucket.get(k(key), opts),
@@ -25,7 +22,7 @@ export function appBucket(bucket) {
     delete: keys => bucket.delete(Array.isArray(keys) ? keys.map(k) : k(keys)),
     async list(opts = {}) {
       const r = await bucket.list({ ...opts, prefix: PREFIX + (opts.prefix || "") });
-      return { ...r, objects: r.objects.map(short), delimitedPrefixes: (r.delimitedPrefixes || []).map(p => p.slice(PREFIX.length)) };
+      return { ...r, objects: r.objects.map(short) };
     },
   };
 }
@@ -128,16 +125,17 @@ const DIAS = { "01": "ene", "02": "feb", "03": "mar", "04": "abr", "05": "may", 
 const fecha = d => `${Number(d.slice(8, 10))} ${DIAS[d.slice(5, 7)] || d.slice(5, 7)} ${d.slice(0, 4)}`;
 const WEB = "https://robloxtracker.stonksstudio.com/";
 
-export function nombreDe(ruta) {
-  const fijos = {
-    "site/": { nombre: "Web del tracker", detalle: "dashboard.html", enlace: WEB },
-    "data/": { nombre: "Datos de la web", detalle: "export y Telegram", enlace: WEB },
-    "radar/": { nombre: "Radar", detalle: "lecturas de Rolimons, 7 días" },
-    "tmp/": { nombre: "Temporales", detalle: "se borran solos" },
-    "tmp/export/": { nombre: "Partes del export" },
-    "tmp/run/": { nombre: "Muestreos en marcha" },
-  };
-  if (fijos[ruta]) return fijos[ruta];
+const FIJOS = {
+  "site/": { nombre: "Web del tracker", detalle: "dashboard.html", enlace: WEB },
+  "data/": { nombre: "Datos de la web", detalle: "export y Telegram", enlace: WEB },
+  "radar/": { nombre: "Radar", detalle: "lecturas de Rolimons, 7 días" },
+  "tmp/": { nombre: "Temporales", detalle: "se borran solos" },
+  "tmp/export/": { nombre: "Partes del export" },
+  "tmp/run/": { nombre: "Muestreos en marcha" },
+};
+
+function nombreDe(ruta) {
+  if (Object.hasOwn(FIJOS, ruta)) return FIJOS[ruta];
   let m = ruta.match(/^radar\/(\d{4}-\d{2}-\d{2})\/$/);
   if (m) return { nombre: `Radar del ${fecha(m[1])}` };
   m = ruta.match(/^tmp\/run\/([^/]+)\/$/);
@@ -154,7 +152,7 @@ export class Operaciones extends WorkerEntrypoint {
     const out = {};
     if (!Array.isArray(rutas)) return out;
     for (const r of rutas.slice(0, MAX_RUTAS)) {
-      if (typeof r !== "string" || !r.endsWith("/") || r.startsWith("/")) continue;
+      if (typeof r !== "string") continue;
       const n = nombreDe(r);
       if (n) out[r] = n;
     }

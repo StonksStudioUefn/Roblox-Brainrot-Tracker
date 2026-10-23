@@ -6,13 +6,13 @@ import {
   SEARCH_QUERIES_PER_RUN, SELECTION, TRACK_MIN_PLAYERS,
 } from "./config.js";
 import {
-  Budget, GAMES_BATCH, SubBudget, chunks, fetchGames, fetchRolimons, fetchSearch, fetchSortContent, fetchSortsPage, fetchVotes,
+  Budget, GAMES_BATCH, chunks, fetchGames, fetchRolimons, fetchSearch, fetchSortContent, fetchSortsPage, fetchVotes,
   resolvePlaces,
 } from "./sources.js";
 import {
   DAY_MIN, addDays, applySelectionStmt, applyVotesStmt, backfillSamplesStmt, buildExportSlice, closeDayStmt, countTryStmt, exportHeader,
-  exportPlan, getState, getStates, idPart, idRanges, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs,
-  lowSinceStmts, mergeHistStmt, migrateHist, minuteOf, pruneHistStmt, pruneOldStmts, pruneSamplesStmt, radarCloseStmt,
+  getState, getStates, idPart, idRanges, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs,
+  lowSinceStmts, mergeHistStmt, migrateHist, minuteOf, openDayOf, pruneHistStmt, pruneOldStmts, pruneSamplesStmt, radarCloseStmt,
   radarCounts, radarCountsStaleStmt, radarDailyRows, radarIds, radarPlayers, radarPrepare, radarReadingsPart, radarSlice, radarStaleStmt,
   retrackPlacesStmt, setState, setStateStmt, sortHitsStmt, trackedIds, unknownPlaces, untrackStmt, updateMetaStmt,
   upsertDiscoveredStmt, written,
@@ -20,45 +20,45 @@ import {
 import { classifyHorror } from "./horror.js";
 import { radarScore } from "./metrics.js";
 import { withApp } from "./stonks.js";
-import { gameOffsets, pickCandidates, runTelegram, telegramScanText } from "./telegram.js";
+import { pickCandidates, pickGames, runTelegram, telegramScanText } from "./telegram.js";
 
 // Tamaños de trozo (CPU medida en frío: ver README "CPU por paso")
 export const SAMPLE_CHUNK = 400;       // 8 lotes de 50: parsear ~560 KB de la Games API ≈ 4,3 ms
 export const META_CHUNK = 50;          // 1 lote + votos + horror de 50 (horror en frío ≈ 4,2 ms)
-export const RESOLVE_CHUNK = 40;       // place → universe por paso (1 petición cada uno)
-export const RESOLVE_PER_DAY = 200;
-export const EXPLORE_MAX_PAGES = 8;    // páginas de get-sorts (hoy son 5)
-export const EXPORT_SLICE = 500;       // juegos seguidos por trozo del export (≈ 250 exportados, ≈ 450 KB)
+const RESOLVE_CHUNK = 40;       // place → universe por paso (1 petición cada uno)
+const RESOLVE_PER_DAY = 200;
+const EXPLORE_MAX_PAGES = 8;    // páginas de get-sorts (hoy son 5)
+const EXPORT_SLICE = 500;       // juegos seguidos por trozo del export (≈ 250 exportados, ≈ 450 KB)
 export const TG_SCAN_GAMES = 40;       // juegos por paso de telegramScanText (en frío, con muestras cada hora: 40 ≈ 6 ms)
-export const EXPORT_KEY = "data/export.json";
-export const TELEGRAM_KEY = "data/telegram.json";
-export const PART_PREFIX = "tmp/export/part-";
-export const TG_PART_PREFIX = "tmp/export/tg-";
-export const RUN_PREFIX = "tmp/run/";
-export const RADAR_PREFIX = "radar/";
-export const RADAR_KEEP_DAYS = 7;
-export const RADAR_MIN_PLAYERS = 150;        // lecturas desde aquí (un bajón nocturno no deja huecos)
+const EXPORT_KEY = "data/export.json";
+const TELEGRAM_KEY = "data/telegram.json";
+const PART_PREFIX = "tmp/export/part-";
+const TG_PART_PREFIX = "tmp/export/tg-";
+const RUN_PREFIX = "tmp/run/";
+const RADAR_PREFIX = "radar/";
+const RADAR_KEEP_DAYS = 7;
+const RADAR_MIN_PLAYERS = 150;        // lecturas desde aquí (un bajón nocturno no deja huecos)
 // No seguidos sin lectura de Rolimons: Games API en radar-api (8 lotes ≈ 4,9 ms en frío)
-export const RADAR_API_MAX = 400;
-export const RADAR_DAYS = 14;
-export const SELECT_SLICE = 250;             // juegos del radar por paso de select (en frío ≈ 5 ms)
+const RADAR_API_MAX = 400;
+const RADAR_DAYS = 14;
+const SELECT_SLICE = 250;             // juegos del radar por paso de select (en frío ≈ 5 ms)
 // Un juego que entra en la selección no tiene muestras: se le copian 48 h del radar
-export const BACKFILL_HOURS = 48;
-export const BACKFILL_FILES = 16;            // 48 h con el radar cada 3 h: tope de lecturas de R2 por paso
-export const BACKFILL_MAX_GAMES = 150;       // tope de escrituras: 150 × 16 = 2.400 filas (y otras tantas al podarlas)
+const BACKFILL_HOURS = 48;
+const BACKFILL_FILES = 16;            // 48 h con el radar cada 3 h: tope de lecturas de R2 por paso
+const BACKFILL_MAX_GAMES = 150;       // tope de escrituras: 150 × 16 = 2.400 filas (y otras tantas al podarlas)
 // 2.800 juegos × 8 lecturas de una vez: ~30 ms de CPU en frío; por partes, < 10 ms por paso
 export const RADAR_CLOSE_PARTS = 10;
 
 // Peticiones externas: el plan gratis da 50 por invocación. Se deja margen.
-export const INVOCATION_BUDGET = 46;
-export const SEARCH_NEED = 9;          // 3 páginas + reintentos
-export const ROLIMONS_NEED = 4;
-export const SAMPLE_NEED = 12;         // 8 lotes de la Games API + reintentos
-export const META_NEED = 6;            // 1 lote + votos + reintentos
-export const TELEGRAM_NEED = 30;       // miniaturas + envíos (peor caso medido: 27)
+const INVOCATION_BUDGET = 46;
+const SEARCH_NEED = 9;          // 3 páginas + reintentos
+const ROLIMONS_NEED = 4;
+const SAMPLE_NEED = 12;         // 8 lotes de la Games API + reintentos
+const META_NEED = 6;            // 1 lote + votos + reintentos
+const TELEGRAM_NEED = 30;       // miniaturas + envíos (peor caso medido: 27)
 
 // Una marca e intentos por tarea: con una sola marca, un cierre fallido leía ~450.000 filas/hora.
-export const DAILY_TASKS = ["meta", "close", "select", "maint"];
+const DAILY_TASKS = ["meta", "close", "select", "maint"];
 export const DAILY_TRIES = 2;
 const TASK_STEP = { meta: "sample", close: "close", select: "select", maint: "maint" };
 
@@ -78,10 +78,8 @@ export class Sampler extends WorkflowEntrypoint {
     const tmp = `${RUN_PREFIX}${base}/`;
     // Los pasos ya hechos que se reanudan no vuelven a pedir nada: no gastan.
     const inv = new Budget(INVOCATION_BUDGET);
-    const sub = n => new SubBudget(inv, n);
+    const sub = n => new Budget(n, inv);
     const summary = p.summary || { steps: {}, errors: [] };
-    summary.steps ||= {};
-    summary.errors ||= [];
     summary.segments = seg + 1;
 
     const safe = async (name, fn, cfg = STEP) => {
@@ -539,7 +537,7 @@ async function saveExplore(db, sorts, today, firstSeen, offsets = {}) {
   return { sorts: n, games: games.size, hits: hits.size, written: written(res) };
 }
 
-export async function sampleChunk(db, ids, { ts, today, meta, budget = new Budget(45), sel = null }) {
+async function sampleChunk(db, ids, { ts, today, meta, budget, sel = null }) {
   const voteIds = meta ? (sel ? ids.filter(id => sel.has(id)) : ids) : [];
   const [games, vts] = await Promise.all([
     fetchGames(budget, ids),
@@ -610,14 +608,15 @@ export function processGames(ids, games, vts, meta, sel = null) {
   return { samples, low, metaRows, votes, radar };
 }
 
-export async function radarTexts(bucket, date) {
+async function radarTexts(bucket, date) {
   const listed = await bucket.list({ prefix: `${RADAR_PREFIX}${date}/` });
   const texts = await Promise.all(listed.objects.map(async o => (await bucket.get(o.key))?.text() ?? null));
   return texts.filter(t => t != null);
 }
 
 // Un seguido se queda mientras siga dentro del keep_factor: no entra y sale cada día
-export function chooseSelection(rows, cfg = SELECTION) {
+function chooseSelection(rows) {
+  const cfg = SELECTION;
   const byPlayers = (a, b) => (b[3] - a[3]) || (a[0] - b[0]);
   const byScore = (a, b) => (b[4] - a[4]) || (b[3] - a[3]) || (a[0] - b[0]);
   // Sin candidatos (en horror muchos pasan de las visitas máximas) se llena por jugadores
@@ -645,7 +644,7 @@ export function chooseSelection(rows, cfg = SELECTION) {
   return { ids: [...chosen].sort((a, b) => a - b), counts: { ...counts, kept: [...kept].filter(id => chosen.has(id)).length, total: chosen.size, radar: rows.length } };
 }
 
-export async function runSelect(env, step, nowMs, today, safe, summary) {
+async function runSelect(env, step, nowMs, today, safe, summary) {
   const db = env.DB;
   // Los rangos, de los ids del radar (radarIds): sin recorrer games con ROW_NUMBER()
   const plan = await safe("select-plan", async () => ({ ranges: idRanges(await radarIds(db, today), SELECT_SLICE) }));
@@ -657,7 +656,7 @@ export async function runSelect(env, step, nowMs, today, safe, summary) {
       rows.push(...await step.do(`select-${i}`, STEP, async () => {
         const out = [];
         for (const [id, horror, sel, created, firstSeen, firstDay, sorts, d] of
-          await radarSlice(db, { lo, hi, days: RADAR_DAYS, before: today, today })) {
+          await radarSlice(db, { lo, hi, days: RADAR_DAYS, today })) {
           const r = radarScore({ id, created, first_seen: firstSeen, first_day: firstDay, sorts, d, s: [] }, { now });
           if (r) out.push([id, horror ? 1 : 0, sel ? 1 : 0, r[0], r[1] == null ? null : Math.round(r[1] * 10) / 10]);
         }
@@ -665,7 +664,7 @@ export async function runSelect(env, step, nowMs, today, safe, summary) {
       }));
     } catch (e) {
       // Sin todos los trozos no se cambia la selección (se queda la de ayer)
-      summary?.errors.push(`select-${i}: ${String(e?.message || e).slice(0, 200)}`);
+      summary.errors.push(`select-${i}: ${String(e?.message || e).slice(0, 200)}`);
       return null;
     }
   }
@@ -723,22 +722,18 @@ export async function runExport(env, step, nowMs, safe, summary) {
       lastSampleTs(db), getState(db, "closed_day"), radarCounts(db), getState(db, "sel_ids"),
     ]);
     // Solo los seguidos de state.sel_ids: exportar todo el radar leía ~150.000 filas por pasada
-    if (Array.isArray(selIds) && selIds.length) {
-      const ranges = chunks([...selIds].sort((a, b) => a - b), EXPORT_SLICE).map(ids => [ids[0], ids[ids.length - 1], ids]);
-      return { lastTs, openDay: closed ? addDays(closed, 1) : isoDate(minuteOf(nowMs)), ranges, selected: true, radar };
-    }
-    if (!(radar.selected > 0)) return { skipped: "sin selección: se queda el export de antes" };
-    const ranges = await exportPlan(db, EXPORT_SLICE, { selected: true });
-    return { lastTs, openDay: closed ? addDays(closed, 1) : isoDate(minuteOf(nowMs)), ranges, selected: true, radar };
+    if (!Array.isArray(selIds) || !selIds.length) return { skipped: "sin selección: se queda el export de antes" };
+    const ranges = chunks([...selIds].sort((a, b) => a - b), EXPORT_SLICE);
+    return { lastTs, openDay: openDayOf(closed, nowMs), ranges, radar };
   });
   if (!plan || plan.skipped) return null;
   const slices = [];
-  for (const [i, [lo, hi, ids]] of plan.ranges.entries()) {
+  for (const [i, ids] of plan.ranges.entries()) {
     const name = `export-${i}`;
     let r = null;
     try {
       r = await step.do(name, STEP, async () => {
-        const s = await buildExportSlice(db, { nowMs, lastTs: plan.lastTs, openDay: plan.openDay, lo, hi, ids: ids ?? null, selected: plan.selected });
+        const s = await buildExportSlice(db, { nowMs, lastTs: plan.lastTs, openDay: plan.openDay, ids });
         const obj = await env.BUCKET.put(`${PART_PREFIX}${i}.json`, s.frag);
         return {
           n: s.n, bytes: obj?.size ?? 0, last_ts: s.last_ts, ts24: s.ts24,
@@ -747,7 +742,7 @@ export async function runExport(env, step, nowMs, safe, summary) {
       });
     } catch (e) {
       // Sin todas las partes no se publica un export incompleto
-      summary?.errors.push(`${name}: ${String(e?.message || e).slice(0, 200)}`);
+      summary.errors.push(`${name}: ${String(e?.message || e).slice(0, 200)}`);
       return null;
     }
     slices.push(r);
@@ -810,7 +805,7 @@ export async function runExport(env, step, nowMs, safe, summary) {
           return telegramScanText(`{"games":[${await o.text()}]}`, { now: nowIso, part: j, parts: k });
         })]);
       } catch (e) {
-        summary?.errors.push(`${name}: ${String(e?.message || e).slice(0, 200)}`);
+        summary.errors.push(`${name}: ${String(e?.message || e).slice(0, 200)}`);
         scanOk = false;
       }
     }
@@ -829,13 +824,13 @@ export async function runExport(env, step, nowMs, safe, summary) {
       await step.do(name, STEP, async () => {
         const o = await env.BUCKET.get(`${PART_PREFIX}${i}.json`);
         if (!o) throw new Error(`Falta la parte ${i} del export`);
-        const out = pickGames(await o.text(), list);
+        const out = pickGames(`{"games":[${await o.text()}]}`, list);
         if (out.n !== list.length) throw new Error(`La parte ${i} tiene ${out.n} de ${list.length} candidatos`);
         await env.BUCKET.put(`${TG_PART_PREFIX}${i}.json`, out.frag);
         return { n: out.n };
       });
     } catch (e) {
-      summary?.errors.push(`${name}: ${String(e?.message || e).slice(0, 200)}`);
+      summary.errors.push(`${name}: ${String(e?.message || e).slice(0, 200)}`);
       picked = false;
     }
   }
@@ -848,25 +843,12 @@ export async function runExport(env, step, nowMs, safe, summary) {
     }
     const candidates = Object.values(red.byPart).reduce((a, l) => a + l.length, 0);
     const text = `${JSON.stringify({
-      ...header, totals: red.counts, telegram: { counts: red.counts, total, candidates },
+      ...header, telegram: { counts: red.counts, total, candidates },
     }).slice(0, -1)},"games":[${frags.join(",")}]}`;
     const obj = await env.BUCKET.put(TELEGRAM_KEY, text, { httpMetadata: { contentType: "application/json; charset=utf-8" } });
     return { candidates, bytes: obj?.size ?? null, rows: red.rows };
   }) : null;
   join.telegram = tg;
-  if (summary && join) summary.steps.export = join;
+  summary.steps.export = join;
   return join;
-}
-
-// Del texto de la parte, sin parsearla. → { frag, n }
-export function pickGames(part, ids) {
-  const want = new Set(ids);
-  const text = `{"games":[${part}]}`;
-  const offs = gameOffsets(text), out = [];
-  for (let k = 0; k < offs.length - 1; k++) {
-    const p = offs[k] + 6;   // el id va justo después de {"id":
-    if (!want.has(Number(text.slice(p, text.indexOf(",", p))))) continue;
-    out.push(text.slice(offs[k], offs[k + 1]).replace(/,$/, ""));
-  }
-  return { frag: out.join(","), n: out.length };
 }

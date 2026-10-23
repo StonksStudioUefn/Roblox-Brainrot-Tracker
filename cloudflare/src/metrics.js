@@ -327,12 +327,8 @@ function momentumScore(m) {
 }
 
 const LOG30 = Math.log10(30);
-function emerging(m, sorts) {
-  return emergingCore(m, sorts, true);
-}
-
 // strict = false: candidato del radar (sin corte, visitas desconocidas y, si no crece, a mitad).
-function emergingCore(m, sorts, strict) {
+function emerging(m, sorts, strict) {
   const cfg = EMERGING;
   const visits = m.visits, typical = m.typical || 0;
   if (typical < cfg.min_players || (visits !== null && visits > cfg.max_visits)) return null;
@@ -341,10 +337,10 @@ function emergingCore(m, sorts, strict) {
   let sRoblox = 0;
   const rReasons = [];
   if (sorts) {
-    for (const k of cfg.roblox_sorts || []) {
+    for (const k of cfg.roblox_sorts) {
       if (sorts[k] != null) {
-        sRoblox = Math.max(sRoblox, ROBLOX_SORT_POINTS[k] ?? 10);
-        rReasons.push(ROBLOX_SORT_LABELS[k] || 'Roblox: ' + k);
+        sRoblox = Math.max(sRoblox, ROBLOX_SORT_POINTS[k]);
+        rReasons.push(ROBLOX_SORT_LABELS[k]);
       }
     }
   }
@@ -388,38 +384,38 @@ function emergingCore(m, sorts, strict) {
 
 // null si lleva 2 días sin datos.
 export function radarScore(g, { now } = {}) {
-  const ctx = radarCtx(now);
-  const d = g.d;
-  if (!d || !d.length || d[d.length - 1][0] < ctx.activeCut) return null;
+  const ctx = ctxFor(now);
+  if (!active(g, ctx)) return null;
   const m = gameMetrics(g, ctx);
   m.status = status(m);
-  const c = emergingCore(m, g.sorts, false);
+  const c = emerging(m, g.sorts, false);
   return [m.typical || 0, c ? c[0] : null];
 }
 
-let RADAR_CTX = null;
-function radarCtx(now) {
+const active = (g, ctx) => g.d?.length && g.d[g.d.length - 1][0] >= ctx.activeCut;
+
+let CTX = null;
+function ctxFor(now) {
   const nowUs = toUs(now);
-  if (RADAR_CTX && RADAR_CTX.nowUs === nowUs) return RADAR_CTX;
+  if (CTX && CTX.nowUs === nowUs) return CTX;
   const today = Math.floor(nowUs / DAY_US);
-  RADAR_CTX = {
+  CTX = {
     nowUs, nowMin: nowUs / MIN, today, todayIso: isoDate(today), scanStart: dayNum(SCAN_START),
     activeCut: isoDate(Math.floor((nowUs - ACTIVE_DAYS * DAY_US) / DAY_US)),
   };
-  return RADAR_CTX;
+  return CTX;
 }
 
 // Las mismas funciones que buildDashboard: los candidatos de Telegram no se separan de la web.
 export function quickMetrics(games, { now } = {}) {
-  const ctx = radarCtx(now);
+  const ctx = ctxFor(now);
   const out = [];
   for (const g of games || []) {
-    const d = g.d;
-    if (!d || !d.length || d[d.length - 1][0] < ctx.activeCut) continue;
+    if (!active(g, ctx)) continue;
     const m = gameMetrics(g, ctx);
     m.status = status(m);
     m.momentum = momentumScore(m);
-    out.push({ g, m, em: emerging(m, g.sorts) });
+    out.push({ g, m, em: emerging(m, g.sorts, true) });
   }
   return out;
 }
@@ -428,25 +424,9 @@ export const isRising = m => (m.status === 'hot' || m.status === 'up') && (m.tre
   && !(m.spike_now && (m.trend || 0) < 5);
 
 export function buildDashboard(exportData, { now } = {}) {
-  const nowUs = toUs(now);
-  const nowMs = Math.floor(nowUs / 1000);
-  const today = Math.floor(nowUs / DAY_US);
-  const ctx = {
-    nowUs, nowMin: nowUs / MIN, today, todayIso: isoDate(today),
-    scanStart: dayNum(SCAN_START),
-  };
-  const activeCut = isoDate(Math.floor((nowUs - ACTIVE_DAYS * DAY_US) / DAY_US));
-
-  const list = [];          // [{ g, m, horror, em, firstDay }]
-  for (const g of exportData.games || []) {
-    const d = g.d;
-    if (!d || !d.length || d[d.length - 1][0] < activeCut) continue;
-    const m = gameMetrics(g, ctx);
-    m.status = status(m);
-    m.momentum = momentumScore(m);
-    const em = emerging(m, g.sorts);
-    list.push({ g, m, horror: !!g.horror, em, firstDay: g.first_day || d[0][0] });
-  }
+  const nowMs = Math.floor(ctxFor(now).nowUs / 1000);
+  const list = quickMetrics(exportData.games, { now });
+  for (const x of list) x.firstDay = x.g.first_day || x.g.d[0][0];
 
   // Orden del CSV de Python (fecha y id): sus sort estables desempatan así.
   const byOrder = (a, b) => (a.firstDay < b.firstDay ? -1 : a.firstDay > b.firstDay ? 1 : a.g.id - b.g.id);
@@ -454,7 +434,7 @@ export function buildDashboard(exportData, { now } = {}) {
   const categories = {};
   const used = new Set();
   for (const [key, cfg] of Object.entries(CATEGORIES)) {
-    const belongs = x => cfg.classifier === 'all' || x.horror;
+    const belongs = x => cfg.classifier === 'all' || x.g.horror;
     const ids = list.filter(x => belongs(x) && (x.m.typical || 0) >= cfg.min_players);
     ids.sort((a, b) => ((b.m.typical || 0) - (a.m.typical || 0)) || byOrder(a, b));
     const emerg = list.filter(x => belongs(x) && x.em);
@@ -472,7 +452,7 @@ export function buildDashboard(exportData, { now } = {}) {
     }
     categories[key] = {
       label: cfg.label,
-      icon: cfg.icon ?? '🎮',
+      icon: cfg.icon,
       min_players: cfg.min_players,
       ids: ids.map(x => x.g.id),
       top: ids.slice(0, SELECTION.top).map(x => x.g.id),

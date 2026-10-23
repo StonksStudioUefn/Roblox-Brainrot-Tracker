@@ -134,7 +134,6 @@ function makeScanner(keys) {
     offsets.push(words.length);
     words.push(...list);
   }
-  if (words.some(w => !w)) return null;   // una palabra vacía: solo la vía de referencia
   const byFirst = new Map();
   words.forEach((w, i) => {
     const c = w.charCodeAt(0);
@@ -189,7 +188,7 @@ export function classifyHorror(game, { reference = false } = {}) {
 
   const pts = HORROR.points;
   const [title, tags] = cleanTitle(g.name || "");
-  const fast = !reference && NAME_SCAN && DESC_SCAN;
+  const fast = !reference;
   const name = title.toLowerCase();
   const nm = fast ? scanMatcher(NAME_SCAN, name) : refMatcher;
   let score = 0;

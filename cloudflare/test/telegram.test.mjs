@@ -8,8 +8,8 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  alertMessage, dailyReport, isBoom, isoWeek, num, pct, pyFixed, quickRows, runTelegram,
-  telegramCandidates, telegramReduce, telegramScanText, visibleLen, weeklyReport,
+  alertMessage, dailyReport, isBoom, isoWeek, num, pct, pickCandidates, pickGames, pyFixed, quickRows, runTelegram,
+  telegramCandidates, telegramScanText, visibleLen, weeklyReport,
 } from "../src/telegram.js";
 import { buildDashboard } from "../src/metrics.js";
 import { rng } from "./comun.mjs";
@@ -290,22 +290,24 @@ for (const now of ["2026-10-03T00:36:44Z", "2026-09-28T19:00:00Z"]) {
       assert.deepEqual(red.telegram.counts[key], { games, players, rising, falling });
     }
     assert.ok(red.games.length <= 80, `${red.games.length} candidatos`);
-    // 3. Repartido en 4 pasos sale exactamente lo mismo
+    // 3. Repartido en 4 pasos, como el Workflow, sale exactamente lo mismo
     const parts = [0, 1, 2, 3].map(part => JSON.parse(JSON.stringify(telegramScanText(text, { now, part, parts: 4 }))));
-    assert.deepEqual(telegramReduce(text, parts), red);
+    const { counts, ids } = pickCandidates(parts.flat());
+    assert.deepEqual(counts, red.telegram.counts);
+    assert.deepEqual(JSON.parse(`[${pickGames(text, [...ids]).frag}]`), red.games);
     // 4. Los mensajes (todo forzado, estado vacío) son idénticos con y sin reducir
-    const msgs = async exportData => {
+    const msgs = async (exportData, dash) => {
       const lines = [];
       for (const force of ["daily", "weekly"]) {
         await runTelegram({
           env: {}, now, force, exportData, getState: async () => ({}), setState: async () => {},
-          log: x => lines.push(x), ...(exportData === ex ? { buildDashboard: () => clone(full) } : {}),
+          log: x => lines.push(x), ...(dash ? { buildDashboard: () => clone(dash) } : {}),
         });
       }
       return lines.join("\n");
     };
     // b: buildDashboard con el export completo (sin reducir)
-    const a = await msgs(red), b = await msgs(ex);
+    const a = await msgs(red), b = await msgs({ ...ex, telegram: { counts: null } }, full);
     assert.equal(a, b);
     // 5. El atajo sin diario/semanal no cambia nada: con estado vacío y con todo avisado
     const boomed = Object.values(full.games).filter(isBoom);
