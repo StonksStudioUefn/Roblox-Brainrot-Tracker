@@ -1,31 +1,9 @@
 #!/usr/bin/env python3
-"""
-make_export.py — Construye un export.json con el formato de cloudflare/CONTRACT.md
-("Formato de /api/export") a partir de los ficheros locales de data/.
-
-Imita lo que hará db.js con D1 (con los datos tal como estaban en `now`, ver simdata.py):
-  · `d`: las últimas EXPORT_DAILY_DAYS filas de la serie diaria de cada juego
-    (con --daily-mode calendar, los últimos N días de calendario);
-  · `s`: las muestras desde (última muestra − EXPORT_SAMPLE_HOURS h), ambos
-    incluidos, como [ts_minutos_epoch, playing, visits|null];
-  · `peak`, `peak_date`, `days_tracked`, `first_day`, `favorites`, `up` y `down`
-    de toda la historia (con la misma semántica que analytics.game_metrics);
-  · filtro de juegos del contrato (muestras en 48 h + umbrales con el máximo de 24 h).
-
-Opciones para las pruebas de paridad:
-  --now ISO           instante simulado: se ignoran los datos posteriores
-  --daily-days N|all  días de serie diaria (por defecto 21)
-  --daily-mode rows|calendar  últimas N filas (por defecto) o últimos N días de calendario
-  --sample-hours N|all  horas de muestras (por defecto 48; all = 8 días, como Python)
-  --sample-cut last|now  corte de las muestras: última muestra − N h (por defecto) o now − N h
-  --no-filter         todos los juegos con serie diaria (sin el filtro del contrato)
-  --sorts FILE        respuesta de explore-api get-sorts → campo `sorts` (rank 1-based)
-  --out FILE          salida (por defecto stdout)
-  --data DIR          carpeta data/ (por defecto la del repo)
-"""
+"""export.json como lo hará db.js (CONTRACT.md, «Formato de /api/export»), desde data/."""
 
 import argparse
 import json
+import re
 import sys
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -38,9 +16,10 @@ import analytics  # noqa: E402
 import simdata  # noqa: E402
 from config import CATEGORIES, EMERGING  # noqa: E402
 
-EXPORT_DAILY_DAYS = 21
-EXPORT_SAMPLE_HOURS = 48
-PY_RAW_DAYS = 8          # export_dashboard: read_raw_since(INTRADAY_DAYS + 1)
+CONFIG_JS = (ROOT / "cloudflare/src/config.js").read_text(encoding="utf-8")
+EXPORT_DAILY_DAYS = int(re.search(r"export const EXPORT_DAILY_DAYS = (\d+)", CONFIG_JS)[1])
+EXPORT_SAMPLE_HOURS = int(re.search(r"export const EXPORT_SAMPLE_HOURS = (\d+)", CONFIG_JS)[1])
+PY_RAW_DAYS = 8
 
 
 def fmt_min(dt):
@@ -56,18 +35,15 @@ def main():
     ap.add_argument("--now")
     ap.add_argument("--daily-days", default=str(EXPORT_DAILY_DAYS))
     ap.add_argument("--sample-hours", default=str(EXPORT_SAMPLE_HOURS))
-    ap.add_argument("--daily-mode", choices=("rows", "calendar"), default="rows")
-    ap.add_argument("--sample-cut", choices=("last", "now"), default="last")
     ap.add_argument("--no-filter", action="store_true")
     ap.add_argument("--sorts")
     ap.add_argument("--out")
-    ap.add_argument("--data", default=str(ROOT / "data"))
     args = ap.parse_args()
-    data = Path(args.data)
+    data = ROOT / "data"
 
     if args.now:
         now = datetime.fromisoformat(args.now.replace("Z", "+00:00"))
-    else:   # 3 min después de la última muestra
+    else:
         last = max(simdata.load(data, datetime.now(timezone.utc))[1], key=lambda r: r["ts"])["ts"]
         now = datetime.fromisoformat(last.replace("Z", "+00:00")) + timedelta(minutes=3)
     today = now.date()
@@ -84,9 +60,9 @@ def main():
     samples_24h = sum(1 for t in sample_ts if t >= day_cut)
 
     if args.sample_hours == "all":
-        s_cut = (today - timedelta(days=PY_RAW_DAYS)).isoformat()      # como Python
+        s_cut = (today - timedelta(days=PY_RAW_DAYS)).isoformat()
     else:
-        ref = datetime.fromisoformat(last_sample.replace("Z", "+00:00")) if args.sample_cut == "last" else now
+        ref = datetime.fromisoformat(last_sample.replace("Z", "+00:00"))
         s_cut = fmt_min(ref - timedelta(hours=int(args.sample_hours)))
     act_cut = fmt_min(now - timedelta(hours=48))
     by_game = defaultdict(list)
@@ -101,7 +77,6 @@ def main():
                 sorts.setdefault(int(g["universeId"]), {}).setdefault(srt["sortId"], i + 1)
 
     n_days = None if args.daily_days == "all" else int(args.daily_days)
-    d_cut = (today - timedelta(days=n_days - 1)).isoformat() if n_days and args.daily_mode == "calendar" else None
     out = []
     for uid, rows in daily.items():
         rows.sort(key=lambda r: r["date"])
@@ -147,7 +122,7 @@ def main():
             "days_tracked": len(rows),
             "first_day": rows[0]["date"],
             "d": [[r["date"], r["median"], r["min"], r["max"], r["n"], r["visits"]]
-                  for r in (rows[-n_days:] if n_days and not d_cut else rows) if d_cut is None or r["date"] >= d_cut],
+                  for r in (rows[-n_days:] if n_days else rows)],
             "s": [[ts_minutes(t), p, v] for t, _, p, v in smp],
         })
     # db.js no garantiza ningún orden: se barajan por id para que el port no dependa de él

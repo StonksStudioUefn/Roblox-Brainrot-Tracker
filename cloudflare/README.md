@@ -52,7 +52,7 @@ node --import ./test/cf_loader.mjs test/filas.bench.mjs todos     # filas de D1 
 node --import ./test/cf_loader.mjs test/cierre.parity.mjs         # el cierre da lo mismo que las consultas de antes
 node --test test/sources.test.mjs                                 # getJson: una petición colgada acaba en su tope (20 s)
 node --test test/telegram.test.mjs                                # necesitan data/ en la raíz del repo (los datos del
-node test/metrics.parity.mjs --quick                              #  03/10: git archive 99d2ee9 data | tar -x) y python3
+node test/metrics.parity.mjs                                      #  03/10: git archive 99d2ee9 data | tar -x) y python3
 node test/horror.parity.mjs                                       # descarga de la Games API (o usa su caché)
 npx wrangler deploy --dry-run --outdir /tmp/dist                  # que empaqueta
 ```
