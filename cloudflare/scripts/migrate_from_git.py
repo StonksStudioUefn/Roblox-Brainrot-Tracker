@@ -47,6 +47,11 @@ class Source:
         p = self.root / path
         return p.read_text(encoding="utf-8") if p.exists() else None
 
+    def csv_rows(self, prefix, since=None):
+        for path in self.list(prefix):
+            if path.endswith(".csv") and (since is None or Path(path).stem >= since):
+                yield from csv.DictReader(io.StringIO(self.read(path) or ""))
+
 
 def _int(v):
     if v in (None, ""):
@@ -67,31 +72,21 @@ def build(src, now):
     cut = int(now.timestamp() // 60) - SAMPLE_HOURS * 60
 
     samples = []
-    for path in src.list("data/raw"):
-        if not path.endswith(".csv"):
+    for r in src.csv_rows("data/raw", (now.date() - timedelta(days=3)).isoformat()):
+        try:
+            ts = ts_minutes(r["ts"])
+        except (KeyError, ValueError):
             continue
-        day = Path(path).stem
-        if day < (now.date() - timedelta(days=3)).isoformat():
+        if ts < cut:
             continue
-        for r in csv.DictReader(io.StringIO(src.read(path) or "")):
-            try:
-                ts = ts_minutes(r["ts"])
-            except (KeyError, ValueError):
-                continue
-            if ts < cut:
-                continue
-            samples.append([int(r["universe_id"]), ts, _int(r["playing"]), _int(r.get("visits"))])
+        samples.append([int(r["universe_id"]), ts, _int(r["playing"]), _int(r.get("visits"))])
     recent = {s[0] for s in samples}
 
     # Votos de HOY a la fila de AYER: ahí los deja el Worker (mismos «últimos conocidos» que Python).
     daily = []
     last_day = None
     today_votes = {}
-    rows_csv = []
-    for path in src.list("data/daily"):
-        if not path.endswith(".csv"):
-            continue
-        rows_csv.extend(csv.DictReader(io.StringIO(src.read(path) or "")))
+    rows_csv = list(src.csv_rows("data/daily"))
     for r in rows_csv:
         if r.get("date") == today:
             today_votes[int(r["universe_id"])] = (_int(r["favorites"]), _int(r["up"]), _int(r["down"]))

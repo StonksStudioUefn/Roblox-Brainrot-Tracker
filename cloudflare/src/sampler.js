@@ -11,10 +11,10 @@ import {
 } from "./sources.js";
 import {
   DAY_MIN, addDays, applySelectionStmt, applyVotesStmt, backfillSamplesStmt, buildExportSlice, closeDayStmt, countTryStmt, exportHeader,
-  getState, getStates, idPart, idRanges, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs,
+  getState, getStates, idRanges, insertPlacesStmt, insertSamplesStmt, isoDate, isoMinute, lastSampleTs,
   lowSinceStmts, mergeHistStmt, migrateHist, minuteOf, openDayOf, pruneHistStmt, pruneOldStmts, pruneSamplesStmt, radarCloseStmt,
   radarCounts, radarCountsStaleStmt, radarDailyRows, radarIds, radarPlayers, radarPrepare, radarReadingsPart, radarSlice, radarStaleStmt,
-  retrackPlacesStmt, setState, setStateStmt, sortHitsStmt, trackedIds, unknownPlaces, untrackStmt, updateMetaStmt,
+  retrackPlacesStmt, setState, setStateStmt, sortHitsStmt, splitByPart, trackedIds, unknownPlaces, untrackStmt, updateMetaStmt,
   upsertDiscoveredStmt, written,
 } from "./db.js";
 import { classifyHorror } from "./horror.js";
@@ -36,6 +36,8 @@ const PART_PREFIX = "tmp/export/part-";
 const TG_PART_PREFIX = "tmp/export/tg-";
 const RUN_PREFIX = "tmp/run/";
 const RADAR_PREFIX = "radar/";
+const radarDay = d => `${RADAR_PREFIX}${d}/`;
+const radarKey = (d, ts) => `${radarDay(d)}${ts}.json`;
 const RADAR_KEEP_DAYS = 7;
 const RADAR_MIN_PLAYERS = 150;        // lecturas desde aquí (un bajón nocturno no deja huecos)
 // No seguidos sin lectura de Rolimons: Games API en radar-api (8 lotes ≈ 4,9 ms en frío)
@@ -88,7 +90,7 @@ export class Sampler extends WorkflowEntrypoint {
         summary.steps[name] = r?.stats ?? r ?? null;
         return r;
       } catch (e) {
-        summary.errors.push(`${name}: ${String(e?.message || e).slice(0, 200)}`);
+        summary.errors.push(errLine(name, e));
         return null;
       }
     };
@@ -158,7 +160,7 @@ export class Sampler extends WorkflowEntrypoint {
     };
     // Ficheros del radar de cada día, leídos una vez por ejecución para todas las partes de close-radar
     const radarDays = new Map();
-    const radarDay = async d => {
+    const radarFiles = async d => {
       if (!radarDays.has(d)) radarDays.set(d, radarPrepare(await radarTexts(env.BUCKET, d)));
       return radarDays.get(d);
     };
@@ -233,7 +235,8 @@ export class Sampler extends WorkflowEntrypoint {
     const places = init.daily.meta && want("rolimons");
     // El radar se lee cada RADAR_EVERY_HOURS (y siempre con el meta del día)
     const radarHour = new Date(ts * 60000).getUTCHours() % RADAR_EVERY_HOURS === 0;
-    if (reach("rolimons") && want("rolimons") && (places || radarHour)) {
+    const radarRun = want("rolimons") && (places || radarHour);
+    if (reach("rolimons") && radarRun) {
       if (inv.left < ROLIMONS_NEED) return await next("rolimons");
       await safe("rolimons", async () => {
         const budget = sub(ROLIMONS_NEED);
@@ -244,7 +247,7 @@ export class Sampler extends WorkflowEntrypoint {
         const [{ players, missing }, selIds] = await Promise.all([
           radarPlayers(db, all, today), getState(db, "sel_ids"),
         ]);
-        await env.BUCKET.put(`${RADAR_PREFIX}${today}/${ts}.json`, JSON.stringify(players));
+        await env.BUCKET.put(radarKey(today, ts), JSON.stringify(players));
         // Los seguidos ya tienen muestras: el radar les hace falta para el relleno del día en que entran
         const sel = new Set(selIds || []);
         const api = missing.filter(id => !sel.has(id)).slice(0, RADAR_API_MAX);
@@ -268,8 +271,7 @@ export class Sampler extends WorkflowEntrypoint {
     }
     if (places && reach("resolve")) {
       const todo = await step.do(`resolve-list-${seg}`, STEP, async () => {
-        const o = await env.BUCKET.get(`${tmp}resolve.json`);
-        return o ? await o.json() : [];
+        return r2Json(env.BUCKET, `${tmp}resolve.json`, []);
       });
       const parts = chunks(todo, RESOLVE_CHUNK);
       for (let i = startCursor("resolve"); i < parts.length; i++) {
@@ -294,8 +296,8 @@ export class Sampler extends WorkflowEntrypoint {
       const list = await step.do(`sample-list-${seg}`, STEP, async () => {
         const key = `${tmp}ids.json`;
         if (p.phase === "sample") {
-          const o = await env.BUCKET.get(key);
-          if (o) return await o.json();
+          const o = await r2Json(env.BUCKET, key);
+          if (o) return o;
         }
         const selected = await trackedIds(db, { selected: true });
         // Sin selección todavía (recién desplegado): todo el radar, como antes
@@ -322,14 +324,12 @@ export class Sampler extends WorkflowEntrypoint {
             const out = await sampleChunk(db, parts[i], { ts, today, meta, budget: sub(need), sel: selSet });
             // El cierre puede ir en otra ejecución: votos y radar a R2, ya repartidos como sus partes
             if (out.votes) {
-              const r = Array.from({ length: RADAR_CLOSE_PARTS }, () => ({}));
-              for (const id in out.radar) r[idPart(id, RADAR_CLOSE_PARTS)][id] = out.radar[id];
-              await env.BUCKET.put(`${tmp}votes-${i}.json`, JSON.stringify({ v: out.votes, r }));
+              await env.BUCKET.put(`${tmp}votes-${i}.json`, JSON.stringify({ v: out.votes, r: splitByPart(out.radar, RADAR_CLOSE_PARTS) }));
             }
             return { stats: out.stats };
           });
         } catch (e) {
-          summary.errors.push(`${name}: ${String(e?.message || e).slice(0, 200)}`);
+          summary.errors.push(errLine(name, e));
           agg.lost = (agg.lost || 0) + 1;
         }
         for (const k of Object.keys(agg)) if (k !== "steps" && k !== "lost") agg[k] += r?.stats?.[k] || 0;
@@ -345,23 +345,21 @@ export class Sampler extends WorkflowEntrypoint {
     }
 
     // Tras las muestras: si la Games API corta por ráfaga (429), se pierde el radar, no las muestras
-    if (reach("radar-api") && want("rolimons") && (places || radarHour)) {
+    if (reach("radar-api") && radarRun) {
       const todo = await step.do(`radar-api-list-${seg}`, STEP, async () => {
-        const o = await env.BUCKET.get(`${tmp}radar-api.json`);
-        return o ? await o.json() : [];
+        return r2Json(env.BUCKET, `${tmp}radar-api.json`, []);
       });
       if (todo.length) {
-        const need = Math.ceil(todo.length / GAMES_BATCH) + 4;
+        const batches = Math.ceil(todo.length / GAMES_BATCH);
+        const need = batches + 4;
         if (inv.left < need) return await next("radar-api");
         await safe("radar-api", async () => {
           const budget = sub(need);
           const games = await fetchGames(budget, todo);
-          const batches = Math.ceil(todo.length / GAMES_BATCH);
           if (games.failed === batches) throw new Error(`Games API: ${batches}/${batches} lotes sin respuesta`);
           // Leer y reescribir el fichero de Rolimons lo deja igual si el paso se repite
-          const key = `${RADAR_PREFIX}${today}/${ts}.json`;
-          const obj = await env.BUCKET.get(key);
-          const players = obj ? await obj.json() : {};
+          const key = radarKey(today, ts);
+          const players = await r2Json(env.BUCKET, key, {});
           let added = 0;
           for (const g of games.data) {
             if ((g.playing || 0) < RADAR_MIN_PLAYERS) continue;
@@ -383,9 +381,8 @@ export class Sampler extends WorkflowEntrypoint {
         if (daily.meta) {
           const listed = await env.BUCKET.list({ prefix: `${tmp}votes-` });
           for (const o of listed.objects) {
-            const obj = await env.BUCKET.get(o.key);
-            if (!obj) continue;
-            const part = await obj.json();
+            const part = await r2Json(env.BUCKET, o.key);
+            if (!part) continue;
             Object.assign(votes, part.v);
             part.r.forEach((m, k) => Object.assign(metaParts[k], m));
           }
@@ -415,9 +412,9 @@ export class Sampler extends WorkflowEntrypoint {
       for (const d of plan?.dates || []) {
         for (let k = 0; ok && k < RADAR_CLOSE_PARTS; k++) {
           ok = !!await safe(`close-radar-${d}-${k}`, async () => {
-            const files = await radarDay(d);
+            const files = await radarFiles(d);
             let rm = null;
-            if (d === yesterday && plan.meta) rm = await (await env.BUCKET.get(`${tmp}close-meta-${k}.json`))?.json() ?? null;
+            if (d === yesterday && plan.meta) rm = await r2Json(env.BUCKET, `${tmp}close-meta-${k}.json`);
             const rows = radarDailyRows(radarReadingsPart(files, k, RADAR_CLOSE_PARTS), rm, k, RADAR_CLOSE_PARTS);
             const res = rows.length ? await radarCloseStmt(db, d, rows).run() : null;
             return { files: files.length, rows: rows.length, written: written(res) };
@@ -451,7 +448,7 @@ export class Sampler extends WorkflowEntrypoint {
           setStateStmt(db, "maint_day", today),
         ];
         const res = await db.batch(stmts);
-        const old = `${RADAR_PREFIX}${addDays(today, -RADAR_KEEP_DAYS)}/`;
+        const old = radarDay(addDays(today, -RADAR_KEEP_DAYS));
         const listed = await env.BUCKET.list({ prefix: RADAR_PREFIX, limit: 1000 });
         const keys = listed.objects.map(o => o.key).filter(k => k < old);
         if (keys.length) await env.BUCKET.delete(keys);
@@ -461,10 +458,9 @@ export class Sampler extends WorkflowEntrypoint {
           .filter(o => !o.key.startsWith(tmp) && o.uploaded && new Date(o.uploaded).getTime() < (ts - DAY_MIN) * 60000)
           .map(o => o.key);
         if (stale.length) await env.BUCKET.delete(stale);
-        const oldRows = (res[3]?.meta?.changes ?? 0) + (res[4]?.meta?.changes ?? 0);
+        const ch = i => res[i]?.meta?.changes ?? 0;
         return {
-          pruned: res[0]?.meta?.changes ?? 0, untracked: res[1]?.meta?.changes ?? 0, old_rows: oldRows,
-          old_hist: res[5]?.meta?.changes ?? 0, radar_files: keys.length, tmp_files: stale.length, written: written(res),
+          pruned: ch(0), untracked: ch(1), old_rows: ch(3) + ch(4), old_hist: ch(5), radar_files: keys.length, tmp_files: stale.length, written: written(res),
         };
       });
     }
@@ -502,6 +498,9 @@ export class Sampler extends WorkflowEntrypoint {
     return compact(summary);
   }
 }
+
+const errLine = (name, e) => `${name}: ${String(e?.message || e).slice(0, 200)}`;
+const r2Json = async (bucket, key, empty = null) => { const o = await bucket.get(key); return o ? o.json() : empty; };
 
 // Los parámetros de un Workflow tienen tope
 function compact(summary) {
@@ -543,7 +542,7 @@ async function sampleChunk(db, ids, { ts, today, meta, budget, sel = null }) {
     fetchGames(budget, ids),
     voteIds.length ? fetchVotes(budget, voteIds) : null,
   ]);
-  const batches = Math.ceil(ids.length / 50);
+  const batches = Math.ceil(ids.length / GAMES_BATCH);
   if (games.failed * 2 > batches || (batches === 1 && games.failed)) {
     throw new Error(`Games API: ${games.failed}/${batches} lotes sin respuesta`);
   }
@@ -609,7 +608,7 @@ export function processGames(ids, games, vts, meta, sel = null) {
 }
 
 async function radarTexts(bucket, date) {
-  const listed = await bucket.list({ prefix: `${RADAR_PREFIX}${date}/` });
+  const listed = await bucket.list({ prefix: radarDay(date) });
   const texts = await Promise.all(listed.objects.map(async o => (await bucket.get(o.key))?.text() ?? null));
   return texts.filter(t => t != null);
 }
@@ -664,7 +663,7 @@ async function runSelect(env, step, nowMs, today, safe, summary) {
       }));
     } catch (e) {
       // Sin todos los trozos no se cambia la selección (se queda la de ayer)
-      summary.errors.push(`select-${i}: ${String(e?.message || e).slice(0, 200)}`);
+      summary.errors.push(errLine(`select-${i}`, e));
       return null;
     }
   }
@@ -698,7 +697,7 @@ export async function backfillFromRadar(env, ids, nowTs, { maxGames = BACKFILL_M
   const from = nowTs - BACKFILL_HOURS * 60;
   const files = [];
   for (let d = isoDate(from); d <= isoDate(nowTs); d = addDays(d, 1)) {
-    const listed = await env.BUCKET.list({ prefix: `${RADAR_PREFIX}${d}/` });
+    const listed = await env.BUCKET.list({ prefix: radarDay(d) });
     for (const o of listed.objects) {
       const ts = Number(o.key.slice(o.key.lastIndexOf("/") + 1, -".json".length));
       if (ts > from && ts <= nowTs) files.push([ts, o.key]);
@@ -742,7 +741,7 @@ export async function runExport(env, step, nowMs, safe, summary) {
       });
     } catch (e) {
       // Sin todas las partes no se publica un export incompleto
-      summary.errors.push(`${name}: ${String(e?.message || e).slice(0, 200)}`);
+      summary.errors.push(errLine(name, e));
       return null;
     }
     slices.push(r);
@@ -751,16 +750,18 @@ export async function runExport(env, step, nowMs, safe, summary) {
   const header = exportHeader({ nowMs, lastTs, ts24: slices.flatMap(s => s.ts24), radar: plan.radar });
   const total = slices.reduce((a, s) => a + s.n, 0);
 
+  const part = async i => {
+    const o = await env.BUCKET.get(`${PART_PREFIX}${i}.json`);
+    if (!o) throw new Error(`Falta la parte ${i} del export`);
+    return o;
+  };
   const join = await safe("export-join", async () => {
     const enc = new TextEncoder();
     const head = enc.encode(`${JSON.stringify(header).slice(0, -1)},"games":[`);
     const comma = enc.encode(","), tail = enc.encode("]}");
     const objs = [];
     for (let i = 0; i < slices.length; i++) {
-      if (!slices[i].bytes) continue;
-      const o = await env.BUCKET.get(`${PART_PREFIX}${i}.json`);
-      if (!o) throw new Error(`Falta la parte ${i} del export`);
-      objs.push(o);
+      if (slices[i].bytes) objs.push(await part(i));
     }
     const size = head.length + tail.length + objs.reduce((a, o) => a + o.size, 0) + Math.max(0, objs.length - 1);
     const { readable, writable } = new FixedLengthStream(size);
@@ -800,12 +801,10 @@ export async function runExport(env, step, nowMs, safe, summary) {
       const name = `tg-scan-${i}-${j}`;
       try {
         rowParts.push([i, await step.do(name, STEP, async () => {
-          const o = await env.BUCKET.get(`${PART_PREFIX}${i}.json`);
-          if (!o) throw new Error(`Falta la parte ${i} del export`);
-          return telegramScanText(`{"games":[${await o.text()}]}`, { now: nowIso, part: j, parts: k });
+          return telegramScanText(`{"games":[${await (await part(i)).text()}]}`, { now: nowIso, part: j, parts: k });
         })]);
       } catch (e) {
-        summary.errors.push(`${name}: ${String(e?.message || e).slice(0, 200)}`);
+        summary.errors.push(errLine(name, e));
         scanOk = false;
       }
     }
@@ -822,15 +821,13 @@ export async function runExport(env, step, nowMs, safe, summary) {
     const name = `tg-pick-${i}`;
     try {
       await step.do(name, STEP, async () => {
-        const o = await env.BUCKET.get(`${PART_PREFIX}${i}.json`);
-        if (!o) throw new Error(`Falta la parte ${i} del export`);
-        const out = pickGames(`{"games":[${await o.text()}]}`, list);
+        const out = pickGames(`{"games":[${await (await part(i)).text()}]}`, list);
         if (out.n !== list.length) throw new Error(`La parte ${i} tiene ${out.n} de ${list.length} candidatos`);
         await env.BUCKET.put(`${TG_PART_PREFIX}${i}.json`, out.frag);
         return { n: out.n };
       });
     } catch (e) {
-      summary.errors.push(`${name}: ${String(e?.message || e).slice(0, 200)}`);
+      summary.errors.push(errLine(name, e));
       picked = false;
     }
   }

@@ -5,7 +5,7 @@ import { cpuMs as cpu, enFrio, fmtMs, rng } from "./comun.mjs";
 
 if (process.argv[2] === "--child") {
   const mode = process.argv[3];
-  const { idPart, radarDailyRows, radarPrepare, radarReadingsPart } = await import("../src/db.js");
+  const { radarDailyRows, radarPrepare, radarReadingsPart, splitByPart } = await import("../src/db.js");
   const { RADAR_CLOSE_PARTS } = await import("../src/sampler.js");
   const R = rng(7);
   const ids = Array.from({ length: 2800 }, () => 1_000_000 + Math.floor(R() * 1e10));
@@ -13,15 +13,10 @@ if (process.argv[2] === "--child") {
   const radarBytes = radarFiles.map(t => new TextEncoder().encode(t));   // como llegan de R2
   const prepared = mode === "close-radar-sig" ? radarPrepare(radarFiles) : null;
   const sel = ids.slice(0, 242);
-  const split = r => {
-    const out = Array.from({ length: RADAR_CLOSE_PARTS }, () => ({}));
-    for (const id in r) out[idPart(id, RADAR_CLOSE_PARTS)][id] = r[id];
-    return out;
-  };
   const voteFiles = Array.from({ length: 56 }, (_, i) => {
     const v = Object.fromEntries(sel.slice(i * 5, i * 5 + 5).map(id => [id, [1e5, 5e4, 1e3]]));
     const r = Object.fromEntries(ids.slice(242 + i * 46, 242 + (i + 1) * 46).map(id => [id, [400, 1e7]]));
-    return JSON.stringify({ v, r: split(r) });
+    return JSON.stringify({ v, r: splitByPart(r, RADAR_CLOSE_PARTS) });
   });
   const metaParts = Array.from({ length: RADAR_CLOSE_PARTS }, () => ({}));
   for (const t of voteFiles) JSON.parse(t).r.forEach((m, k) => Object.assign(metaParts[k], m));

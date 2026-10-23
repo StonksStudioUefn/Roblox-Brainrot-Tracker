@@ -3,7 +3,7 @@ import metricsSrc from "./metrics.js" with { type: "text" };
 import horrorSrc from "./horror.js" with { type: "text" };
 
 import { dropExportCacheStmt, getState, getStates, history, importStmt, minuteOf, openDayOf, radarCounts, rebuildHistStmts, written } from "./db.js";
-import { chunks, iconsUrl, thumbsUrl, URLS, UA } from "./sources.js";
+import { chunks, gamesUrl, iconsUrl, thumbsUrl, UA } from "./sources.js";
 import { espacioD1, withApp } from "./stonks.js";
 import { backfillFromRadar } from "./sampler.js";
 
@@ -79,8 +79,12 @@ function text(body, status = 200) {
   return new Response(body, { status, headers: { "content-type": TYPES.text } });
 }
 
+const isId = s => /^\d{1,20}$/.test(s || "");
+const shotOf = t => (t?.thumbnails || []).find(s => s.state === "Completed")?.imageUrl ?? null;
+const done = i => (i?.state === "Completed" ? i.imageUrl : null);
+
 function parseIds(url, max) {
-  const ids = [...new Set((url.searchParams.get("ids") || "").split(",").map(s => s.trim()).filter(s => /^\d{1,20}$/.test(s)))];
+  const ids = [...new Set((url.searchParams.get("ids") || "").split(",").map(s => s.trim()).filter(isId))];
   return ids.slice(0, max);
 }
 
@@ -111,7 +115,7 @@ async function exportFile(req, env) {
 }
 
 async function historyRoute(env, id) {
-  if (!/^\d{1,20}$/.test(id || "")) return json({ error: "id no válido" }, 400);
+  if (!isId(id)) return json({ error: "id no válido" }, 400);
   const nowMs = Date.now();
   const openDay = openDayOf(await getState(env.DB, "closed_day"), nowMs);
   const out = await history(env.DB, Number(id), { nowMs, openDay });
@@ -123,7 +127,7 @@ async function live(url) {
   const ids = parseIds(url, MAX_LIVE_IDS);
   if (!ids.length) return json({ error: "Faltan ids" }, 400);
   const [games, icons] = await Promise.all([
-    Promise.all(chunks(ids, 50).map(c => getJson(`${URLS.games}?universeIds=${c.join(",")}`, 30))),
+    Promise.all(chunks(ids, 50).map(c => getJson(gamesUrl(c), 30))),
     Promise.all(chunks(ids, 100).map(c => getJson(iconsUrl(c), 21600).catch(() => ({ data: [] })))),
   ]);
   const out = {};
@@ -131,9 +135,7 @@ async function live(url) {
     for (const g of page.data || []) out[g.id] = { playing: g.playing, visits: g.visits, updated: g.updated };
   }
   for (const page of icons) {
-    for (const i of page.data || []) {
-      if (i.state === "Completed") (out[i.targetId] ||= {}).icon = i.imageUrl;
-    }
+    for (const i of page.data || []) if (done(i)) (out[i.targetId] ||= {}).icon = done(i);
   }
   return json({ ts: new Date().toISOString(), games: out }, 200, 20);
 }
@@ -143,28 +145,23 @@ async function thumbs(url) {
   if (!ids.length) return json({ error: "Faltan ids" }, 400);
   const data = await getJson(thumbsUrl(ids), 21600);
   const out = {};
-  for (const t of data.data || []) {
-    const shot = (t.thumbnails || []).find(s => s.state === "Completed");
-    if (shot) out[t.universeId] = shot.imageUrl;
-  }
+  for (const t of data.data || []) if (shotOf(t)) out[t.universeId] = shotOf(t);
   return json(out, 200, 3600);
 }
 
 async function game(id) {
-  if (!/^\d{1,20}$/.test(id || "")) return json({ error: "id no válido" }, 400);
+  if (!isId(id)) return json({ error: "id no válido" }, 400);
   const [info, shot, icon] = await Promise.all([
-    getJson(`${URLS.games}?universeIds=${id}`, 30),
+    getJson(gamesUrl([id]), 30),
     getJson(thumbsUrl([id]), 21600).catch(() => ({ data: [] })),
     getJson(iconsUrl([id], "256x256"), 21600).catch(() => ({ data: [] })),
   ]);
   const g = (info.data || [])[0];
   if (!g) return json({ error: "No encontrado" }, 404);
-  const thumb = ((shot.data || [])[0]?.thumbnails || []).find(s => s.state === "Completed");
-  const ic = (icon.data || [])[0];
   return json({
     id: g.id, name: g.name, description: g.description, playing: g.playing, visits: g.visits,
     favorites: g.favoritedCount, updated: g.updated, max_players: g.maxPlayers,
-    thumb: thumb?.imageUrl || null, icon: ic?.state === "Completed" ? ic.imageUrl : null,
+    thumb: shotOf((shot.data || [])[0]) || null, icon: done((icon.data || [])[0]),
     ts: new Date().toISOString(),
   }, 200, 30);
 }
@@ -201,13 +198,14 @@ async function admin(req, env, url) {
     if (action === "run") {
       const body = await readBody(req);
       const params = {};
-      if (Array.isArray(body.daily)) params.daily = body.daily.map(String);
+      const strs = v => (Array.isArray(v) ? v.map(String) : null);
+      if (strs(body.daily)) params.daily = strs(body.daily);
       else if (body.daily) params.daily = true;
       if (body.select) params.select = true;
-      if (Array.isArray(body.skip)) params.skip = body.skip.map(String);
+      if (strs(body.skip)) params.skip = strs(body.skip);
       if (body.telegram_force) params.telegram_force = String(body.telegram_force);
       if (body.now) params.now = new Date(body.now).toISOString();
-      if (Array.isArray(body.only)) params.only = body.only.map(String);
+      if (strs(body.only)) params.only = strs(body.only);
       const id = `manual-${stamp()}`;
       const inst = await env.SAMPLER.create({ id, params });
       return json({ id: inst.id, params });

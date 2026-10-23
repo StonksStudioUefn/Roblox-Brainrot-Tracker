@@ -31,8 +31,8 @@ export const SELECTION = {
 
 // Con min_players = TRACK_MIN_PLAYERS cada pestaña lista todos sus juegos seguidos.
 export const CATEGORIES = {
-  general: { label: "General", icon: "🎮", min_players: 300, classifier: "all" },
-  horror: { label: "Horror", icon: "👻", min_players: 300, classifier: "horror" },
+  general: { label: "General", icon: "🎮", min_players: TRACK_MIN_PLAYERS, classifier: "all" },
+  horror: { label: "Horror", icon: "👻", min_players: TRACK_MIN_PLAYERS, classifier: "horror" },
 };
 
 export const HORROR = {

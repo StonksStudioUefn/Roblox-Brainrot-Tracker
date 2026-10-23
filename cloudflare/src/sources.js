@@ -204,6 +204,8 @@ export async function resolvePlaces(budget, placeIds) {
   });
 }
 
+export const gamesUrl = ids => `${URLS.games}?universeIds=${ids.join(",")}`;
+
 export function iconsUrl(ids, size = "150x150") {
   return `${URLS.icons}?universeIds=${ids.join(",")}&size=${size}&format=Webp&returnPolicy=PlaceHolder`;
 }

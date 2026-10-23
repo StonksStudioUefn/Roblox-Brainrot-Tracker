@@ -308,7 +308,7 @@ la cambian). Error: «Too many subrequests by single Worker invocation».
 
 Solución (`sampler.js`):
 - **Cuenta común por invocación.** Cada pasada lleva un `Budget(INVOCATION_BUDGET = 46)` para toda la
-  invocación. Cada paso coge su parte con `SubBudget`.
+  invocación. Cada paso coge su parte con un `Budget(n, inv)` que descuenta también del de la invocación.
 - **Pasada en varias ejecuciones encadenadas.** Antes de un paso con red se comprueba si caben sus
   peticiones. Si no caben, se crea la siguiente ejecución (`<id>-s<N>`) con `phase` y `cursor`, y la
   actual termina. Las fases son discover → search → rolimons → resolve → sample → radar-api → finalize.

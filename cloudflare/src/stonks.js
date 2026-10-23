@@ -1,5 +1,6 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { DATA_RETENTION_DAYS } from "./config.js";
+import { DATA_RETENTION_DAYS, TELEGRAM } from "./config.js";
+import { addDays, getState, isoDate, minuteOf, setState } from "./db.js";
 
 export const APP = "roblox-tracker";
 const PREFIX = `${APP}/`;
@@ -36,15 +37,11 @@ const MUESTRA_FILAS = 256;   // filas para estimar lo que ocupa una fila de una 
 
 // Desglose 1 vez al día: contar recorre ~60.000 filas (2 M en un año) y el tope es 5 M al día.
 export async function espacioD1(db, { exacto = false } = {}) {
-  const st = await db.prepare("SELECT value FROM state WHERE key = ?1").bind(ESPACIO_KEY).first().catch(() => null);
-  let cache = null;
-  try { cache = st?.value ? JSON.parse(st.value) : null; } catch { /* se rehace */ }
+  const cache = await getState(db, ESPACIO_KEY).catch(() => null);
   let medida = !exacto && cache?.tablas && Date.now() - Date.parse(cache.medido) < ESPACIO_VIDA_MS ? cache : null;
   if (!medida) {
     medida = { medido: new Date().toISOString(), tablas: await medirTablas(db, exacto) };
-    await db.prepare(
-      `INSERT INTO state (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
-    ).bind(ESPACIO_KEY, JSON.stringify(medida)).run().catch(() => null);
+    await setState(db, ESPACIO_KEY, medida).catch(() => null);
   }
   const size = Number((await db.prepare("SELECT 1").run())?.meta?.size_after) || 0;
   return {
@@ -83,8 +80,8 @@ async function medirTablas(db, exacto) {
 
 // Por clave primaria juego a juego (~3 filas cada uno), nunca recorriendo daily/sort_hits/samples.
 async function estimarFilas(db, names) {
-  const today = new Date().toISOString().slice(0, 10);
-  const dia = n => new Date(Date.parse(`${today}T00:00:00Z`) + n * 86400_000).toISOString().slice(0, 10);
+  const today = isoDate(minuteOf(Date.now()));
+  const dia = n => addDays(today, n);
   const out = {};
   const stmts = [];
   if (names.includes("daily") && names.includes("hist")) stmts.push(["daily", db.prepare(
@@ -123,7 +120,7 @@ async function estimarFilas(db, names) {
 
 const DIAS = { "01": "ene", "02": "feb", "03": "mar", "04": "abr", "05": "may", "06": "jun", "07": "jul", "08": "ago", "09": "sept", "10": "oct", "11": "nov", "12": "dic" };
 const fecha = d => `${Number(d.slice(8, 10))} ${DIAS[d.slice(5, 7)] || d.slice(5, 7)} ${d.slice(0, 4)}`;
-const WEB = "https://robloxtracker.stonksstudio.com/";
+const WEB = TELEGRAM.dashboard_url;
 
 const FIJOS = {
   "site/": { nombre: "Web del tracker", detalle: "dashboard.html", enlace: WEB },

@@ -38,7 +38,12 @@ function pyRound(x, nd) {
   return Number(x.toFixed(nd));                 // toFixed usa el valor exacto
 }
 
-const fmt0 = x => String(pyRound0(x));
+// f"{x:.{d}f}" de Python: toFixed de JS va al mayor en el empate; Python, al par.
+export function pyFixed(x, d) {
+  if (Object.is(x, -0)) return '-' + (0).toFixed(d);
+  const s = pyRound(x, d).toFixed(d);
+  return x < 0 && s[0] !== '-' ? '-' + s : s;
+}
 
 const clip = (x, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, x));
 
@@ -347,18 +352,18 @@ function emerging(m, sorts, strict) {
   const growing = (t !== null && t > 0) || (g24 !== null && g24 > 0) || (g7 !== null && g7 > 0)
     || (sRoblox > 0 && t === null && g24 === null && g7 === null);
   const fresh = m.fresh;
-  const weak = (!growing && !fresh) || m.status === 'down' || m.status === 'down2';
+  const weak = (!growing && !fresh) || isDown(m.status);
   if (weak && strict) return null;
 
   const reasons = rReasons;   // las de Roblox, las primeras: así no las corta el límite de 4
   const vg = m.visits_growth || 0;
   const sVisits = 30 * clip(vg / 12);
-  if (vg >= 3) reasons.push(`visitas +${fmt0(vg)}%/día`);
+  if (vg >= 3) reasons.push(`visitas +${pyFixed(vg, 0)}%/día`);
 
   const growth = Math.max(t || 0, (g24 || 0) / 2, (g7 || 0) / 5);
   const sGrowth = 25 * clip(growth / 20);
-  if (t && t >= 5) reasons.push(`tendencia +${fmt0(t)}%/día`);
-  else if (g24 && g24 >= 15) reasons.push(`+${fmt0(g24)}% en 24h`);
+  if (t && t >= 5) reasons.push(`tendencia +${pyFixed(t, 0)}%/día`);
+  else if (g24 && g24 >= 15) reasons.push(`+${pyFixed(g24, 0)}% en 24h`);
 
   const age = m.age_days;
   let sYoung = age !== null ? 20 * clip(1 - age / cfg.max_age_days) : 0;
@@ -371,7 +376,7 @@ function emerging(m, sorts, strict) {
   const sSize = 15 * clip(Math.log10(typical / cfg.min_players) / LOG30);
   const lr = m.like_ratio;
   const sLike = 10 * clip(((lr || 0) - 75) / 20);
-  if (lr && lr >= 90) reasons.push(`${fmt0(lr)}% likes`);
+  if (lr && lr >= 90) reasons.push(`${pyFixed(lr, 0)}% likes`);
   if (visits !== null && visits < 2_000_000) reasons.push('menos de 2M visitas');
 
   // sRoblox va aparte: con 0 la suma es la de Python.
@@ -420,7 +425,11 @@ export function quickMetrics(games, { now } = {}) {
   return out;
 }
 
-export const isRising = m => (m.status === 'hot' || m.status === 'up') && (m.trend === null || m.trend > 0)
+const isUp = s => s === 'hot' || s === 'up';
+export const isDown = s => s === 'down' || s === 'down2';
+export const inCategory = (cfg, horror) => cfg.classifier === 'all' || !!horror;
+
+export const isRising = m => isUp(m.status) && (m.trend === null || m.trend > 0)
   && !(m.spike_now && (m.trend || 0) < 5);
 
 export function buildDashboard(exportData, { now } = {}) {
@@ -434,7 +443,7 @@ export function buildDashboard(exportData, { now } = {}) {
   const categories = {};
   const used = new Set();
   for (const [key, cfg] of Object.entries(CATEGORIES)) {
-    const belongs = x => cfg.classifier === 'all' || x.g.horror;
+    const belongs = x => inCategory(cfg, x.g.horror);
     const ids = list.filter(x => belongs(x) && (x.m.typical || 0) >= cfg.min_players);
     ids.sort((a, b) => ((b.m.typical || 0) - (a.m.typical || 0)) || byOrder(a, b));
     const emerg = list.filter(x => belongs(x) && x.em);
@@ -445,8 +454,8 @@ export function buildDashboard(exportData, { now } = {}) {
     let players = 0, up = 0, down = 0, events = 0, new7 = 0;
     for (const { m } of ids) {
       players += m.typical || 0;
-      if (m.status === 'hot' || m.status === 'up') up++;
-      if (m.status === 'down' || m.status === 'down2') down++;
+      if (isUp(m.status)) up++;
+      if (isDown(m.status)) down++;
       if (m.spike_now) events++;
       if (m.new_week) new7++;
     }

@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 rm -rf test/.build && mkdir -p test/.build/src
-cp -r src/. test/.build/src/
+test/sync.sh
 cp schema.sql test/.build/
 # Sin la ruta del dominio (en local no hace falta)
 awk '/^routes = \[/{skip=1} skip&&/^\]/{skip=0;next} !skip' wrangler.toml > test/.build/wrangler.toml

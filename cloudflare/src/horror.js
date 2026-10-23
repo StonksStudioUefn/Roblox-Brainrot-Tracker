@@ -10,13 +10,14 @@ const EMOJI_SRC =
 const EMOJI_RE_G = new RegExp(EMOJI_SRC, "gu");
 const TAG_RE_G = /[\[\(【]([^\]\)】]{1,30})[\]\)】]/gu;
 // Espacios de Python (str.isspace / `\s` de re con patrones str)
-const PY_WS = "\\t\\n\\v\\f\\r\\x1c-\\x20\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
-const PY_WS_RUN_G = new RegExp(`[${PY_WS}]+`, "g");
 const PY_WS_SET = new Set(
   [9, 10, 11, 12, 13, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x85, 0xa0, 0x1680,
     0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a,
     0x2028, 0x2029, 0x202f, 0x205f, 0x3000].map(c => String.fromCharCode(c)),
 );
+const PY_WS_RUN_G = new RegExp(`[${[...PY_WS_SET].join("")}]+`, "g");
+const tidy = s => pyStrip(s.replace(PY_WS_RUN_G, " "), " -|:·•!");
+const WORD_START = "(?<![a-z0-9])";
 
 const STRIP_SETS = new Map();
 export function pyStrip(s, chars) {
@@ -57,7 +58,7 @@ const NEEDS_FULL_TITLE = /[\[\(\u0080-\uffff]/;
 export function cleanTitle(name) {
   name = name || "";
   if (!NEEDS_FULL_TITLE.test(name)) {
-    const title = pyStrip(name.replace(PY_WS_RUN_G, " "), " -|:·•!");
+    const title = tidy(name);
     return [title || pyStrip(name) || name, []];
   }
   const tags = [];
@@ -67,7 +68,7 @@ export function cleanTitle(name) {
   }
   let title = name.replace(TAG_RE_G, " ");
   title = title.replace(EMOJI_RE_G, " ");
-  title = pyStrip(title.replace(PY_WS_RUN_G, " "), " -|:·•!");
+  title = tidy(title);
   if (!title) title = pyStrip(name.replace(EMOJI_RE_G, "")) || name;
   return [title, tags.slice(0, 3)];
 }
@@ -78,7 +79,7 @@ function escapeRe(w) {
 
 /** Igual que `_kw_regex`: inicio de palabra obligatorio, el final puede seguir. */
 function kwList(words) {
-  return words.map(w => ({ w, rx: new RegExp("(?<![a-z0-9])" + escapeRe(w)) }));
+  return words.map(w => ({ w, rx: new RegExp(WORD_START + escapeRe(w)) }));
 }
 
 // Se compilan solo si se usan: en frío cuenta cada ms de arranque.
@@ -140,7 +141,7 @@ function makeScanner(keys) {
     if (!byFirst.has(c)) byFirst.set(c, []);
     byFirst.get(c).push(i);
   });
-  const finder = new RegExp("(?<![a-z0-9])" + trieSource([...new Set(words)]), "g");
+  const finder = new RegExp(WORD_START + trieSource([...new Set(words)]), "g");
   return { keys, lists, words, offsets, byFirst, finder, marks: new Uint8Array(words.length) };
 }
 

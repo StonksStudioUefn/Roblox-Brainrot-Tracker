@@ -130,7 +130,7 @@ el esquema no se incrusta y se aplica con `wrangler d1 execute`.)
 **50 peticiones externas por invocación.** Comprobado en producción: los pasos de una instancia del
 Workflow comparten invocación, y ni `step.sleep` ni los reintentos reinician la cuenta. Por eso el
 muestreo va en **ejecuciones encadenadas**: cada instancia gasta como mucho 46 peticiones (`Budget` de la
-invocación y un `SubBudget` por paso) y, cuando no le queda para la siguiente fase, crea la instancia
+invocación y uno por paso con ese de padre, `new Budget(n, inv)`) y, cuando no le queda para la siguiente fase, crea la instancia
 `<base>-s<N>` con la fase y el cursor por los que seguir. Las listas intermedias van en R2 (`tmp/run/`) y
 se borran al terminar (lo de una pasada que se corta antes, en `maint` cuando tiene más de un día). Los pasos son idempotentes (`INSERT OR IGNORE`, UPSERT con
 `WHERE … IS NOT excluded…`), así que un reintento no duplica nada.

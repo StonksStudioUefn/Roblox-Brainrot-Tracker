@@ -15,29 +15,31 @@ export const isoDate = ts => new Date(ts * 60000).toISOString().slice(0, 10);
 export const dayStart = date => Date.parse(`${date}T00:00:00Z`) / 60000;
 export const addDays = (date, n) => isoDate(dayStart(date) + n * DAY_MIN);
 export const openDayOf = (closed, nowMs) => (closed ? addDays(closed, 1) : isoDate(minuteOf(nowMs)));
+// El export y /api/history cortan igual entre daily y samples: si no, un día sale dos veces o ninguna
+const clampOpenDay = (openDay, today) => (openDay && openDay < today ? openDay : today);
 
 // round() de Python lleva los .5 al par y ROUND de SQLite arriba: fallaba el 30 % de las medianas
+const halfEven = s => `${s} / 2 + (${s} % 2) * ((${s} / 2) % 2)`;
 const MID = "SUM(CASE WHEN rn IN ((cnt + 1) / 2, (cnt + 2) / 2) THEN p END)";
 export const MEDIAN_SQL = `(CASE WHEN MAX(cnt) % 2 = 1 THEN ${MID}
-  ELSE ${MID} / 2 + (${MID} % 2) * ((${MID} / 2) % 2) END)`;
-export const MEAN_SQL = `(CASE
-  WHEN 2 * (SUM(p) % COUNT(*)) > COUNT(*) THEN SUM(p) / COUNT(*) + 1
-  WHEN 2 * (SUM(p) % COUNT(*)) < COUNT(*) THEN SUM(p) / COUNT(*)
-  ELSE SUM(p) / COUNT(*) + (SUM(p) / COUNT(*)) % 2 END)`;
+  ELSE ${halfEven(MID)} END)`;
 const MEAN_OF = (sum, n) => `(CASE
   WHEN 2 * (${sum} % ${n}) > ${n} THEN ${sum} / ${n} + 1
   WHEN 2 * (${sum} % ${n}) < ${n} THEN ${sum} / ${n}
   ELSE ${sum} / ${n} + (${sum} / ${n}) % 2 END)`;
+export const MEAN_SQL = MEAN_OF("SUM(p)", "COUNT(*)");
 // Mediana al par de los n elementos ORDENADOS del array JSON a, desde f
 const sortedMedian = (a, f, n) => {
   const mid = `(CASE WHEN ${n} % 2 = 1 THEN ${a} ->> (${f} + ${n} / 2) ELSE (${a} ->> (${f} + ${n} / 2 - 1)) + (${a} ->> (${f} + ${n} / 2)) END)`;
-  return `(CASE WHEN ${n} % 2 = 1 THEN ${mid} ELSE ${mid} / 2 + (${mid} % 2) * ((${mid} / 2) % 2) END)`;
+  return `(CASE WHEN ${n} % 2 = 1 THEN ${mid} ELSE ${halfEven(mid)} END)`;
 };
+
+const parseValue = v => { try { return JSON.parse(v); } catch { return v; } };
 
 export async function getState(db, key) {
   const row = await db.prepare("SELECT value FROM state WHERE key = ?1").bind(key).first();
   if (!row || row.value == null) return null;
-  try { return JSON.parse(row.value); } catch { return row.value; }
+  return parseValue(row.value);
 }
 
 export function setStateStmt(db, key, value) {
@@ -56,16 +58,12 @@ export async function getStates(db, keys) {
     "SELECT key, value FROM state WHERE key IN (SELECT value FROM json_each(?1))",
   ).bind(JSON.stringify(keys)).all();
   const out = {};
-  for (const r of results) {
-    try { out[r.key] = JSON.parse(r.value); } catch { out[r.key] = r.value; }
-  }
+  for (const r of results) out[r.key] = parseValue(r.value);
   return out;
 }
 
-export function written(res) {
-  const list = Array.isArray(res) ? res : [res];
-  return list.reduce((a, r) => a + (r?.meta?.rows_written || 0), 0);
-}
+const metaSum = (res, k) => (Array.isArray(res) ? res : [res]).reduce((a, r) => a + (r?.meta?.[k] || 0), 0);
+export const written = res => metaSum(res, "rows_written");
 
 // instr y no json_each: D1 cuenta cada fila de un json_each, y esto va en cada página y búsqueda
 export function upsertDiscoveredStmt(db, rows, source, firstSeen) {
@@ -145,12 +143,16 @@ export async function radarPlayers(db, list, today) {
 }
 
 // Cacheado: cruzarlo en SQL leía ~10.000 filas en cada lectura del radar (radarStaleStmt lo borra)
-async function radarPlaces(db, today) {
+async function cachedRadarPlaces(db, today) {
   const cached = await getState(db, "radar_places");
-  if (cached?.day === today) {
-    const map = new Map(cached.pairs);
-    return { map, ids: [...new Set(map.values()), ...cached.nop] };
-  }
+  if (cached?.day !== today) return null;
+  const map = new Map(cached.pairs);
+  return { map, ids: [...new Set(map.values()), ...cached.nop] };
+}
+
+async function radarPlaces(db, today) {
+  const cached = await cachedRadarPlaces(db, today);
+  if (cached) return cached;
   // UNION ALL: el UNION deduplica en una tabla temporal y D1 cuenta sus filas
   const { results } = await db.prepare(
     `SELECT place_id AS pid, universe_id AS id FROM games WHERE tracked = 1
@@ -200,6 +202,12 @@ function pyMean(sum, n) {
 
 /** Parte (0..parts-1) de un universe_id escrito como texto: por su última cifra, sin pasarlo a número. */
 export const idPart = (key, parts) => key.charCodeAt(key.length - 1) % parts;
+
+export const splitByPart = (obj, parts) => {
+  const out = Array.from({ length: parts }, () => ({}));
+  for (const id in obj) out[idPart(id, parts)][id] = obj[id];
+  return out;
+};
 
 // Un fichero del radar tal como lo escribe JSON.stringify de {universe_id: jugadores}
 const RADAR_TEXT = /^\{(?:"\d+":(?:-?\d+(?:\.\d+)?|null),)*"\d+":(?:-?\d+(?:\.\d+)?|null)\}$/;
@@ -278,13 +286,16 @@ export function radarCloseStmt(db, date, rows) {
   ).bind(JSON.stringify(rows || []), date);
 }
 
+// select elige con los mismos puestos que enseña el export
+const sortsSql = (id, day) => `json(COALESCE((SELECT json_group_object(k.sort_id, k.rank) FROM sort_hits k
+  WHERE k.universe_id = ${id} AND k.date = ${day} AND k.sort_id NOT LIKE 'search:%'), '{}'))`;
+
 // Al revés por la clave y se les da la vuelta aquí: ordenarlas en SQL contaba cada fila dos veces
 export async function radarSlice(db, { lo, hi, days, today }) {
   const { results } = await db.prepare(
     `SELECT json_array(g.universe_id, COALESCE(g.horror, 0), COALESCE(g.sel, 0), g.created, g.first_seen,
        (SELECT first_day FROM hist WHERE universe_id = g.universe_id),
-       json(COALESCE((SELECT json_group_object(k.sort_id, k.rank) FROM sort_hits k
-              WHERE k.universe_id = g.universe_id AND k.date = ?4 AND k.sort_id NOT LIKE 'search:%'), '{}')),
+       ${sortsSql("g.universe_id", "?4")},
        json(COALESCE((SELECT json_group_array(json_array(r.date, r.median, r.min, r.max, r.n, r.visits)) FROM (
               SELECT date, median, min, max, n, visits FROM daily
               WHERE universe_id = g.universe_id AND date < ?4 ORDER BY date DESC LIMIT ?3) r), '[]'))) AS row
@@ -299,11 +310,7 @@ export async function radarSlice(db, { lo, hi, days, today }) {
 
 // Si radar_places es de hoy, de ahí: rehacerlo leería ~8.000 filas
 export async function radarIds(db, today) {
-  const cached = await getState(db, "radar_places");
-  if (cached?.day === today) {
-    return [...new Set([...cached.pairs.map(p => p[1]), ...cached.nop])];
-  }
-  return trackedIds(db);
+  return (await cachedRadarPlaces(db, today))?.ids ?? trackedIds(db);
 }
 
 export function idRanges(ids, size) {
@@ -490,6 +497,9 @@ function migrateHistStmts(db) {
 }
 
 /** Recalcula `hist` desde `daily` (lee daily entera: solo para el admin). */
+const lastBy = (name, col, alias, cond) => `${name} AS (SELECT id, ${alias} FROM (SELECT universe_id AS id, ${col} AS ${alias},
+         ROW_NUMBER() OVER (PARTITION BY universe_id ORDER BY date DESC) AS rn FROM daily WHERE ${cond}) WHERE rn = 1)`;
+
 export function rebuildHistStmts(db) {
   return [
     db.prepare("DELETE FROM hist"),
@@ -502,21 +512,9 @@ export function rebuildHistStmts(db) {
          SELECT d.universe_id AS id, MIN(d.date) AS pd FROM daily d JOIN a ON a.id = d.universe_id AND d.max = a.peak
          GROUP BY d.universe_id
        ),
-       fv AS (
-         SELECT id, fav FROM (SELECT universe_id AS id, favorites AS fav,
-                ROW_NUMBER() OVER (PARTITION BY universe_id ORDER BY date DESC) AS rn
-                FROM daily WHERE favorites > 0) WHERE rn = 1
-       ),
-       vu AS (
-         SELECT id, up FROM (SELECT universe_id AS id, up,
-                ROW_NUMBER() OVER (PARTITION BY universe_id ORDER BY date DESC) AS rn
-                FROM daily WHERE up IS NOT NULL) WHERE rn = 1
-       ),
-       vd AS (
-         SELECT id, down FROM (SELECT universe_id AS id, down,
-                ROW_NUMBER() OVER (PARTITION BY universe_id ORDER BY date DESC) AS rn
-                FROM daily WHERE down IS NOT NULL) WHERE rn = 1
-       )
+       ${lastBy("fv", "favorites", "fav", "favorites > 0")},
+       ${lastBy("vu", "up", "up", "up IS NOT NULL")},
+       ${lastBy("vd", "down", "down", "down IS NOT NULL")}
        INSERT INTO hist (${HIST_COLS})
        SELECT a.id, a.peak, pk.pd, a.days, a.first_day, fv.fav, vu.up, vd.down, a.last
        FROM a LEFT JOIN pk ON pk.id = a.id LEFT JOIN fv ON fv.id = a.id
@@ -541,10 +539,8 @@ export function pruneSamplesStmt(db, cutoffTs) {
 
 // Por clave primaria juego a juego: solo lee las filas viejas
 export function pruneOldStmts(db, cutoffDate) {
-  return [
-    db.prepare(`DELETE FROM daily WHERE date < ?1 AND universe_id IN (SELECT universe_id FROM games)`).bind(cutoffDate),
-    db.prepare(`DELETE FROM sort_hits WHERE date < ?1 AND universe_id IN (SELECT universe_id FROM games)`).bind(cutoffDate),
-  ];
+  return ["daily", "sort_hits"].map(t =>
+    db.prepare(`DELETE FROM ${t} WHERE date < ?1 AND universe_id IN (SELECT universe_id FROM games)`).bind(cutoffDate));
 }
 
 export function untrackStmt(db, today) {
@@ -595,7 +591,7 @@ const SLICE_GAMES = "g0 AS (SELECT value AS id FROM json_each(?13))";
 export async function buildExportSlice(db, { nowMs, lastTs, openDay, ids }) {
   const now = minuteOf(nowMs);
   const today = isoDate(now);
-  openDay = openDay && openDay < today ? openDay : today;
+  openDay = clampOpenDay(openDay, today);
   lastTs = lastTs ?? now;
   const sFrom = lastTs - EXPORT_SAMPLE_HOURS * 60;
   const cut24 = lastTs - 24 * 60;
@@ -688,8 +684,7 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, ids }) {
         'horror', json(CASE WHEN s.horror = 1 THEN 'true' ELSE 'false' END),
         'horror_score', COALESCE(s.horror_score, 0),
         'horror_reasons', json(COALESCE(s.horror_reasons, '[]')),
-        'sorts', json(COALESCE((SELECT json_group_object(k.sort_id, k.rank) FROM sort_hits k
-                       WHERE k.universe_id = s.universe_id AND k.date = ?8 AND k.sort_id NOT LIKE 'search:%'), '{}')),
+        'sorts', ${sortsSql("s.universe_id", "?8")},
         'favorites', s.hv ->> 4, 'up', s.hv ->> 5, 'down', s.hv ->> 6,
         'peak', CASE WHEN s.pmx > COALESCE(s.hv ->> 0, -1) THEN s.pmx ELSE s.hv ->> 0 END,
         'peak_date', CASE WHEN s.pmx > COALESCE(s.hv ->> 0, -1) THEN s.pday ELSE s.hv ->> 1 END,
@@ -738,10 +733,7 @@ export async function buildExportSlice(db, { nowMs, lastTs, openDay, ids }) {
     n: row.n || 0,
     last_ts: row.last_ts ?? null,
     ts24,
-    meta: {
-      rows_read: res.reduce((t, r) => t + (r.meta?.rows_read || 0), 0),
-      rows_written: res.reduce((t, r) => t + (r.meta?.rows_written || 0), 0),
-    },
+    meta: { rows_read: metaSum(res, "rows_read"), rows_written: written(res) },
   };
 }
 
@@ -757,7 +749,7 @@ export function exportHeader({ nowMs, lastTs, ts24, radar }) {
 export async function history(db, id, { nowMs = Date.now(), openDay } = {}) {
   const now = minuteOf(nowMs);
   const today = isoDate(now);
-  openDay = openDay && openDay < today ? openDay : today;
+  openDay = clampOpenDay(openDay, today);
   const dFrom = addDays(today, -(HISTORY_DAYS - 1));
   const rFrom = now - HISTORY_SAMPLE_DAYS * DAY_MIN;
   const openTs = dayStart(openDay);

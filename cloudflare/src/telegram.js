@@ -1,7 +1,7 @@
 // Port de notifier.py: los textos son EXACTAMENTE los suyos (test/telegram.test.mjs).
 
 import { CATEGORIES, EMERGING, TELEGRAM } from "./config.js";
-import { buildDashboard as metricsBuildDashboard, isRising, quickMetrics } from "./metrics.js";
+import { buildDashboard as metricsBuildDashboard, inCategory, isDown, isRising, pyFixed, quickMetrics } from "./metrics.js";
 import { pyLen, pyRstrip } from "./horror.js";
 
 const TELEGRAM_MAX_FETCH = 50;
@@ -12,21 +12,10 @@ const DAYS = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"];
 const DAY_MS = 864e5;
 const DASHBOARD_URL = TELEGRAM.dashboard_url;
 
+export { pyFixed };
+
 function h(s) {
   return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-// toFixed de JS va al mayor en el empate; Python, al par.
-export function pyFixed(x, d) {
-  if (Object.is(x, -0)) return "-" + (0).toFixed(d);
-  const q = x * 2 ** (d + 1);
-  if (Number.isInteger(q) && q % 2 !== 0 && Math.abs(q) < 2 ** 52) {
-    const y = x * 10 ** d, f = Math.floor(y);
-    const n = f % 2 === 0 ? f : f + 1;
-    const s = (n / 10 ** d).toFixed(d);
-    return x < 0 && !s.startsWith("-") ? "-" + s : s;   // -0.5 → "-0"
-  }
-  return x.toFixed(d);
 }
 
 export function num(n) {
@@ -55,8 +44,11 @@ function short(title) {
 
 const pyStr = v => (v == null ? "None" : String(v));
 
-const gameLink = g =>
-  `<a href="https://www.roblox.com/games/${pyStr(g.place_id)}">${h(short(g.title))}</a>`;
+const playUrl = g => `https://www.roblox.com/games/${pyStr(g.place_id)}`;
+const gameLink = g => `<a href="${playUrl(g)}">${h(short(g.title))}</a>`;
+const dashLine = key => `📊 <a href="${DASHBOARD_URL}#cat=${key}">Abrir dashboard</a>`;
+const weekStat = g => [`7d ${pct(g.growth_7d)}`];
+const monday0 = d => (d.getUTCDay() + 6) % 7;
 
 const cardLink = (key, g, text) => `<a href="${DASHBOARD_URL}#cat=${key}&amp;game=${pyStr(g.id)}">${text}</a>`;
 
@@ -80,14 +72,14 @@ function entry(i, g, extra = [], medals = true) {
 function todayLabel(now) {
   const d = toDate(now);
   const dd = String(d.getUTCDate()).padStart(2, "0"), mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-  return `${DAYS[(d.getUTCDay() + 6) % 7]} ${dd}/${mm}`;
+  return `${DAYS[monday0(d)]} ${dd}/${mm}`;
 }
 
 export function isBoom(g) {
   return (g.players || 0) >= TELEGRAM.alert_min_players
     && (g.typical || 0) >= TELEGRAM.alert_min_typical
     && g.age_days != null && g.age_days <= TELEGRAM.alert_max_age_days
-    && g.status !== "down" && g.status !== "down2";
+    && !isDown(g.status);
 }
 
 function alertCategory(cats, g) {
@@ -121,7 +113,7 @@ export function dailyReport(key, cat, games, now) {
     lines.push("", "🔥 <b>En tendencia</b>");
     trending.forEach((g, i) => lines.push(entry(i + 1, g, [], false)));
   }
-  lines.push("", `📊 <a href="${DASHBOARD_URL}#cat=${key}">Abrir dashboard</a>`);
+  lines.push("", dashLine(key));
 
   const top = emerging[0] || trending[0] || null;
   return [lines.join("\n"), top?.id ?? null];
@@ -138,13 +130,13 @@ export function weeklyReport(key, cat, games, now) {
     `📅 ${cat.icon} <b>${h(cat.label.toUpperCase())} · LA SEMANA</b>`,
     `<i>hasta el ${todayLabel(now)}</i>`,
     "", "🚀 <b>Lo que más ha crecido</b>",
-    ...up.map((g, i) => entry(i + 1, g, [`7d ${pct(g.growth_7d)}`])),
+    ...up.map((g, i) => entry(i + 1, g, weekStat(g))),
   ];
   if (down.length) {
     lines.push("", "🧊 <b>Lo que más ha caído</b>",
-      ...down.map((g, i) => entry(i + 1, g, [`7d ${pct(g.growth_7d)}`], false)));
+      ...down.map((g, i) => entry(i + 1, g, weekStat(g), false)));
   }
-  lines.push("", `📊 <a href="${DASHBOARD_URL}#cat=${key}">Abrir dashboard</a>`);
+  lines.push("", dashLine(key));
   return [lines.join("\n"), up[0]?.id ?? null];
 }
 
@@ -170,7 +162,7 @@ export function alertMessage(key, cat, g) {
   }
   lines.push(
     "",
-    `▶️ <a href="https://www.roblox.com/games/${pyStr(g.place_id)}">Jugar</a>   ·   📊 ${cardLink(key, g, "Ver ficha")}`,
+    `▶️ <a href="${playUrl(g)}">Jugar</a>   ·   📊 ${cardLink(key, g, "Ver ficha")}`,
   );
   return [lines.join("\n"), g.id ?? null];
 }
@@ -197,7 +189,7 @@ const isoDay = d => d.toISOString().slice(0, 10);
 export function isoWeek(now) {
   const d = toDate(now);
   const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  const dow = (t.getUTCDay() + 6) % 7;            // lunes = 0
+  const dow = monday0(t);
   t.setUTCDate(t.getUTCDate() - dow + 3);         // el jueves de esa semana
   const year = t.getUTCFullYear();
   const week = 1 + Math.floor((t - Date.UTC(year, 0, 1)) / DAY_MS / 7);
@@ -221,7 +213,7 @@ export function quickRows(games, { now } = {}) {
     const typ = m.typical || 0;
     let cat = 0;
     CATS.forEach(([, c], ci) => {
-      if ((c.classifier === "all" || g.horror) && typ >= c.min_players) cat |= 1 << ci;
+      if (inCategory(c, g.horror) && typ >= c.min_players) cat |= 1 << ci;
     });
     if (!cat && !em) continue;
     rows.push({
@@ -247,12 +239,11 @@ export function pickCandidates(rows) {
       if (DOWN.includes(r.st)) falling++;
     }
     counts[key] = { games: ids.length, players, rising, falling };
-    const belongs = cfg.classifier === "all" ? () => true : r => r.horror;
-    rows.filter(r => belongs(r) && r.em !== null)
+    rows.filter(r => inCategory(cfg, r.horror) && r.em !== null)
       .sort((a, b) => b.em - a.em).slice(0, PICK.emerging_top).forEach(r => picked.add(r.id));
     ids.filter(r => r.rising).sort((a, b) => b.momentum - a.momentum)
       .slice(0, PICK.trending_top).forEach(r => picked.add(r.id));
-    const w = ids.filter(r => r.g7 !== null && (r.typical || 0) >= TELEGRAM.report_min_players);
+    const w = ids.filter(r => r.g7 !== null && big(r));
     [...w].sort((a, b) => b.g7 - a.g7).slice(0, PICK.weekly_up).forEach(r => picked.add(r.id));
     w.filter(r => r.g7 < 0).sort((a, b) => a.g7 - b.g7).slice(0, PICK.weekly_down).forEach(r => picked.add(r.id));
   });
@@ -422,7 +413,7 @@ export async function runTelegram({
 }) {
   const nowD = toDate(now);
   const today = isoDay(nowD), week = isoWeek(nowD), hour = nowD.getUTCHours();
-  const weekday = (nowD.getUTCDay() + 6) % 7;
+  const weekday = monday0(nowD);
 
   const reduced = exportData;
   const counts = reduced.telegram?.counts ?? null;
@@ -478,27 +469,22 @@ export async function runTelegram({
     }
     if (seeding) result.seeded = booming.length;
 
-    if (dueDaily) {
+    const sendAll = async report => {
       const ok = [];
       for (const [key, cat] of Object.entries(cats)) {
-        const [text, id] = dailyReport(key, cat, games, nowD);
+        const [text, id] = report(key, cat, games, nowD);
         if (!text) continue;
         result.messages++;
         ok.push(await client.send(text, id));
       }
-      result.daily = ok.every(Boolean);
+      return ok.every(Boolean);
+    };
+    if (dueDaily) {
+      result.daily = await sendAll(dailyReport);
       if (result.daily) state.last_daily = today;
     }
-
     if (dueWeekly) {
-      const ok = [];
-      for (const [key, cat] of Object.entries(cats)) {
-        const [text, id] = weeklyReport(key, cat, games, nowD);
-        if (!text) continue;
-        result.messages++;
-        ok.push(await client.send(text, id));
-      }
-      result.weekly = ok.every(Boolean);
+      result.weekly = await sendAll(weeklyReport);
       if (result.weekly) state.last_weekly = week;
     }
   } finally {

@@ -476,7 +476,8 @@ const LIVE_TTL = 90e3;
 let LIVE = {}, LIVE_TS = null, LIVE_STATE = 'loading', THUMBS = {}, INFO = {};
 let CAT = 'general';
 let SORT = { k: 'typical', asc: false };
-let FILTER = 'all', GENRE = '', QUERY = '', LIMIT = 50;
+const PAGE = 50;
+let FILTER = 'all', GENRE = '', QUERY = '', LIMIT = PAGE;
 let CHART = null, CHART_MODE = 'day', OPEN_ID = null;
 const CHART_DAYS = { week: 7, month: 30, year: 365 };
 
@@ -489,6 +490,15 @@ const STATUS = {
   new:   { icon: '⏳', label: 'Midiendo' },
 };
 
+const getJSON = (url, init) => fetch(url, init).then(r => (r.ok ? r.json() : Promise.reject(r.status)));
+const emptyBox = (title, text) => `<div class="empty" style="grid-column:1/-1"><b>${title}</b>${text}</div>`;
+const creatorOf = g => `${esc(g.creator || '—')}${g.creator_verified ? ' ✔' : ''}`;
+const titleTags = g => `${esc(g.title)} ${g.tags.map(t => `<span class="tag">${esc(t)}</span>`).join(' ')}`;
+const genreOf = g => g.genre || 'Sin género';
+const shotImg = (src, cls = '') =>
+  `<img${cls ? ` class="${cls}" loading="lazy"` : ''} src="${esc(src)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">`;
+const chips = (list, cls = '', empty = '') =>
+  list.map(r => `<span class="chip${cls ? ' ' + cls : ''}">${esc(r)}</span>`).join('') || (empty && `<span class="chip">${empty}</span>`);
 const sampleMs = t => Date.parse(t.replace('Z', ':00Z'));
 const lastSampleMs = r => (r.length ? sampleMs(r[r.length - 1][0]) : Date.now());
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -573,8 +583,7 @@ const catData = () => RAW.categories[CAT];
 
 function loadHistory(id) {
   if (!HISTORY_P[id]) {
-    HISTORY_P[id] = fetch(`${API}/history/${id}`)
-      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    HISTORY_P[id] = getJSON(`${API}/history/${id}`)
       .then(h => {
         const d = h.d || [];
         const ev = flagEvents(d.map(r => r[1]), d.map(r => r[0]));
@@ -586,11 +595,7 @@ function loadHistory(id) {
   return HISTORY_P[id];
 }
 
-async function fetchExport(revalidate = false) {
-  const r = await fetch(`${API}/export`, revalidate ? { cache: 'no-cache' } : {});
-  if (!r.ok) throw new Error(r.status);
-  return r.json();
-}
+const fetchExport = (revalidate = false) => getJSON(`${API}/export`, revalidate ? { cache: 'no-cache' } : {});
 function compute(exp) {
   const t0 = performance.now();
   const d = buildDashboard(exp, { now: Date.now() });
@@ -650,13 +655,13 @@ function renderEmerging() {
   const el = document.getElementById('emerging');
   const list = catData().emerging.map(G).filter(Boolean);
   if (!list.length) {
-    el.innerHTML = `<div class="empty" style="grid-column:1/-1"><b>Ningún emergente ahora mismo</b>Hacen falta un par de días de muestras para medir el crecimiento.</div>`;
+    el.innerHTML = emptyBox('Ningún emergente ahora mismo', 'Hacen falta un par de días de muestras para medir el crecimiento.');
     return;
   }
   el.innerHTML = list.map(g => `
     <button class="card" data-id="${g.id}">
       <div class="card-media">
-        ${THUMBS[g.id] ? `<img class="shot" src="${esc(THUMBS[g.id])}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
+        ${THUMBS[g.id] ? shotImg(THUMBS[g.id], 'shot') : ''}
         <span class="card-score" title="Puntuación de emergente">★ ${g.emerging}</span>
         <div class="card-flags">${robloxChips(g, { dark: true, short: true })}${g.spike_now ? '<span class="chip dark">🎉 Pico</span>' : ''}${g.age_days != null && g.age_days <= 30 ? `<span class="chip dark">🆕 ${age(g.age_days)}</span>` : ''}</div>
         ${icon(g, 'card-icon')}
@@ -664,7 +669,7 @@ function renderEmerging() {
       <div class="card-body">
         <div>
           <div class="card-title" title="${esc(g.name)}">${esc(g.title)}</div>
-          <div class="card-creator">${esc(g.creator || '—')}${g.creator_verified ? ' ✔' : ''} · ${esc(g.genre || 'Sin género')}</div>
+          <div class="card-creator">${creatorOf(g)} · ${esc(genreOf(g))}</div>
         </div>
         <div class="card-stats">
           <span class="card-players">${num(g.typical)} <small>jugadores</small></span>
@@ -673,7 +678,7 @@ function renderEmerging() {
         ${spark(g.spark, g.spark_ev, 220, 30)}
         <div class="card-foot">
           <span class="chip">👁 ${num(g.visits)}</span>
-          ${g.emerging_reasons.filter(r => !r.startsWith('Roblox:')).map(r => `<span class="chip accent">${esc(r)}</span>`).join('')}
+          ${chips(g.emerging_reasons.filter(r => !r.startsWith('Roblox:')), 'accent')}
         </div>
       </div>
     </button>`).join('');
@@ -683,7 +688,7 @@ function renderRows(elId, ids, empty, sub) {
   const el = document.getElementById(elId);
   const list = ids.map(G).filter(Boolean);
   if (!list.length) {
-    el.innerHTML = `<div class="empty" style="grid-column:1/-1">${empty}</div>`;
+    el.innerHTML = empty;
     return;
   }
   el.innerHTML = list.map((g, i) => `
@@ -697,14 +702,14 @@ function renderRows(elId, ids, empty, sub) {
       ${spark(g.spark, g.spark_ev, 84, 28)}
     </button>`).join('');
 }
-const renderTop = () => renderRows('top', catData().top || [], '<b>Sin datos todavía</b>Aparecerán tras el próximo muestreo.',
+const renderTop = () => renderRows('top', catData().top || [], emptyBox('Sin datos todavía', 'Aparecerán tras el próximo muestreo.'),
   g => (g.trend != null ? ` · ${pct(g.trend)}/día` : ''));
 const renderTrending = () => renderRows('trending', catData().trending,
-  '<b>Nada en tendencia</b>Ningún juego de la lista está creciendo de forma sostenida.', g => ` · ${pct(g.trend)}/día`);
+  emptyBox('Nada en tendencia', 'Ningún juego de la lista está creciendo de forma sostenida.'), g => ` · ${pct(g.trend)}/día`);
 
 function renderGenres() {
   const counts = {};
-  catData().ids.forEach(id => { const g = G(id).genre || 'Sin género'; counts[g] = (counts[g] || 0) + 1; });
+  catData().ids.forEach(id => { const g = genreOf(G(id)); counts[g] = (counts[g] || 0) + 1; });
   const opts = Object.entries(counts).sort((a, b) => b[1] - a[1]);
   const sel = document.getElementById('genre');
   sel.innerHTML = `<option value="">Todos los géneros</option>` +
@@ -714,7 +719,7 @@ function renderGenres() {
 function filtered() {
   const q = QUERY.trim().toLowerCase();
   let list = catData().ids.map(G).filter(Boolean);
-  if (GENRE) list = list.filter(g => (g.genre || 'Sin género') === GENRE);
+  if (GENRE) list = list.filter(g => genreOf(g) === GENRE);
   if (q) list = list.filter(g => (g.name + ' ' + (g.creator || '')).toLowerCase().includes(q));
   if (FILTER === 'rising') list = list.filter(g => g.status === 'hot' || g.status === 'up');
   if (FILTER === 'falling') list = list.filter(g => g.status === 'down' || g.status === 'down2');
@@ -753,8 +758,8 @@ function renderTable(live = true) {
         <div class="game-cell">
           ${icon(g)}
           <div class="meta">
-            <div class="t" title="${esc(g.name)}">${esc(g.title)} ${g.tags.map(t => `<span class="tag">${esc(t)}</span>`).join(' ')}</div>
-            <div class="s">${esc(g.creator || '—')}${g.creator_verified ? ' ✔' : ''} · ${esc(g.subgenre || g.genre || 'Sin género')}</div>
+            <div class="t" title="${esc(g.name)}">${titleTags(g)}</div>
+            <div class="s">${creatorOf(g)} · ${esc(g.subgenre || genreOf(g))}</div>
           </div>
         </div>
       </td>
@@ -798,8 +803,8 @@ async function openGame(id, push = true) {
     <div class="m-head" id="d-head">
       ${icon(g)}
       <div class="m-name">
-        <div class="m-kicker">${esc(g.creator || '—')}${g.creator_verified ? ' ✔' : ''} <span>· ${esc(genre)}</span></div>
-        <div class="d-title">${esc(g.title)} ${g.tags.map(t => `<span class="tag">${esc(t)}</span>`).join(' ')}</div>
+        <div class="m-kicker">${creatorOf(g)} <span>· ${esc(genre)}</span></div>
+        <div class="d-title">${titleTags(g)}</div>
         <div class="d-flags">
           ${flagChips(g)}
           ${g.emerging ? `<span class="chip accent">🌱 Emergente ★ ${g.emerging}</span>` : ''}
@@ -815,7 +820,7 @@ async function openGame(id, push = true) {
     <div class="m-body">
       <div class="m-top">
         <div class="d-banner">
-          ${icon(g)}${THUMBS[g.id] ? `<img src="${esc(THUMBS[g.id])}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
+          ${icon(g)}${THUMBS[g.id] ? shotImg(THUMBS[g.id]) : ''}
         </div>
         <div class="m-info">
           <div class="desc" id="desc">Cargando descripción…</div>
@@ -860,8 +865,8 @@ async function openGame(id, push = true) {
       </div>
 
       <div class="m-bottom">
-        ${g.emerging ? `<div class="box"><h3>🌱 Por qué es emergente <span class="tag">★ ${g.emerging}</span></h3><div class="reasons">${g.emerging_reasons.map(r => `<span class="chip accent">${esc(r)}</span>`).join('') || '<span class="chip">combinación de señales</span>'}</div></div>` : ''}
-        ${CAT === 'horror' || g.horror ? `<div class="box"><h3>👻 Clasificación horror <span class="tag">puntos ${g.horror_score}</span></h3><div class="reasons">${(g.horror_reasons || []).map(r => `<span class="chip">${esc(r)}</span>`).join('') || '<span class="chip">sin señales</span>'}</div></div>` : ''}
+        ${g.emerging ? `<div class="box"><h3>🌱 Por qué es emergente <span class="tag">★ ${g.emerging}</span></h3><div class="reasons">${chips(g.emerging_reasons, 'accent', 'combinación de señales')}</div></div>` : ''}
+        ${CAT === 'horror' || g.horror ? `<div class="box"><h3>👻 Clasificación horror <span class="tag">puntos ${g.horror_score}</span></h3><div class="reasons">${chips(g.horror_reasons || [], '', 'sin señales')}</div></div>` : ''}
         <div class="box"><h3>📋 Seguimiento</h3><div class="reasons">
           <span class="chip">${g.days_tracked} días de historia</span>
           ${g.first_seen_days != null ? `<span class="chip">descubierto hace ${age(g.first_seen_days)}</span>` : ''}
@@ -886,13 +891,10 @@ async function openGame(id, push = true) {
     dr.querySelectorAll('#chart-mode button').forEach(x => x.classList.toggle('active', x === b));
     drawChart(g);
   });
-  dr.classList.add('open');
-  dr.setAttribute('aria-hidden', 'false');
+  showDrawer(true);
   dr.scrollTop = 0;
-  document.getElementById('scrim').classList.add('open');
-  document.body.classList.add('drawer-open');
 
-  fetch(`${API}/game/${id}`).then(r => r.ok ? r.json() : Promise.reject(r.status)).then(info => {
+  getJSON(`${API}/game/${id}`).then(info => {
     INFO[id] = info;
     if (info.thumb) THUMBS[id] = info.thumb;
     LIVE[id] = { ...(LIVE[id] || {}), playing: info.playing, icon: info.icon || (LIVE[id] || {}).icon, _t: Date.now() };
@@ -901,7 +903,7 @@ async function openGame(id, push = true) {
     d.textContent = info.description || 'Sin descripción.';
     document.getElementById('desc-more').hidden = d.scrollHeight <= d.clientHeight + 2;
     const banner = dr.querySelector('.d-banner');
-    if (info.thumb && !banner.querySelector('img:not(.ico)')) banner.insertAdjacentHTML('beforeend', `<img src="${esc(info.thumb)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">`);
+    if (info.thumb && !banner.querySelector('img:not(.ico)')) banner.insertAdjacentHTML('beforeend', shotImg(info.thumb));
     const head = document.getElementById('d-head');
     head.firstElementChild.outerHTML = icon(g);
     updateDrawerLive();
@@ -933,13 +935,18 @@ function updatePeak24(g, h) {
     : 'ahora, en vivo';
 }
 
+function showDrawer(open) {
+  const dr = document.getElementById('drawer');
+  dr.classList.toggle('open', open);
+  dr.setAttribute('aria-hidden', String(!open));
+  document.getElementById('scrim').classList.toggle('open', open);
+  document.body.classList.toggle('drawer-open', open);
+}
+
 function closeGame() {
   OPEN_ID = null;
   setHash();
-  document.getElementById('drawer').classList.remove('open');
-  document.getElementById('drawer').setAttribute('aria-hidden', 'true');
-  document.getElementById('scrim').classList.remove('open');
-  document.body.classList.remove('drawer-open');
+  showDrawer(false);
   if (CHART) { CHART.destroy(); CHART = null; }
 }
 
@@ -1072,7 +1079,7 @@ async function fetchLive(ids, force = false) {
     const parts = [];
     for (let i = 0; i < need.length; i += 200) parts.push(need.slice(i, i + 200));
     const res = await Promise.all(parts.map(p =>
-      fetch(`${API}/live?ids=${p.join(',')}`).then(r => r.ok ? r.json() : Promise.reject(r.status))));
+      getJSON(`${API}/live?ids=${p.join(',')}`)));
     const t = Date.now();
     for (const r of res) for (const [id, v] of Object.entries(r.games || {})) LIVE[id] = { ...v, _t: t };
     LIVE_TS = t;
@@ -1138,7 +1145,7 @@ function switchCat(k) {
   if (!RAW.categories[k]) return;
   CAT = k;
   document.body.dataset.cat = k;
-  GENRE = ''; LIMIT = 50;
+  GENRE = ''; LIMIT = PAGE;
   renderAll();
   setHash();
 }
@@ -1160,12 +1167,12 @@ function bind() {
   let t;
   document.getElementById('search').addEventListener('input', e => {
     clearTimeout(t);
-    t = setTimeout(() => { QUERY = e.target.value; LIMIT = 50; renderTable(); }, 120);
+    t = setTimeout(() => { QUERY = e.target.value; LIMIT = PAGE; renderTable(); }, 120);
   });
-  document.getElementById('genre').onchange = e => { GENRE = e.target.value; LIMIT = 50; renderTable(); };
+  document.getElementById('genre').onchange = e => { GENRE = e.target.value; LIMIT = PAGE; renderTable(); };
   document.querySelectorAll('#status-filter button').forEach(b => b.onclick = () => {
     document.querySelectorAll('#status-filter button').forEach(x => x.classList.toggle('active', x === b));
-    FILTER = b.dataset.s; LIMIT = 50; renderTable();
+    FILTER = b.dataset.s; LIMIT = PAGE; renderTable();
   });
   document.querySelectorAll('th.sortable').forEach(th => th.onclick = () => {
     SORT = SORT.k === th.dataset.k ? { k: SORT.k, asc: !SORT.asc } : { k: th.dataset.k, asc: th.dataset.k === 'age_days' };
