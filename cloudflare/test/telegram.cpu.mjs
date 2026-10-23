@@ -74,7 +74,7 @@ for (const [name, ex] of Object.entries(sets)) {
     ["quiet", redPath, "paso telegram, pasada sin nada que enviar (atajo)"],
     ["normal", redPath, "paso telegram, pasada con alertas posibles"],
     ["daily", redPath, "paso telegram, diario + semanal"],
-    ["candidates", fullPath, "respaldo: export completo + telegramCandidates"],
+    ["candidates", fullPath, "export completo + telegramCandidates"],
   ]) {
     const rs = [];
     for (let i = 0; i < runs; i++) {
